@@ -158,6 +158,13 @@ class DemoProvider(Provider):
             "tpm": self.tpm, "hourly": self.hourly, "daily": self.daily,
             "by_model": {"opus": int(tok * 0.8), "sonnet": int(tok * 0.15), "haiku": int(tok * 0.05)},
             "streak_days": 6,
+            "daily_cost": [round(d * 8e-6, 2) for d in self.daily],
+            "today": {"tokens": tok, "cost": round(sum(s["cost"] for s in ss), 2), "msgs": 412,
+                      "cache_pct": 91, "saved": 38.4},
+            "week": {"tokens": sum(self.daily[-7:]), "cost": round(sum(self.daily[-7:]) * 8e-6, 2)},
+            "tpm_now": sum(self.tpm[-5:]) // 5, "burn": 6.8, "peak_hour": 11,
+            "window": {"start": now - 9000, "resets_at": now + 2 * 3600 + 900, "tokens": 2_100_000,
+                       "cost": 14.2, "pct": 63, "est": 1},
         }
 
     def drain_events(self) -> list[dict]:

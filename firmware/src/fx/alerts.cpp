@@ -211,6 +211,7 @@ static void glow_kick() { lv_timer_resume(glow_timer); }
 // ---------------------------------------------------------------------------------------------
 // waiting card + pill
 static void pill_refresh();
+static void card_hide();
 
 static void card_render() {
   if (nq == 0) return;

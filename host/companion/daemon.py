@@ -59,7 +59,13 @@ def status_path() -> str:
 def build_providers(demo: bool):
     if demo:
         from .providers.demo import DemoProvider
-        return [DemoProvider()]
+        out = [DemoProvider()]
+        try:
+            from .providers.system import SystemProvider
+            out.append(SystemProvider())
+        except Exception:
+            log.exception("provider SystemProvider unavailable")
+        return out
     # tell providers/usage.py where the statusLine tee lives (read at import time)
     os.environ.setdefault("CLAUDIUS_RATE_LIMITS", os.path.join(state_dir(), "statusline.json"))
     out = []

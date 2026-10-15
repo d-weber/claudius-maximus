@@ -160,7 +160,7 @@ def _core_kinds(n: int) -> str:
 
 
 def _proc_name(comm: str) -> str:
-    base = comm.rsplit("/", 1)[-1]
+    base = comm.rsplit("/", 1)[-1].strip("()")
     return _ascii(base)[:20] or "?"
 
 

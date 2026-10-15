@@ -15,7 +15,8 @@ static lv_obj_t *root, *placeholder;
 static lv_obj_t *lb_host, *lb_meta;
 // cpu card
 static lv_obj_t *cpu_card, *lb_cpu, *lb_load, *lb_cores_info, *lb_thermal, *thermal_dot;
-static lv_obj_t *cpu_chart;
+static lv_obj_t *cpu_chart, *lb_scale;
+static int cpu_scale = 100;
 static lv_chart_series_t *cpu_ser;
 static lv_coord_t cpu_pts[SYS_HIST_N];
 static int n_cores = 0;
@@ -230,6 +231,7 @@ static void create(lv_obj_t *p) {
   (void)logo;
   lb_host = mk_label(root, F_SMALL, C_TEXT, 40, 11, "");
   lb_meta = mk_rlabel(root, F_SMALL, C_MUTED, 200, 11, 260, "");
+  lv_label_set_recolor(lb_meta, true);
 
   // CPU card
   cpu_card = mk_card(root, 12, 34, 456, 174);
@@ -252,6 +254,7 @@ static void create(lv_obj_t *p) {
   cpu_ser = lv_chart_add_series(cpu_chart, C_ACCENT, LV_CHART_AXIS_PRIMARY_Y);
   for (auto &v : cpu_pts) v = LV_CHART_POINT_NONE;
   lv_chart_set_ext_y_array(cpu_chart, cpu_ser, cpu_pts);
+  lb_scale = mk_label(cpu_card, &lv_font_montserrat_10, C_DIM, cx + 2, cy - 1, "100%");
   lv_obj_t *l60 = mk_label(cpu_card, &lv_font_montserrat_10, C_DIM, cx, cy + ch + 1, "-60s");
   (void)l60;
   lv_obj_t *lnow = mk_rlabel(cpu_card, &lv_font_montserrat_10, C_DIM, cx + cw - 40, cy + ch + 1, 40, "now");
@@ -356,6 +359,16 @@ static void update_cpu(JsonObjectConst sy) {
     if (i++ < skip) continue;
     int x = v | 0;
     cpu_pts[off++] = x < 0 ? 0 : (x > 100 ? 100 : x);
+  }
+  // auto-scale so an idle machine still shows texture (25 / 50 / 100 %)
+  int mx = 0;
+  for (int k = 0; k < SYS_HIST_N; k++)
+    if (cpu_pts[k] != LV_CHART_POINT_NONE && cpu_pts[k] > mx) mx = cpu_pts[k];
+  int scale = mx <= 22 ? 25 : mx <= 45 ? 50 : 100;
+  if (scale != cpu_scale) {
+    cpu_scale = scale;
+    lv_chart_set_range(cpu_chart, LV_CHART_AXIS_PRIMARY_Y, 0, scale);
+    lv_label_set_text_fmt(lb_scale, "%d%%", scale);
   }
   lv_chart_refresh(cpu_chart);
   lv_chart_set_series_color(cpu_chart, cpu_ser, lv_color_mix(load_color(cpu), C_ACCENT, 110));
@@ -556,14 +569,19 @@ static void update_header(JsonObjectConst sy) {
   if (upt > 0) fmt_uptime(up, sizeof up, upt);
   char disk[32] = "";
   JsonObjectConst d = sy["disk"];
-  if (!d.isNull()) snprintf(disk, sizeof disk, "   " LV_SYMBOL_DRIVE " %d%%", (int)(d["pct"] | 0));
+  if (!d.isNull()) {
+    int dp = d["pct"] | 0;
+    snprintf(disk, sizeof disk, dp >= 90 ? "   #E5534B " LV_SYMBOL_DRIVE " %d%%#" : "   " LV_SYMBOL_DRIVE " %d%%", dp);
+  }
   char bat[40] = "";
   JsonObjectConst b = sy["batt"];
   if (!b.isNull()) {
     int pct = b["pct"] | 0;
     const char *sym = pct > 85 ? LV_SYMBOL_BATTERY_FULL : pct > 60 ? LV_SYMBOL_BATTERY_3 : pct > 35 ? LV_SYMBOL_BATTERY_2
                     : pct > 12 ? LV_SYMBOL_BATTERY_1 : LV_SYMBOL_BATTERY_EMPTY;
-    snprintf(bat, sizeof bat, "   %s%s %d%%", (b["plug"] | 0) ? LV_SYMBOL_CHARGE " " : "", sym, pct);
+    bool plug = (b["plug"] | 0) != 0;
+    snprintf(bat, sizeof bat, (!plug && pct <= 20) ? "   #E5534B %s%s %d%%#" : "   %s%s %d%%",
+             plug ? LV_SYMBOL_CHARGE " " : "", sym, pct);
   }
   snprintf(buf, sizeof buf, "%s%s%s", up, disk, bat);
   lv_label_set_text(lb_meta, buf);

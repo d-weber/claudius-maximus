@@ -102,6 +102,30 @@ Firmware screens must read every field **defensively** (missing key ⇒ sensible
 { "t": "shot", "w": 480, "h": 480, "fmt": "rgb565le", "len": 460800 } // followed immediately by len raw bytes
 ```
 
-### `state.system` — host machine metrics (providers/system.py, owned by the "system" agent)
-Schema defined at the top of host/companion/providers/system.py. Present in both real and demo mode.
-- [from usage] added optional fields under `state.usage` (real host fills them; firmware falls back when absent; full doc at top of host/companion/providers/usage.py): `daily_cost[14]` USD/day; `today {tokens,in,out,cache_read,cache_write,cost,msgs,cache_pct,saved}`; `week {tokens,cost}`; `tpm_now` (avg tok/min last 5 min); `burn` (USD last 60 min); `peak_hour` (0-23 or -1); `best_day {tokens,cost}`; `window {start,resets_at,tokens,cost,pct,est:1}` = ESTIMATED current 5-hour block (pct relative to your biggest recent block, not a plan limit). Definition: usage "tokens" = input + cache_write + output (cache reads excluded, reported in `today.cache_read`). `by_model` keys are families (opus/fable/sonnet/haiku/other), summed over the 14 days. Please add to the spec; host-sessions: demo.py could emit these too (see usage report).
+### Device → host actions
+| action | meaning |
+|---|---|
+| `focus` + `sid` (8-char or full id) | raise the terminal/editor window running that session (host/companion/runtime_focus.py) |
+| `refresh` | host re-sends the full state now |
+
+Unknown actions are logged and ignored.
+
+## Extensions (fields added during the build; all optional, firmware falls back when absent)
+
+### Session extras
+`waiting` (why it waits, e.g. "Allow Bash: git push?"), `kind` (interactive / headless), `branch`, `perm_mode`;
+subagents also carry `cost`, `model`, `ctx_pct`. Event `tool_error` carries `error`. `totals.offline`.
+
+### `state.usage` extras (doc: top of host/companion/providers/usage.py)
+`daily_cost[14]` USD/day; `today {tokens,in,out,cache_read,cache_write,cost,msgs,cache_pct,saved}`; `week {tokens,cost}`;
+`tpm_now`; `burn` (USD last 60 min); `peak_hour`; `best_day {tokens,cost}`;
+`window {start,resets_at,tokens,cost,pct,est:1}` = ESTIMATED current 5-hour block (not a plan limit).
+`five_hour`/`seven_day` come from Claude Code's statusLine `rate_limits` (tee'd to ~/.claudius-maximus/statusline.json)
+and carry `at` (when observed). usage "tokens" = input + cache_write + output (cache reads excluded).
+
+### `state.system` — host machine metrics
+Schema at the top of host/companion/providers/system.py (cpu, cores, kinds, hist, load, mem, procs, claude, net, disk,
+uptime, batt, thermal). Present in real and demo mode.
+
+### Dev-only events (handled by firmware, ignore in production)
+`dev_ambient` {saver, dim_s, saver_s}, `dev_orbit` {flags}, `dev_settings` {scroll, log}, `usage_mode` {mode}.
