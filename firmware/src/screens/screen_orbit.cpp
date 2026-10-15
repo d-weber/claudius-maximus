@@ -10,9 +10,13 @@
 //    web pink, agent violet, error red). Prompts fly as a beam from Clawd to the planet.
 //  * Waiting planets: amber, sonar ping, amber ring. Stop = green ripple.
 //  * Tap a planet (or its label) -> detail_open(sid).
-// CPU: only small lv_objs move (no full-screen canvas). A 60 ms lv_timer (~16 fps) moves objects only when their
-// integer pixel position changes, so LVGL redraws a handful of small dirty rects. Paused when the tile is hidden,
-// when the detail overlay is open, or when the ambient night clock covers the screen.
+// CPU: only small lv_objs move. An lv_timer (~14 fps while anything is busy / animating, 4 fps when all is calm,
+// 8 fps while the backlight is dimmed) moves objects only when their integer pixel position changes. Moves bypass
+// LVGL's style/layout path and go through a small dirty-rect collector (dirty_*) that merges rects so LVGL's
+// 32-entry invalidation buffer never overflows (overflow = full-screen redraw). The static background (stars,
+// Clawd, orbit rings) is one 480x480 canvas; rings are plotted straight into its buffer (Wu circle, ~1 k px) one
+// ring per frame, restoring from a pristine copy, and only 16 sector rects around the changed ring are redrawn.
+// Paused when the tile is hidden, when the detail overlay is open, or when the ambient night clock covers the screen.
 // Frame stats are logged every 10 s while visible: {"t":"log","msg":"orbit: ..."}.
 #include "screens.h"
 #include <math.h>
@@ -27,7 +31,10 @@
 
 static const int CX = 240, CY = 226;
 static const float R_MIN = 106, R_MAX = 186;
-static const uint32_t FRAME_MS = 60;   // ~16 fps target
+static const uint32_t FRAME_MS = 70;        // ~14 fps while something moves fast
+static const uint32_t FRAME_WAIT_MS = 110;  // only a waiting planet's sonar ping animates (~9 fps)
+static const uint32_t FRAME_DIM_MS = 125;   // backlight dimmed: nobody is looking closely
+static const uint32_t FRAME_CALM_MS = 250;  // nothing busy, no fx: planets drift ~1 px / frame
 static const float TAU = 6.2831853f;
 
 enum { ST_BUSY, ST_WAIT, ST_IDLE, ST_OFF };
@@ -52,6 +59,7 @@ struct Planet {
   int lw, lh;            // label size
   int rank;
   int nm;
+  bool tag_clear;        // tag background dropped while the label crosses Clawd (never cut a hole in him)
   Moon m[OB_MAXM];
   lv_obj_t *body, *tag, *label;   // tag = plain box around the label (moving it doesn't re-layout text)
 };
@@ -61,24 +69,29 @@ struct Spark {
   float x, y, vx, vy, life, max;
   int home;            // >=0: beam homing on planet index
   float sx, sy;
-  uint8_t size;
+  uint8_t size, opa;
   int px, py;
   lv_obj_t *o;
+  lv_style_t st;       // own style: opacity fades without LVGL's per-call invalidation
 };
 
 struct Ripple {
   bool on;
   int planet;
   float t, max, r0, r1;
+  uint8_t opa;
+  int rad;
   lv_obj_t *o;
+  lv_style_t st;
 };
 
 static lv_obj_t *root, *bg, *eyes[2];
-static lv_color_t *bg_buf;          // 480x480 RGB565 canvas in PSRAM: background, stars, halo, orbit rings
-static bool bg_dirty = true;
-static uint32_t bg_last = 0;
+static lv_color_t *bg_buf;          // 480x480 RGB565 canvas in PSRAM: background, stars, Clawd, orbit rings
+static lv_color_t *base_buf;        // same without rings (restore source when a ring changes)
 struct RingSpec { int16_t r; lv_color_t c; lv_opa_t opa; };
-static RingSpec ring_spec[OB_MAXP];
+static RingSpec ring_spec[OB_MAXP]; // wanted rings (layout_rings)
+static RingSpec ring_drawn[OB_MAXP];// rings currently plotted in bg_buf (r == 0: none)
+static uint32_t frame_period = 0;
 static lv_obj_t *hdr_title, *hdr_sum, *hint, *legend_l, *legend_r;
 static Planet P[OB_MAXP];
 static Spark S[OB_MAXS];
@@ -95,7 +108,7 @@ static int ring_n = 0;
 // perf
 static void (*prev_monitor)(lv_disp_drv_t *, uint32_t, uint32_t) = nullptr;
 static bool monitor_set = false;
-static uint32_t dbg_flags = 0, pf_sun = 0, pf_pl = 0, pf_fx = 0, pf_bg = 0;
+static uint32_t dbg_flags = 0, pf_sun = 0, pf_pl = 0, pf_fx = 0, pf_bg = 0, pf_merge = 0, pf_full = 0;
 static uint32_t pf_frames = 0, pf_render = 0, pf_rmax = 0, pf_px = 0, pf_calc_us = 0, pf_ticks = 0, pf_t0 = 0;
 
 static uint32_t hash32(const char *s) {
@@ -105,6 +118,77 @@ static uint32_t hash32(const char *s) {
 }
 static float frand() { return (float)(lv_rand(0, 10000)) / 10000.0f; }
 static float clampf(float v, float a, float b) { return v < a ? a : v > b ? b : v; }
+// ------------------------------------------------------------------------------------------------ dirty rects
+// LVGL keeps 32 invalidated areas per refresh and falls back to a FULL-SCREEN redraw when they overflow. A busy
+// orbit moves ~60 small objects (old + new rect each), so animation invalidations are collected here, merged
+// (overlapping/adjacent first, then the cheapest union) and handed to LVGL once per frame as <= DZ_MAX rects.
+#define DZ_MAX 10   // leaves room for alerts glow (~12 rects) + LVGL-internal style invalidations
+static lv_area_t dz[DZ_MAX];
+static int dz_n = 0;
+static inline int32_t area_px(const lv_area_t &a) { return (int32_t)(a.x2 - a.x1 + 1) * (a.y2 - a.y1 + 1); }
+static inline lv_area_t area_union(const lv_area_t &a, const lv_area_t &b) {
+  lv_area_t u = {LV_MIN(a.x1, b.x1), LV_MIN(a.y1, b.y1), LV_MAX(a.x2, b.x2), LV_MAX(a.y2, b.y2)};
+  return u;
+}
+static void dirty_add(lv_area_t a) {
+  if (a.x2 < a.x1 || a.y2 < a.y1) return;
+  for (;;) {
+    bool merged = false;
+    for (int i = 0; i < dz_n; i++) {
+      if (_lv_area_is_in(&a, &dz[i], 0)) return;
+      lv_area_t u = area_union(a, dz[i]);
+      // cheap merge: the union costs (almost) nothing more than both rects drawn separately
+      if (area_px(u) <= area_px(a) + area_px(dz[i]) + 64) {
+        a = u;
+        dz[i] = dz[--dz_n];
+        merged = true;
+        break;
+      }
+    }
+    if (!merged) break;
+  }
+  if (dz_n == DZ_MAX) {   // full: grow the rect for which the union wastes the fewest pixels
+    int best = 0;
+    int32_t bw = INT32_MAX;
+    for (int i = 0; i < dz_n; i++) {
+      int32_t w = area_px(area_union(a, dz[i])) - area_px(dz[i]) - area_px(a);
+      if (w < bw) { bw = w; best = i; }
+    }
+    a = area_union(a, dz[best]);
+    dz[best] = dz[--dz_n];
+    pf_merge++;
+    dirty_add(a);   // the grown rect may now swallow others
+    return;
+  }
+  dz[dz_n++] = a;
+}
+static void dirty_obj(lv_obj_t *o) {
+  lv_area_t a = o->coords;
+  lv_coord_t e = _lv_obj_get_ext_draw_size(o);
+  if (e) lv_area_increase(&a, e, e);
+  dirty_add(a);
+}
+// _lv_inv_area directly: lv_obj_invalidate_area() grows every rect by 5 px per side (transformed-area slack in
+// LVGL 8.4), which turns a 5 px spark into 15x15. We clip to the visible part of the tile ourselves.
+static void dirty_flush() {
+  lv_disp_t *d = lv_obj_get_disp(root);
+  lv_area_t vis_a, scr = {0, 0, (lv_coord_t)(lv_disp_get_hor_res(d) - 1), (lv_coord_t)(lv_disp_get_ver_res(d) - 1)};
+  bool any = !lv_obj_has_flag(root, LV_OBJ_FLAG_HIDDEN) && _lv_area_intersect(&vis_a, &root->coords, &scr);
+  for (int i = 0; i < dz_n && any; i++) {
+    lv_area_t a;
+    if (_lv_area_intersect(&a, &dz[i], &vis_a)) _lv_inv_area(d, &a);
+  }
+  dz_n = 0;
+}
+// Show/hide through the collector (lv_obj_add/clear_flag(HIDDEN) invalidate on their own; our pooled fx objects
+// sit directly on `root` which has no layout, so flipping the flag is all LVGL would do besides that).
+static void vis(lv_obj_t *o, bool on) {
+  bool hidden = o->flags & LV_OBJ_FLAG_HIDDEN;
+  if (on != hidden) return;
+  dirty_obj(o);
+  if (on) o->flags &= ~LV_OBJ_FLAG_HIDDEN;
+  else o->flags |= LV_OBJ_FLAG_HIDDEN;
+}
 // add/clear HIDDEN always invalidate, even when nothing changes — only touch the flag on a real change
 static void show(lv_obj_t *o, bool on) {
   if (on == lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN)) {
@@ -156,6 +240,19 @@ static Spark *spark_alloc() {
   return best;
 }
 
+// (Re)arm a pooled spark: hidden, given size + colour without going through LVGL's style/layout path (a set_size
+// would mark the object's layout dirty and snap it back to its style position on the next refresh).
+static void spark_prep(Spark *s, uint8_t size, lv_color_t c) {
+  vis(s->o, false);
+  s->size = size;
+  s->px = s->py = -999;
+  s->o->coords.x2 = s->o->coords.x1 + size - 1;
+  s->o->coords.y2 = s->o->coords.y1 + size - 1;
+  lv_style_set_bg_color(&s->st, c);
+  lv_style_set_bg_opa(&s->st, LV_OPA_COVER);
+  s->opa = LV_OPA_COVER;
+}
+
 static void spark_burst(float x, float y, lv_color_t c, int n, float speed) {
   float ox = x - CX, oy = y - CY;
   float base = atan2f(oy, ox);
@@ -169,12 +266,7 @@ static void spark_burst(float x, float y, lv_color_t c, int n, float speed) {
     s->vx = cosf(a) * v; s->vy = sinf(a) * v;
     s->life = 0;
     s->max = 0.7f + 0.5f * frand();
-    s->size = 4 + (uint8_t)lv_rand(0, 2);
-    s->px = s->py = -999;
-    lv_obj_set_size(s->o, s->size, s->size);
-    lv_obj_set_style_bg_color(s->o, c, 0);
-    lv_obj_set_style_bg_opa(s->o, LV_OPA_COVER, 0);
-    lv_obj_add_flag(s->o, LV_OBJ_FLAG_HIDDEN);
+    spark_prep(s, 4 + (uint8_t)lv_rand(0, 2), c);
   }
 }
 
@@ -186,12 +278,7 @@ static void beam(int pi, lv_color_t c) {
   s->x = CX; s->y = CY;
   s->life = 0;
   s->max = 0.9f;
-  s->size = 7;
-  s->px = s->py = -999;
-  lv_obj_set_size(s->o, 7, 7);
-  lv_obj_set_style_bg_color(s->o, c, 0);
-  lv_obj_set_style_bg_opa(s->o, LV_OPA_COVER, 0);
-  lv_obj_add_flag(s->o, LV_OBJ_FLAG_HIDDEN);
+  spark_prep(s, 7, c);
 }
 
 static void ripple(int pi, lv_color_t c, float r1, float dur, float delay = 0) {
@@ -204,13 +291,15 @@ static void ripple(int pi, lv_color_t c, float r1, float dur, float delay = 0) {
   best->max = dur;
   best->r0 = P[pi].d * 0.5f + 2;
   best->r1 = r1;
-  lv_obj_set_style_border_color(best->o, c, 0);
-  lv_obj_add_flag(best->o, LV_OBJ_FLAG_HIDDEN);
+  best->rad = -1;
+  vis(best->o, false);
+  lv_style_set_border_color(&best->st, c);
 }
 
 static void fx_clear() {
-  for (auto &s : S) { s.on = false; lv_obj_add_flag(s.o, LV_OBJ_FLAG_HIDDEN); }
-  for (auto &r : R) { r.on = false; lv_obj_add_flag(r.o, LV_OBJ_FLAG_HIDDEN); }
+  for (auto &s : S) { s.on = false; vis(s.o, false); }
+  for (auto &r : R) { r.on = false; vis(r.o, false); }
+  dirty_flush();
 }
 
 // Move an object without touching its x/y styles: style changes mark the whole screen's layout dirty and make
@@ -222,10 +311,21 @@ static void fast_move(lv_obj_t *o, int x, int y) {
   lv_coord_t nx = root->coords.x1 + x, ny = root->coords.y1 + y;
   lv_coord_t dx = nx - o->coords.x1, dy = ny - o->coords.y1;
   if (!dx && !dy) return;
-  lv_obj_invalidate(o);
+  bool on = !(o->flags & LV_OBJ_FLAG_HIDDEN);
+  if (on) dirty_obj(o);
   lv_area_move(&o->coords, dx, dy);
-  lv_obj_move_children_by(o, dx, dy, false);
-  lv_obj_invalidate(o);
+  if (lv_obj_get_child_cnt(o)) lv_obj_move_children_by(o, dx, dy, false);
+  if (on) dirty_obj(o);
+}
+// Same for a size change of a childless fx object (ripples): set coords directly, invalidate old + new.
+static void fast_place(lv_obj_t *o, int x, int y, int w, int h) {
+  lv_area_t a = {(lv_coord_t)(root->coords.x1 + x), (lv_coord_t)(root->coords.y1 + y),
+                 (lv_coord_t)(root->coords.x1 + x + w - 1), (lv_coord_t)(root->coords.y1 + y + h - 1)};
+  if (_lv_area_is_equal(&a, &o->coords)) return;
+  bool on = !(o->flags & LV_OBJ_FLAG_HIDDEN);
+  if (on) dirty_obj(o);
+  o->coords = a;
+  if (on) dirty_obj(o);
 }
 static void move_sized(lv_obj_t *o, int x, int y, int w, int h) {
   lv_obj_set_pos(o, x, y);
@@ -284,11 +384,11 @@ static void layout_rings() {
       p.r_tgt = r0 + step * k;
       lv_color_t rc = p.st == ST_WAIT ? C_WAITING : p.st == ST_BUSY ? C_ACCENT : C_BORDER;
       lv_opa_t ro = p.st == ST_WAIT ? 120 : p.st == ST_BUSY ? 80 : p.st == ST_OFF ? 90 : 190;
-      RingSpec rs = {(int16_t)lroundf(p.r_tgt), rc, ro};
-      if (k >= ring_n || rs.r != ring_spec[k].r || rs.c.full != ring_spec[k].c.full || rs.opa != ring_spec[k].opa) { ring_spec[k] = rs; bg_dirty = true; }
+      ring_spec[k] = {(int16_t)lroundf(p.r_tgt), rc, ro};
+    } else {
+      ring_spec[k].r = 0;   // none
     }
   }
-  if (n != ring_n) bg_dirty = true;
   ring_n = n;
 }
 
@@ -305,6 +405,14 @@ static void set_text_if(lv_obj_t *l, const char *t) {
 }
 
 static void update(JsonObjectConst s) {
+  // only the sessions part (and the host link, for the empty hint) matter here; heartbeats / usage / system
+  // updates leave it unchanged (the host only re-sends a part when its content changed)
+  static uint32_t seen_v = 0xFFFFFFFF;
+  static bool seen_host = false;
+  uint32_t v = model_part_version("sessions");
+  bool host = model_host_connected();
+  if (v == seen_v && host == seen_host) return;
+  seen_v = v; seen_host = host;
   for (auto &p : P) p.seen = false;
   n_busy = n_wait = n_sub = 0;
   int count = 0;
@@ -349,6 +457,8 @@ static void update(JsonObjectConst s) {
       lv_txt_get_size(&sz, shown, F_SMALL, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
       p.lw = sz.x + 8;
       p.lh = sz.y + 2;
+      // keep the style position in sync with where fast_move put the tag (the resize triggers a layout pass)
+      lv_obj_set_pos(p.tag, p.tag->coords.x1 - root->coords.x1, p.tag->coords.y1 - root->coords.y1);
       lv_obj_set_size(p.tag, p.lw, p.lh);
       p.px = -999;
     }
@@ -379,6 +489,7 @@ static void update(JsonObjectConst s) {
       if (m.busy != busy || nm2 >= p.nm) {
         m.busy = busy;
         int md = busy ? 8 : 5;
+        lv_obj_set_pos(m.o, m.o->coords.x1 - root->coords.x1, m.o->coords.y1 - root->coords.y1);
         lv_obj_set_size(m.o, md, md);
         lv_obj_set_style_bg_opa(m.o, busy ? LV_OPA_COVER : LV_OPA_50, 0);
         m.px = -999;
@@ -458,10 +569,8 @@ static void clawd_frame() {
 // ------------------------------------------------------------------------------------------------ frame
 // Static layers are baked into one opaque canvas: redrawing a dirty rect then is a plain blit instead of
 // re-evaluating big anti-aliased circle masks (8 ring borders cost ~1 us/px as objects).
-static void bg_redraw() {
-  bg_dirty = false;
-  bg_last = millis();
-  if (!bg) return;
+// Stars + Clawd are drawn once (base_buf); rings are plotted on top by ring_plot() and re-synced one per frame.
+static void bg_base_draw() {
   lv_canvas_fill_bg(bg, C_BG, LV_OPA_COVER);
   lv_draw_rect_dsc_t rd;
   lv_draw_rect_dsc_init(&rd);
@@ -487,29 +596,94 @@ static void bg_redraw() {
     for (int c = 0; c < CLAWD_W; c++)
       if (CLAWD[r][c] == '#' || CLAWD[r][c] == 'o')
         lv_canvas_draw_rect(bg, CLAWD_X + c * PX, CLAWD_Y + r * PY, PX, PY, &rd);
-  lv_draw_arc_dsc_t ad;
-  lv_draw_arc_dsc_init(&ad);
-  ad.width = 1;
-  for (int k = 0; k < ring_n; k++) {
-    ad.color = ring_spec[k].c;
-    ad.opa = ring_spec[k].opa;
-    lv_canvas_draw_arc(bg, CX, CY, ring_spec[k].r, 0, 360, &ad);
+  if (base_buf) memcpy(base_buf, bg_buf, 480 * 480 * sizeof(lv_color_t));
+}
+
+// Anti-aliased 1 px circle (Wu), 8-way symmetric, blended over base_buf so re-plotting is idempotent.
+// erase=true restores the base pixels the same ring covered. ~1.2 k px for r=186: a few hundred us.
+static inline void ring_px(int x, int y, lv_color_t c, uint32_t a, bool erase) {
+  if ((unsigned)x >= 480 || (unsigned)y >= 480) return;
+  int i = y * 480 + x;
+  bg_buf[i] = erase ? base_buf[i] : lv_color_mix(c, base_buf[i], (lv_opa_t)a);
+}
+static void ring_plot(const RingSpec &rs, bool erase) {
+  int r = rs.r;
+  if (r <= 0 || !base_buf) return;
+  for (int x = 0;; x++) {
+    float yf = sqrtf((float)(r * r - x * x));
+    if (x > yf + 1) break;
+    int y0 = (int)yf;
+    float f = yf - y0;
+    uint32_t a0 = (uint32_t)(rs.opa * (1.f - f)), a1 = (uint32_t)(rs.opa * f);
+    const int pts[2][2] = {{x, y0}, {x, y0 + 1}};
+    const uint32_t as[2] = {a0, a1};
+    for (int k = 0; k < 2; k++) {
+      int u = pts[k][0], v = pts[k][1];
+      uint32_t a = as[k];
+      ring_px(CX + u, CY + v, rs.c, a, erase); ring_px(CX - u, CY + v, rs.c, a, erase);
+      ring_px(CX + u, CY - v, rs.c, a, erase); ring_px(CX - u, CY - v, rs.c, a, erase);
+      ring_px(CX + v, CY + u, rs.c, a, erase); ring_px(CX - v, CY + u, rs.c, a, erase);
+      ring_px(CX + v, CY - u, rs.c, a, erase); ring_px(CX - v, CY - u, rs.c, a, erase);
+    }
   }
+}
+// Invalidate the annulus [r0, r1] as 16 sector rects (~25-35 k px for a ring) instead of the whole canvas.
+static void ring_dirty(int r0, int r1) {
+  r0 -= 2; r1 += 2;
+  if (r0 < 0) r0 = 0;
+  for (int i = 0; i < 16; i++) {
+    float a0 = i * TAU / 16, a1 = (i + 1) * TAU / 16;
+    float c0 = cosf(a0), s0 = sinf(a0), c1 = cosf(a1), s1 = sinf(a1);
+    float xs[4] = {r0 * c0, r1 * c0, r0 * c1, r1 * c1}, ys[4] = {r0 * s0, r1 * s0, r0 * s1, r1 * s1};
+    float x1 = xs[0], x2 = xs[0], y1 = ys[0], y2 = ys[0];
+    for (int k = 1; k < 4; k++) {
+      x1 = fminf(x1, xs[k]); x2 = fmaxf(x2, xs[k]);
+      y1 = fminf(y1, ys[k]); y2 = fmaxf(y2, ys[k]);
+    }
+    lv_area_t a = {(lv_coord_t)(bg->coords.x1 + CX + (int)floorf(x1) - 1), (lv_coord_t)(bg->coords.y1 + CY + (int)floorf(y1) - 1),
+                   (lv_coord_t)(bg->coords.x1 + CX + (int)ceilf(x2) + 1), (lv_coord_t)(bg->coords.y1 + CY + (int)ceilf(y2) + 1)};
+    dirty_add(a);
+  }
+}
+static bool ring_same(const RingSpec &a, const RingSpec &b) {
+  return a.r == b.r && (a.r == 0 || (a.c.full == b.c.full && a.opa == b.opa));
+}
+// Bring at most one ring of bg_buf in line with ring_spec[]. Returns true if something changed.
+static bool rings_sync() {
+  if (!bg || !base_buf) return false;
+  for (int k = 0; k < OB_MAXP; k++) {
+    if (ring_same(ring_drawn[k], ring_spec[k])) continue;
+    RingSpec old = ring_drawn[k];
+    if (old.r) ring_plot(old, true);
+    ring_drawn[k] = ring_spec[k];
+    // re-plot neighbours whose pixels the erase may have touched, then the new ring
+    for (int j = 0; j < OB_MAXP; j++)
+      if (j != k && ring_drawn[j].r && old.r && abs(ring_drawn[j].r - old.r) <= 2) ring_plot(ring_drawn[j], false);
+    if (ring_spec[k].r) ring_plot(ring_spec[k], false);
+    int rn = ring_spec[k].r;
+    if (!old.r) ring_dirty(rn, rn);
+    else if (!rn) ring_dirty(old.r, old.r);
+    else if (abs(rn - old.r) <= 6) ring_dirty(LV_MIN(rn, old.r), LV_MAX(rn, old.r));
+    else { ring_dirty(old.r, old.r); ring_dirty(rn, rn); }
+    return true;
+  }
+  return false;
 }
 
 static void frame_cb(lv_timer_t *) {
   uint32_t now = millis();
-  float dt = clampf((now - last_ms) / 1000.f, 0, 0.2f);
+  float dt = clampf((now - last_ms) / 1000.f, 0, 0.35f);
   last_ms = now;
   if (!visible || detail_is_open() || ambient_saver_active()) return;
   uint32_t t0 = micros();
-  if (bg_dirty && now - bg_last > 800) { bg_redraw(); pf_bg++; }
+  if (rings_sync()) pf_bg++;
 
   uint32_t ts0 = micros();
   if (!(dbg_flags & 1)) clawd_frame();
   uint32_t ts1 = micros();
   pf_sun += ts1 - ts0;
 
+  bool settling = false;
   float ping = fmodf(now / 1600.f, 1.f);   // sonar phase for waiting planets
   for (int i = 0; i < OB_MAXP; i++) {
     Planet &p = P[i];
@@ -521,33 +695,45 @@ static void frame_cb(lv_timer_t *) {
     p.ang = fmodf(p.ang + p.omega * dt, TAU);
     p.r += (p.r_tgt - p.r) * fminf(1, dt * 2.5f);
     p.d += (p.d_tgt - p.d) * fminf(1, dt * 3.f);
-    p.heat *= expf(-dt / 6.f);
+    if (p.heat > 0.01f) p.heat *= expf(-dt / 6.f);
+    if (fabsf(p.r - p.r_tgt) > 0.5f || fabsf(p.d - p.d_tgt) > 0.5f) settling = true;
 
-    float x = CX + p.r * cosf(p.ang), y = CY + p.r * sinf(p.ang);
+    float ca = cosf(p.ang), sa = sinf(p.ang);
+    float x = CX + p.r * ca, y = CY + p.r * sa;
     int ix = (int)lroundf(x), iy = (int)lroundf(y), id = (int)lroundf(p.d);
     if (ix != p.px || iy != p.py || id != p.pd) {
       if (id != p.pd) {
+        dirty_obj(p.body);
         move_sized(p.body, ix - id / 2, iy - id / 2, id, id);
         lv_obj_set_ext_click_area(p.body, id < 44 ? (44 - id) / 2 : 0);
       } else {
         fast_move(p.body, ix - id / 2, iy - id / 2);
       }
-      if (abs(ix - p.tx) >= 2 || abs(iy - p.ty) >= 2 || id != p.pd || p.px < -100) {
+      // labels are the costliest thing to redraw (text + the canvas under the old rect): 3 px hysteresis
+      if (abs(ix - p.tx) >= 3 || abs(iy - p.ty) >= 3 || id != p.pd || p.px < -100) {
         int lx = (int)clampf(ix - p.lw / 2, 14, 466 - p.lw);
         int ly = (int)fminf(iy + id / 2 + 6, 450 - p.lh);
         fast_move(p.tag, lx, ly);
         p.tx = ix; p.ty = iy;
+        bool over = lx < CLAWD_X + CLAWD_W * PX && lx + p.lw > CLAWD_X && ly < CLAWD_Y + CLAWD_H * PY && ly + p.lh > CLAWD_Y;
+        if (over != p.tag_clear) {
+          p.tag_clear = over;
+          lv_obj_set_style_bg_opa(p.tag, over ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+        }
       }
       p.px = ix; p.py = iy; p.pd = id;
     }
     // glow
     if (p.st == ST_WAIT) {
-      lv_obj_set_style_outline_width(p.body, 2, 0);
-      lv_obj_set_style_outline_pad(p.body, (lv_coord_t)(2 + ping * 14), 0);
-      lv_obj_set_style_outline_opa(p.body, (lv_opa_t)(220 * (1 - ping)), 0);
+      lv_coord_t pad = (lv_coord_t)(2 + ping * 14);
+      if (pad != lv_obj_get_style_outline_pad(p.body, 0)) {
+        lv_obj_set_style_outline_width(p.body, 2, 0);
+        lv_obj_set_style_outline_pad(p.body, pad, 0);
+        lv_obj_set_style_outline_opa(p.body, (lv_opa_t)(220 * (1 - ping)), 0);
+      }
     } else if (p.st == ST_BUSY) {
       lv_opa_t o = (lv_opa_t)(50 + 110 * fminf(p.heat, 1.f));
-      if (abs((int)lv_obj_get_style_outline_opa(p.body, 0) - o) > 6) {
+      if (abs((int)lv_obj_get_style_outline_opa(p.body, 0) - o) > 12) {
         lv_obj_set_style_outline_width(p.body, 3, 0);
         lv_obj_set_style_outline_pad(p.body, 3, 0);
         lv_obj_set_style_outline_opa(p.body, o, 0);
@@ -570,58 +756,79 @@ static void frame_cb(lv_timer_t *) {
   pf_pl += ts2 - ts1;
   if (dbg_flags & 8) {
     static uint32_t dump_ms = 0;
-    lv_disp_t *dd = lv_disp_get_default();
-    if (now - dump_ms > 2000 && dd) {
+    if (now - dump_ms > 2000) {
       dump_ms = now;
       char b[400];
       int n = 0;
-      for (int k = 0; k < dd->inv_p && n < 380; k++) {
-        const lv_area_t &ar = dd->inv_areas[k];
-        n += snprintf(b + n, sizeof b - n, "%s%d,%d %dx%d", dd->inv_area_joined[k] ? "j" : "", ar.x1, ar.y1,
-                      lv_area_get_width(&ar), lv_area_get_height(&ar));
+      for (int k = 0; k < dz_n && n < 380; k++) {
+        const lv_area_t &ar = dz[k];
+        n += snprintf(b + n, sizeof b - n, "%d,%d %dx%d", ar.x1, ar.y1, lv_area_get_width(&ar), lv_area_get_height(&ar));
         if (n < 380) b[n++] = ';';
       }
       b[n] = 0;
-      Serial.printf("{\"t\":\"log\",\"msg\":\"inv %d: %s\"}\n", dd->inv_p, b);
+      Serial.printf("{\"t\":\"log\",\"msg\":\"dz %d: %s\"}\n", dz_n, b);
     }
   }
 
   // sparks
+  bool fx_live = false;
   for (auto &s : S) {
     if (!s.on) continue;
     s.life += dt;
-    if (s.life >= s.max) { s.on = false; lv_obj_add_flag(s.o, LV_OBJ_FLAG_HIDDEN); continue; }
+    if (s.life >= s.max) { s.on = false; vis(s.o, false); continue; }
+    fx_live = true;
     float k = s.life / s.max;
+    float o;
     if (s.home >= 0) {
-      if (!P[s.home].used) { s.on = false; lv_obj_add_flag(s.o, LV_OBJ_FLAG_HIDDEN); continue; }
+      if (!P[s.home].used) { s.on = false; vis(s.o, false); continue; }
       float e = k * k * (3 - 2 * k);
       s.x = s.sx + (P[s.home].px - s.sx) * e;
       s.y = s.sy + (P[s.home].py - s.sy) * e;
-      lv_obj_set_style_bg_opa(s.o, (lv_opa_t)(255 * (k < 0.85f ? 1 : (1 - k) / 0.15f)), 0);
+      o = 255 * (k < 0.85f ? 1 : (1 - k) / 0.15f);
     } else {
+      float damp = powf(0.96f, dt * 16.f);   // was 0.96 per 60 ms tick
       s.x += s.vx * dt;
       s.y += s.vy * dt;
-      s.vx *= 0.96f; s.vy *= 0.96f;
-      lv_obj_set_style_bg_opa(s.o, (lv_opa_t)(255 * (1 - k * k)), 0);
+      s.vx *= damp; s.vy *= damp;
+      o = 255 * (1 - k * k);
+    }
+    uint8_t q = (uint8_t)(((int)o + 8) & ~15);   // 16 opacity steps: fewer style-only invalidations
+    if (q != s.opa) {
+      s.opa = q;
+      lv_style_set_bg_opa(&s.st, q);
+      if (!(s.o->flags & LV_OBJ_FLAG_HIDDEN)) dirty_obj(s.o);
     }
     int ix = (int)s.x - s.size / 2, iy = (int)s.y - s.size / 2;
     if (ix != s.px || iy != s.py) { fast_move(s.o, ix, iy); s.px = ix; s.py = iy; }
-    show(s.o, true);
+    vis(s.o, true);
   }
   // ripples
   for (auto &r : R) {
     if (!r.on) continue;
     r.t += dt;
+    fx_live = true;
     if (r.t < 0) continue;
-    if (r.t >= r.max || !P[r.planet].used) { r.on = false; lv_obj_add_flag(r.o, LV_OBJ_FLAG_HIDDEN); continue; }
+    if (r.t >= r.max || !P[r.planet].used) { r.on = false; vis(r.o, false); continue; }
     float k = r.t / r.max;
     float e = 1 - (1 - k) * (1 - k);
     int rad = (int)(r.r0 + (r.r1 - r.r0) * e);
     Planet &p = P[r.planet];
-    move_sized(r.o, p.px - rad, p.py - rad, rad * 2, rad * 2);
-    lv_obj_set_style_border_opa(r.o, (lv_opa_t)(230 * (1 - k)), 0);
-    show(r.o, true);
+    uint8_t q = (uint8_t)(230 * (1 - k)) & ~7;
+    if (q != r.opa) {
+      r.opa = q;
+      lv_style_set_border_opa(&r.st, q);
+      if (!(r.o->flags & LV_OBJ_FLAG_HIDDEN)) dirty_obj(r.o);
+    }
+    fast_place(r.o, p.px - rad, p.py - rad, rad * 2, rad * 2);
+    vis(r.o, true);
   }
+  dirty_flush();
+
+  // frame rate: fast only while something moves fast or animates
+  uint32_t want = FRAME_CALM_MS;
+  if (n_busy || fx_live || settling || n_sub) want = ambient_dimmed() ? FRAME_DIM_MS : FRAME_MS;
+  else if (n_wait) want = FRAME_WAIT_MS;
+  if (want != frame_period) { frame_period = want; lv_timer_set_period(timer, want); }
 
   pf_fx += micros() - ts2;
   pf_calc_us += micros() - t0;
@@ -629,14 +836,14 @@ static void frame_cb(lv_timer_t *) {
   if (now - pf_t0 >= 5000) {
     if (pf_t0 && pf_frames)
       Serial.printf("{\"t\":\"log\",\"msg\":\"orbit[%x]: %.1f fps, render avg %u ms max %u ms, %u px/frame, "
-                    "calc %u us (clawd %u pl %u fx %u) bg %u\"}\n", (unsigned)dbg_flags,
+                    "calc %u us (clawd %u pl %u fx %u) rings %u merges %u full %u period %u\"}\n", (unsigned)dbg_flags,
                     pf_frames * 1000.f / (now - pf_t0), (unsigned)(pf_render / pf_frames), (unsigned)pf_rmax,
                     (unsigned)(pf_px / pf_frames), (unsigned)(pf_ticks ? pf_calc_us / pf_ticks : 0),
                     (unsigned)(pf_sun / pf_ticks), (unsigned)(pf_pl / pf_ticks), (unsigned)(pf_fx / pf_ticks),
-                    (unsigned)pf_bg);
+                    (unsigned)pf_bg, (unsigned)pf_merge, (unsigned)pf_full, (unsigned)frame_period);
     pf_t0 = now;
     pf_frames = pf_render = pf_rmax = pf_px = pf_calc_us = pf_ticks = 0;
-    pf_sun = pf_pl = pf_fx = pf_bg = 0;
+    pf_sun = pf_pl = pf_fx = pf_bg = pf_merge = pf_full = 0;
   }
 }
 
@@ -645,6 +852,7 @@ static void monitor_cb(lv_disp_drv_t *d, uint32_t ms, uint32_t px) {
   pf_render += ms;
   if (ms > pf_rmax) pf_rmax = ms;
   pf_px += px;
+  if (px >= 480 * 470) pf_full++;
   if (prev_monitor) prev_monitor(d, ms, px);
 }
 
@@ -655,7 +863,7 @@ static void on_event(JsonObjectConst ev) {
     dbg_flags = ev["flags"] | 0;
     pf_t0 = millis();
     pf_frames = pf_render = pf_rmax = pf_px = pf_calc_us = pf_ticks = 0;
-    pf_sun = pf_pl = pf_fx = pf_bg = 0;
+    pf_sun = pf_pl = pf_fx = pf_bg = pf_merge = 0;
     return;
   }
   if (!visible || (dbg_flags & 4)) return;
@@ -703,6 +911,8 @@ static void on_show(bool v) {
   if (v) {
     last_ms = millis();
     pf_t0 = 0;
+    frame_period = FRAME_MS;
+    lv_timer_set_period(timer, FRAME_MS);
     lv_timer_resume(timer);
     if (disp && !monitor_set) {
       prev_monitor = disp->driver->monitor_cb;
@@ -727,6 +937,7 @@ static void create(lv_obj_t *parent) {
   lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 
   bg_buf = (lv_color_t *)heap_caps_malloc(480 * 480 * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+  base_buf = bg_buf ? (lv_color_t *)heap_caps_malloc(480 * 480 * sizeof(lv_color_t), MALLOC_CAP_SPIRAM) : nullptr;
   if (bg_buf) {
     bg = lv_canvas_create(root);
     lv_canvas_set_buffer(bg, bg_buf, 480, 480, LV_IMG_CF_TRUE_COLOR);
@@ -735,7 +946,7 @@ static void create(lv_obj_t *parent) {
   } else {
     bg = nullptr;
   }
-  bg_redraw();
+  if (bg) bg_base_draw();   // once, at boot (~100 ms); rings are added incrementally by rings_sync()
 
   for (auto &e : eyes) {
     e = lv_obj_create(root);
@@ -769,9 +980,10 @@ static void create(lv_obj_t *parent) {
     Planet &p = P[i];
     p.tag = lv_obj_create(root);
     lv_obj_remove_style_all(p.tag);
+    // opaque square C_BG box (was 70 % + radius 4): looks the same on the C_BG canvas, keeps the top name legible
+    // when two planets line up, and is a plain fill instead of a blended, corner-masked rect on every move
     lv_obj_set_style_bg_color(p.tag, C_BG, 0);
-    lv_obj_set_style_bg_opa(p.tag, LV_OPA_70, 0);
-    lv_obj_set_style_radius(p.tag, 4, 0);
+    lv_obj_set_style_bg_opa(p.tag, LV_OPA_COVER, 0);
     lv_obj_add_flag(p.tag, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(p.tag, LV_OBJ_FLAG_SCROLL_ON_FOCUS | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(p.tag, click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
@@ -784,14 +996,25 @@ static void create(lv_obj_t *parent) {
   for (auto &r : R) {
     r.o = lv_obj_create(root);
     lv_obj_remove_style_all(r.o);
-    lv_obj_set_style_radius(r.o, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_width(r.o, 2, 0);
+    lv_style_init(&r.st);
+    lv_style_set_radius(&r.st, LV_RADIUS_CIRCLE);
+    lv_style_set_border_width(&r.st, 2);
+    lv_style_set_border_opa(&r.st, LV_OPA_COVER);
+    lv_style_set_border_color(&r.st, C_ACCENT);
+    lv_obj_add_style(r.o, &r.st, 0);
     lv_obj_clear_flag(r.o, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(r.o, LV_OBJ_FLAG_HIDDEN);
     r.on = false;
   }
   for (auto &s : S) {
     s.o = circle(root, 5, C_ACCENT2, LV_OPA_COVER);
+    lv_style_init(&s.st);
+    lv_style_set_bg_color(&s.st, C_ACCENT2);
+    lv_style_set_bg_opa(&s.st, LV_OPA_COVER);
+    lv_obj_add_style(s.o, &s.st, 0);   // local props would win over it: drop the ones circle() set
+    lv_obj_remove_local_style_prop(s.o, LV_STYLE_BG_COLOR, 0);
+    lv_obj_remove_local_style_prop(s.o, LV_STYLE_BG_OPA, 0);
+    s.opa = LV_OPA_COVER;
     lv_obj_add_flag(s.o, LV_OBJ_FLAG_HIDDEN);
     s.on = false;
   }

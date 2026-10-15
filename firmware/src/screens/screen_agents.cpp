@@ -6,8 +6,11 @@
 //   3 sessions  -> one wide card (most urgent) + two tiles
 //   4 sessions  -> 2x2 tiles
 //   5+          -> compact rows, vertical scroll
-// Sessions are sorted: waiting (needs the human) first, then busy, idle, offline; host order within.
+// Sessions are sorted: waiting (needs the human) first, then busy, idle, offline; within a status the
+// on-screen order is kept (new sessions go last, in host order) so cards don't jump on every tool call.
 // Status is carried by an accent strip (busy pulses slowly, waiting pulses fast + amber frame).
+// Perf: update() is skipped when the "sessions" part is unchanged; only widgets whose value changed are
+// touched (guarded style setters); pulses are one ~11 Hz timer that only redraws the thin strips.
 #include "screens.h"
 #include "../ui/theme.h"
 #include "../core/model.h"
@@ -67,6 +70,28 @@ static void show(lv_obj_t *o, bool on) {
   if (on == !lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN)) return;
   if (on) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
   else lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Style setters that skip the write when the local value is already the same. lv_obj_set_style_*()
+// always invalidates the object (and may relayout), even when nothing changes -- the main source of
+// redraw cost on this screen before the perf round.
+static void sp_col(lv_obj_t *o, lv_style_prop_t p, lv_color_t c, lv_style_selector_t sel = 0) {
+  lv_style_value_t cur;
+  if (lv_obj_get_local_style_prop(o, p, &cur, sel) == LV_STYLE_RES_FOUND && cur.color.full == c.full) return;
+  lv_style_value_t v;
+  v.num = 0;
+  v.color = c;
+  lv_obj_set_local_style_prop(o, p, v, sel);
+}
+static void sp_num(lv_obj_t *o, lv_style_prop_t p, int32_t n, lv_style_selector_t sel = 0) {
+  lv_style_value_t cur;
+  if (lv_obj_get_local_style_prop(o, p, &cur, sel) == LV_STYLE_RES_FOUND && cur.num == n) return;
+  lv_style_value_t v;
+  v.num = n;
+  lv_obj_set_local_style_prop(o, p, v, sel);
+}
+static void set_long_mode(lv_obj_t *l, lv_label_long_mode_t m) {
+  if (lv_label_get_long_mode(l) != m) lv_label_set_long_mode(l, m);
 }
 
 static int status_rank(const char *s) {
@@ -134,25 +159,36 @@ static ToolInfo tool_info(const char *tool) {
 }
 
 // ---------------------------------------------------------------- pulse animation
-static void anim_opa_cb(void *o, int32_t v) { lv_obj_set_style_bg_opa((lv_obj_t *)o, (lv_opa_t)v, 0); }
-static void anim_text_opa_cb(void *o, int32_t v) { lv_obj_set_style_opa((lv_obj_t *)o, (lv_opa_t)v, 0); }
+// One shared timer steps every pulsing strip at ~11 Hz (instead of one lv_anim per card at full refresh
+// rate). Only the thin strip is invalidated; the opacity is quantized so tiny steps don't redraw.
+#define AG_PULSE_MS 90
+static lv_timer_t *pulse_timer;
+static void anim_text_opa_cb(void *o, int32_t v) { lv_obj_set_style_text_opa((lv_obj_t *)o, (lv_opa_t)v, 0); }
+
+static void pulse_cb(lv_timer_t *) {
+  uint32_t t = lv_tick_get();
+  bool any = false;
+  for (int i = 0; i < n_shown && i < n_created; i++) {
+    Card &c = cards[i];
+    if (c.pulse <= 0) continue;
+    any = true;
+    uint32_t period = c.pulse == 2 ? 900 : 2200;
+    int lo = c.pulse == 2 ? 40 : 80;
+    uint32_t ph = t % period;
+    int32_t tri = ph < period / 2 ? (int32_t)(ph * 512 / period) : (int32_t)((period - ph) * 512 / period);  // 0..256
+    tri = (tri * tri * (768 - 2 * tri)) >> 16;  // smoothstep 0..256
+    int opa = 255 - (255 - lo) * tri / 256;
+    opa &= c.pulse == 2 ? ~7 : ~15;  // busy pulse is slow: coarser steps, fewer redraws
+    sp_num(c.strip, LV_STYLE_BG_OPA, opa);
+  }
+  if (!any) lv_timer_pause(pulse_timer);
+}
 
 static void set_pulse(Card &c, int8_t mode) {
   if (c.pulse == mode) return;
   c.pulse = mode;
-  lv_anim_del(c.strip, anim_opa_cb);
-  lv_obj_set_style_bg_opa(c.strip, LV_OPA_COVER, 0);
-  if (mode == 0) return;
-  lv_anim_t a;
-  lv_anim_init(&a);
-  lv_anim_set_var(&a, c.strip);
-  lv_anim_set_exec_cb(&a, anim_opa_cb);
-  lv_anim_set_values(&a, 255, mode == 2 ? 40 : 80);
-  lv_anim_set_time(&a, mode == 2 ? 450 : 1100);
-  lv_anim_set_playback_time(&a, mode == 2 ? 450 : 1100);
-  lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-  lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
-  lv_anim_start(&a);
+  if (mode <= 0) sp_num(c.strip, LV_STYLE_BG_OPA, LV_OPA_COVER);
+  else if (visible) lv_timer_resume(pulse_timer);
 }
 
 static void flash(lv_obj_t *o, int32_t from, uint32_t ms) {
@@ -427,7 +463,7 @@ static void card_status_text(Card &c) {
   set_text(c.status, buf);
 }
 
-static void card_fill(Card &c, JsonObjectConst s) {
+static void card_fill(Card &c, JsonObjectConst s, bool fresh) {
   const char *sid = s["id"] | "";
   const char *st = s["status"] | "offline";
   bool new_sid = strcmp(c.sid, sid) != 0;
@@ -441,18 +477,20 @@ static void card_fill(Card &c, JsonObjectConst s) {
   char buf[200], tmp[160];
 
   if (new_sid || st_changed) {
-    lv_obj_set_style_bg_color(c.strip, col, 0);
-    lv_obj_set_style_border_width(c.obj, waiting ? 2 : 0, 0);
-    lv_obj_set_style_border_color(c.obj, C_WAITING, 0);
-    lv_obj_set_style_bg_color(c.obj, waiting ? lv_color_mix(C_WAITING, C_SURFACE, 28) : C_SURFACE, 0);
-    lv_obj_set_style_text_color(c.name, offline ? C_MUTED : C_TEXT, 0);
-    lv_obj_set_style_text_color(c.icon, offline ? C_DIM : col, 0);
-    lv_obj_set_style_text_color(c.act, (idle || offline) ? C_MUTED : C_TEXT, 0);
-    lv_obj_set_style_bg_color(c.todo_bar, offline ? C_DIM : col, LV_PART_INDICATOR);
+    sp_col(c.strip, LV_STYLE_BG_COLOR, col);
+    sp_num(c.obj, LV_STYLE_BORDER_WIDTH, waiting ? 2 : 0);
+    sp_col(c.obj, LV_STYLE_BORDER_COLOR, C_WAITING);
+    sp_col(c.obj, LV_STYLE_BG_COLOR, waiting ? lv_color_mix(C_WAITING, C_SURFACE, 28) : C_SURFACE);
+    sp_col(c.name, LV_STYLE_TEXT_COLOR, offline ? C_MUTED : C_TEXT);
+    sp_col(c.icon, LV_STYLE_TEXT_COLOR, offline ? C_DIM : col);
+    sp_col(c.act, LV_STYLE_TEXT_COLOR, (idle || offline) ? C_MUTED : C_TEXT);
+    sp_col(c.todo_bar, LV_STYLE_BG_COLOR, offline ? C_DIM : col, LV_PART_INDICATOR);
     if (!new_sid) flash(c.icon, 40, 500);
   }
   if (visible) set_pulse(c, waiting ? 2 : (!strcmp(st, "busy") ? 1 : 0));
-  if (new_sid) flash(c.obj, 60, 300);
+  // A session that just appeared fades its name in (text opacity only: no layer, small area).
+  // Reorders/relayouts re-bind cards without fading.
+  if (new_sid && fresh) flash(c.name, 60, 300);
 
   // name / title
   const char *name = s["name"] | "";
@@ -550,7 +588,7 @@ static void card_fill(Card &c, JsonObjectConst s) {
     lv_obj_set_width(c.pips, (npip > 5 ? 5 : npip) * 14);
     lv_obj_set_x(c.pip_lbl, 30 + (any_sub ? (npip > 5 ? 5 : npip) * 14 + 4 : 0));
     if (any_sub) {
-      lv_obj_set_style_text_color(c.pip_lbl, C_SUBAGENT, 0);
+      sp_col(c.pip_lbl, LV_STYLE_TEXT_COLOR, C_SUBAGENT);
       if (nb) snprintf(buf, sizeof(buf), "%d helper%s working", nb, nb == 1 ? "" : "s");
       else snprintf(buf, sizeof(buf), "%d helper%s finished", nd, nd == 1 ? "" : "s");
       set_text(c.pip_lbl, buf);
@@ -568,8 +606,8 @@ static void card_fill(Card &c, JsonObjectConst s) {
           else
             snprintf(buf, sizeof(buf), "#5E5A54 " LV_SYMBOL_OK "#  #9C978E %s#", tmp);
           show(c.sub[i], true);
-          lv_obj_set_style_text_color(c.sub[i], C_TEXT, 0);
-          lv_label_set_long_mode(c.sub[i], LV_LABEL_LONG_DOT);
+          sp_col(c.sub[i], LV_STYLE_TEXT_COLOR, C_TEXT);
+          set_long_mode(c.sub[i], LV_LABEL_LONG_DOT);
           lv_obj_set_height(c.sub[i], lv_font_get_line_height(F16));
           set_text(c.sub[i], buf);
           i++;
@@ -577,14 +615,14 @@ static void card_fill(Card &c, JsonObjectConst s) {
       for (; i < 3; i++) show(c.sub[i], false);
     } else {
       // no helpers: show the last prompt instead
-      lv_obj_set_style_text_color(c.pip_lbl, C_DIM, 0);
+      sp_col(c.pip_lbl, LV_STYLE_TEXT_COLOR, C_DIM);
       set_text(c.pip_lbl, "LAST PROMPT");
       const char *lp = s["last_prompt"] | "";
       sanitize(tmp, sizeof(tmp), lp);
       snprintf(buf, sizeof(buf), "%s", *tmp ? tmp : "-");
-      lv_obj_set_style_text_color(c.sub[0], C_MUTED, 0);  // recolor doesn't survive line wraps
+      sp_col(c.sub[0], LV_STYLE_TEXT_COLOR, C_MUTED);  // recolor doesn't survive line wraps
       show(c.sub[0], true);
-      lv_label_set_long_mode(c.sub[0], LV_LABEL_LONG_DOT);
+      set_long_mode(c.sub[0], LV_LABEL_LONG_DOT);
       lv_obj_set_height(c.sub[0], LINES(F16, 3));
       set_text(c.sub[0], buf);
       show(c.sub[1], false);
@@ -615,12 +653,12 @@ static void card_fill(Card &c, JsonObjectConst s) {
     if (ctx >= 0) {
       if (ctx > 100) ctx = 100;
       lv_color_t cc = ctx >= 85 ? C_ERROR : C_INFO;
-      lv_obj_set_style_bg_color(c.ctx_bar, cc, LV_PART_INDICATOR);
+      sp_col(c.ctx_bar, LV_STYLE_BG_COLOR, cc, LV_PART_INDICATOR);
       lv_bar_set_value(c.ctx_bar, ctx, new_sid ? LV_ANIM_OFF : LV_ANIM_ON);
       if (v == V_TILE) snprintf(buf, sizeof(buf), "%d%%", ctx);
       else snprintf(buf, sizeof(buf), "ctx %d%%", ctx);
       set_text(c.ctx_lbl, buf);
-      lv_obj_set_style_text_color(c.ctx_lbl, ctx >= 85 ? C_ERROR : C_MUTED, 0);
+      sp_col(c.ctx_lbl, LV_STYLE_TEXT_COLOR, ctx >= 85 ? C_ERROR : C_MUTED);
     }
   }
 }
@@ -661,7 +699,7 @@ static void apply_layout(int n) {
 static void set_empty(const char *icon, const char *l1, const char *l2, lv_color_t col) {
   show(empty_box, true);
   set_text(empty_icon, icon);
-  lv_obj_set_style_text_color(empty_icon, col, 0);
+  sp_col(empty_icon, LV_STYLE_TEXT_COLOR, col);
   set_text(empty_l1, l1);
   set_text(empty_l2, l2);
 }
@@ -688,21 +726,41 @@ static void header_summary(JsonArrayConst ss, bool connected) {
   set_text(hdr_sum, buf);
 }
 
+static uint32_t seen_sessions_ver;
+static bool seen_valid = false, seen_connected;
+
 static void update(JsonObjectConst state) {
   bool connected = model_host_connected();
   was_connected = connected;
+  // Skip entirely when the sessions part did not change (the host re-sends a part only when its content
+  // changed); time-in-status labels are refreshed by the 1 s tick.
+  uint32_t sv = model_part_version("sessions");
+  if (seen_valid && sv && sv == seen_sessions_ver && connected == seen_connected) return;
+  seen_valid = true;
+  seen_sessions_ver = sv;
+  seen_connected = connected;
   JsonArrayConst ss = state["sessions"];
   header_summary(ss, connected);
-  lv_obj_set_style_opa(list, connected ? LV_OPA_COVER : LV_OPA_50, 0);
+  sp_num(list, LV_STYLE_OPA, connected ? LV_OPA_COVER : LV_OPA_50);
 
-  // sort: waiting, busy, idle, offline (stable)
+  // sort: waiting, busy, idle, offline. Within a status, keep the order the cards already have on screen
+  // (the host re-sorts by recency on every tool call; following that would re-bind -- and fully redraw --
+  // two cards per tool call and make them jump around). New sessions go after known ones, in host order.
   JsonObjectConst sorted[AG_MAX_CARDS];
-  int n = 0;
-  for (int rank = 0; rank < 4 && n < AG_MAX_CARDS; rank++)
-    for (JsonObjectConst s : ss) {
-      if (n >= AG_MAX_CARDS) break;
-      if (status_rank(s["status"] | "offline") == rank) sorted[n++] = s;
-    }
+  int key[AG_MAX_CARDS];
+  int n = 0, hi = 0;
+  for (JsonObjectConst s : ss) {
+    if (n >= AG_MAX_CARDS) break;
+    const char *sid = s["id"] | "";
+    int pos = 64 + hi++;
+    for (int i = 0; i < n_shown && i < n_created; i++)
+      if (cards[i].sid[0] && !strcmp(cards[i].sid, sid)) { pos = i; break; }
+    int k = status_rank(s["status"] | "offline") * 256 + pos;
+    int j = n++;
+    for (; j > 0 && key[j - 1] > k; j--) { key[j] = key[j - 1]; sorted[j] = sorted[j - 1]; }
+    key[j] = k;
+    sorted[j] = s;
+  }
 
   if (model_state_version() == 0) {
     apply_layout(0);
@@ -715,9 +773,18 @@ static void update(JsonObjectConst state) {
     return;
   }
   show(empty_box, false);
+  // sessions shown before this update (to fade in only genuinely new ones)
+  char prev[AG_MAX_CARDS][16];
+  int np = 0;
+  for (int i = 0; i < n_shown && i < n_created; i++) strlcpy(prev[np++], cards[i].sid, 16);
+  bool first = n_shown <= 0;
   apply_layout(n);
   for (int i = 0; i < n; i++) {
-    card_fill(cards[i], sorted[i]);
+    const char *sid = sorted[i]["id"] | "";
+    bool fresh = !first;
+    for (int k = 0; k < np && fresh; k++)
+      if (!strcmp(prev[k], sid)) fresh = false;
+    card_fill(cards[i], sorted[i], fresh);
     if (!connected) set_pulse(cards[i], 0);
   }
 }
@@ -737,6 +804,8 @@ static void on_show(bool vis) {
     lv_timer_resume(tick_timer);
   } else {
     lv_timer_pause(tick_timer);
+    lv_timer_pause(pulse_timer);
+    seen_valid = false;
     for (int i = 0; i < n_created; i++) set_pulse(cards[i], 0);
     for (int i = 0; i < n_created; i++) cards[i].pulse = -1;
   }
@@ -790,6 +859,11 @@ static void create(lv_obj_t *p) {
   lv_obj_set_style_width(list, 4, LV_PART_SCROLLBAR);
   lv_obj_set_style_pad_right(list, 0, LV_PART_SCROLLBAR);
   lv_obj_clear_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+  // Pre-create the first cards at boot so the first show doesn't stall the loop building ~100 objects.
+  while (n_created < 4) {
+    card_create(cards[n_created]);
+    show(cards[n_created++].obj, false);
+  }
 
   empty_box = mk_plain(p);
   lv_obj_set_size(empty_box, 440, 260);
@@ -809,6 +883,8 @@ static void create(lv_obj_t *p) {
 
   tick_timer = lv_timer_create(tick_cb, 1000, NULL);
   lv_timer_pause(tick_timer);
+  pulse_timer = lv_timer_create(pulse_cb, AG_PULSE_MS, NULL);
+  lv_timer_pause(pulse_timer);
 }
 
 const ScreenDef screen_agents = {"agents", "Agents", create, update, on_event, on_show};

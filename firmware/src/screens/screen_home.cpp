@@ -116,24 +116,48 @@ static void set_single_line(lv_obj_t *l, lv_coord_t w) {
   lv_obj_set_height(l, lv_font_get_line_height(lv_obj_get_style_text_font(l, 0)));
 }
 
+// ------------------------------------------------------------------ change-only setters
+// Every lv_label_set_text / lv_obj_set_style_* / flag change invalidates (and may relayout) even when the
+// value is identical, so refresh() only touches what actually changed.
+static void set_txt(lv_obj_t *l, const char *t) {
+  if (strcmp(lv_label_get_text(l), t)) lv_label_set_text(l, t);
+}
+static void set_txt_fmt(lv_obj_t *l, const char *fmt, int v) {
+  char b[16];
+  snprintf(b, sizeof b, fmt, v);
+  set_txt(l, b);
+}
+static void set_text_col(lv_obj_t *o, lv_color_t c) {
+  if (lv_obj_get_style_text_color(o, 0).full != c.full) lv_obj_set_style_text_color(o, c, 0);
+}
+static void set_bg_col(lv_obj_t *o, lv_color_t c, lv_style_selector_t sel = 0) {
+  if (lv_obj_get_style_bg_color(o, sel).full != c.full) lv_obj_set_style_bg_color(o, c, sel);
+}
+static void set_hidden(lv_obj_t *o, bool h) {
+  if (lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN) == h) return;
+  if (h) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+  else lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+}
+
 // ------------------------------------------------------------------ data -> UI
 static void card_set(lv_color_t col, const char *name, const char *meta, const char *txt, const lv_font_t *txt_font,
                      bool alert, bool tappable) {
-  lv_obj_set_style_bg_color(card_dot, col, 0);
-  lv_obj_set_style_text_color(card_name, col, 0);
-  lv_label_set_text(card_name, name);
-  lv_label_set_text(card_meta, meta);
+  set_bg_col(card_dot, col);
+  set_text_col(card_name, col);
+  set_txt(card_name, name);
+  set_txt(card_meta, meta);
   if (lv_obj_get_style_text_font(card_text, 0) != txt_font) {
     lv_obj_set_style_text_font(card_text, txt_font, 0);
     lv_obj_set_height(card_text, lv_font_get_line_height(txt_font));
   }
-  lv_label_set_text(card_text, txt);
-  lv_obj_set_style_border_color(card, alert ? C_WAITING : C_BORDER, 0);
-  lv_obj_set_style_border_width(card, alert ? 2 : 1, 0);
-  lv_obj_set_style_bg_color(card, alert ? lv_color_mix(C_WAITING, C_SURFACE, 28) : C_SURFACE, 0);
-  if (tappable) lv_obj_clear_flag(card_chev, LV_OBJ_FLAG_HIDDEN);
-  else lv_obj_add_flag(card_chev, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_set_width(card_text, tappable ? 370 : 412);
+  set_txt(card_text, txt);
+  if (lv_obj_get_style_border_width(card, 0) != (alert ? 2 : 1)) {
+    lv_obj_set_style_border_color(card, alert ? C_WAITING : C_BORDER, 0);
+    lv_obj_set_style_border_width(card, alert ? 2 : 1, 0);
+    lv_obj_set_style_bg_color(card, alert ? lv_color_mix(C_WAITING, C_SURFACE, 28) : C_SURFACE, 0);
+  }
+  set_hidden(card_chev, !tappable);
+  if (lv_obj_get_style_width(card_text, 0) != (tappable ? 370 : 412)) lv_obj_set_width(card_text, tappable ? 370 : 412);
 }
 
 static void refresh(JsonObjectConst s) {
@@ -167,27 +191,27 @@ static void refresh(JsonObjectConst s) {
 
   // stats
   if (host) {
-    lv_obj_clear_flag(stats_row, LV_OBJ_FLAG_HIDDEN);
+    set_hidden(stats_row, false);
     int v[4] = {busy, wait, idle, help};
     for (int i = 0; i < 4; i++) {
-      lv_label_set_text_fmt(stat_num[i], "%d", v[i]);
-      lv_obj_set_style_text_color(stat_num[i], v[i] ? STAT_COL[i] : C_DIM, 0);
-      lv_obj_set_style_text_color(stat_cap[i], v[i] ? C_MUTED : C_DIM, 0);
+      set_txt_fmt(stat_num[i], "%d", v[i]);
+      set_text_col(stat_num[i], v[i] ? STAT_COL[i] : C_DIM);
+      set_text_col(stat_cap[i], v[i] ? C_MUTED : C_DIM);
     }
   } else {
-    lv_obj_add_flag(stats_row, LV_OBJ_FLAG_HIDDEN);
+    set_hidden(stats_row, true);
   }
 
   // budget
   int pct = s["usage"]["five_hour"]["pct"] | -1;
   if (host && pct >= 0) {
-    lv_obj_clear_flag(budget_box, LV_OBJ_FLAG_HIDDEN);
-    lv_bar_set_value(budget_bar, pct > 100 ? 100 : pct, LV_ANIM_OFF);
+    set_hidden(budget_box, false);
+    if (lv_bar_get_value(budget_bar) != (pct > 100 ? 100 : pct)) lv_bar_set_value(budget_bar, pct > 100 ? 100 : pct, LV_ANIM_OFF);
     lv_color_t bc = pct >= 85 ? C_ERROR : (pct >= 60 ? C_WAITING : C_IDLE);
-    lv_obj_set_style_bg_color(budget_bar, bc, LV_PART_INDICATOR);
-    lv_label_set_text_fmt(budget_pct, "%d%%", pct);
+    set_bg_col(budget_bar, bc, LV_PART_INDICATOR);
+    set_txt_fmt(budget_pct, "%d%%", pct);
   } else {
-    lv_obj_add_flag(budget_box, LV_OBJ_FLAG_HIDDEN);
+    set_hidden(budget_box, true);
   }
 
   // focus card
@@ -433,6 +457,13 @@ static void create(lv_obj_t *p) {
 
 static void update(JsonObjectConst s) {
   if (model_host_connected() != host_prev) return;  // timer handles transitions (+ greeting)
+  // Skip when nothing home shows changed: sessions/totals/usage parts, the event log (card texts) and the
+  // second ("12s ago" meta). Unchanged values are filtered again per widget inside refresh().
+  static uint32_t seen[5] = {0, 0, 0, 0, 0};
+  uint32_t k[5] = {model_part_version("sessions"), model_part_version("totals"), model_part_version("usage"),
+                   (uint32_t)model_event_count(), model_now()};
+  if (!memcmp(k, seen, sizeof k)) return;
+  memcpy(seen, k, sizeof k);
   refresh(s);
 }
 

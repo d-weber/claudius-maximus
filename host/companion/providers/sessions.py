@@ -59,6 +59,7 @@ SUB_MAX = 12                # max subagents listed per session
 HEADLESS_ALIVE_S = 180      # transcript-only session: offline after this long without writes
 SCAN_S = 3.0                # glob ~/.claude/projects for new/grown transcripts
 SUB_SCAN_S = 1.0            # list a live session's subagents dir
+REST_POLL_S = 2.0           # poll transcripts of non-live sessions this often
 POLL_BUDGET_S = 0.12        # max parse time per poll (startup catch-up spreads over several polls)
 EVENT_MAX_AGE_S = 90        # don't emit events for records older than this (late catch-up)
 
@@ -146,6 +147,7 @@ class SessionsProvider(Provider):
         self.last_scan = 0.0
         self.events: list[dict] = []
         self.poll_ms = 0.0
+        self.rest_poll_at = 0.0
 
     # ================================================================== provider API
     def poll(self, now: float) -> None:
@@ -363,7 +365,12 @@ class SessionsProvider(Provider):
                 order.append(s.tr)
             order.extend(sub.tr for sub in s.subs.values())
         seen = {id(t) for t in order}
-        order.extend(t for t in self.transcripts.values() if id(t) not in seen)
+        rest = [t for t in self.transcripts.values() if id(t) not in seen]
+        # other transcripts (today's totals, headless detection): stat them every REST_POLL_S only, unless a
+        # catch-up is still in progress (each stat is a syscall; there can be dozens of files)
+        if now - self.rest_poll_at >= REST_POLL_S or any(t.tail.pending for t in rest):
+            self.rest_poll_at = now
+            order.extend(rest)
         deadline = t0 + POLL_BUDGET_S
         for tr in order:
             while time.monotonic() < deadline:

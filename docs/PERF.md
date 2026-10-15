@@ -32,3 +32,167 @@ JSON parse of a state ≈ 5.6 ms (≈ 6/s). Flush (copy to PSRAM framebuffer) �
 
 ## Results
 (agents append a row per change: who, what, before → after)
+- **perf-home** — home: Clawd re-recorded as a display list of solid rects (fixed slots per element) and only the
+  pixel-exact difference between the old and new list is invalidated (rect XOR, coalesced, capped at 6 areas), instead of
+  Clawd's whole ~350x200 box per pose change; resume no longer invalidates the 480x242 face; bubble fade in 24-opa steps;
+  refresh() only touches labels/styles/flags whose value changed; update() skips when sessions/totals/usage versions,
+  event count and the second are unchanged. A/B under one device lock, same tree otherwise (fps / frame avg/max ms / px/frame / cpu %):
+  demo 13.1-16.1 / 32-37/85-138 / 75-79k / 65-70 → 15.9-17.4 / 17-20/84-118 / 26-28k / 50-51;
+  demo w/o waiting sessions (no alert glow) 14.5 / 27.5/79 / 73k / 59 → 14.5 / 15.3/75 / 26k / 43;
+  all idle, static data 6.5 / 25.5/52 / 66k / 38 → 4.1 / 5.4/20 / 6.8k / 24.5;
+  --nodemo (offline, sleeping Clawd + z's) 4.0 / 6/29 / 24k / 12.4 → 4.5 / 4/28 / 8k / 12.5.
+  Remaining demo pixels are mostly card/stats label changes, bubble pop/fade, and alert toasts/confetti (perf-alerts).
+- **perf-feed** — feed + detail. Feed: row widgets stay bound to their item (stable uid/version); a new event recycles
+  one widget to the top (one list re-layout) instead of rebinding all 18 rows, and only rows whose content changed
+  (new / merged "x N") get labels/styles touched, change-only; renders coalesced to ≤ 1 per 250 ms; on_event only
+  records when the tile is hidden or the detail overlay covers it; whole-list slide + row fade replaced by a 700 ms glow
+  on the new row's 40x40 glyph disc; age labels 1 s steps < 15 s then 5 s steps, set only when the string changes;
+  sparkline bars / rate / chips updated only on change. Detail: every style/flag/text set is change-only (show() no
+  longer re-invalidates visible cards; bg/text/border colors compared first), recent-events list rebuilt only on
+  events / status change; uptime/ages repaint just their labels. A/B under one device lock, same tree otherwise
+  (fps / frame avg/max ms / px/frame / cpu % / loop max ms):
+  feed demo 7.1-7.6 / 94-96/207-223 / 144k / 91-92 / 244-277 → 27.6-28.0 / 24-25/176-180 / 27.5k / 87.5 / 218;
+  feed --nodemo 1.0 / 30-36/38 / 10-12k / 12-13 → 1.0 / 21-25/32 / 5.5k / 11;
+  detail demo 7.3 / 91-93/187 / 167-173k / 93-95 / 285 → 11.7-12.1 / 40-42/131-138 / 51-52k / 69-70 / 169-183;
+  detail with data, no stream 25.6 / 29/40 / 37k / 81 → 25.3 / 29/55 / 39k / 80 (identical: this is the alert edge
+  glow + toasts, not the detail). Remaining feed/detail cost under demo is dominated by the alert glow/toasts
+  (perf-alerts); feed's own cost is one ~150k px list repaint per row shift (≤ 4/s) — inherent to moving every row.
+- **[bench] suite** — `tools/bench.py` (perf-bench): fixed demo seed, per screen (home agents feed usage system orbit
+  settings detail) × {static (fixed state, no waiting, nothing sent), wait (same + 1 waiting session → glow),
+  stream (8 s demo), burst (30 events in 1 s + 1.5 s tail)} + nav (one window per tile jump) + alerts (stop/error/waiting
+  demo) + 120 s soak (heap per screen visit, cycle 2 − cycle 1). One device-lock hold per scenario (≤ ~10 s, soak 126 s);
+  it waits for the previous scenario's leftovers to die out before measuring. Full run ≈ 9 min.
+  `DEV_NAME=<you> host/.venv/bin/python tools/bench.py run --label x [--screens agents,feed] [--scenarios static,stream,burst]`
+  → table + JSON in firmware/.pio/bench/ (or $BENCH_OUT); `bench.py compare A.json B.json` → per-metric A>B with
+  `+` green better / `!` red worse (>10 % and a per-metric floor). `--pin firmware` snapshots+builds+flashes the tree
+  first and marks scenarios that ran after someone else flashed. `dev.py flash` now stamps firmware/.pio/lastflash.json
+  (who/when/source-tree hash) so every bench row records which build it measured.
+- **[bench] finding (mid-round, mixed builds 16:50–16:56):** no heap leak — 120 s soak heap_int +0 B on every screen,
+  psram −2.6 KB. Outliers for owners:
+  - **agents** (perf-agents): *static* screen with nothing changing still 10–22 fps and **loop_max 121–128 ms /
+    frame_max ~120 ms** (reproduced 3× in isolation) — something periodic does a ~120 ms repaint/block. Tile jump
+    `nav>agents` = frame avg 112 ms, lvgl avg 114 ms, 128k px/frame (worst transition by far).
+  - **orbit** (perf-orbit): static 14 fps / 29 % cpu (9k px/frame — small, but above the 0–2 fps static target).
+  - **bursts** (perf-alerts): 30 events/s costs 70–94 % cpu on *every* screen, even settings (65k px/frame, lvgl
+    avg 29 ms) and detail (frame avg 72 ms) — toasts/confetti/chips on lv_layer_top dominate, not the tiles.
+  - **stream loop_max** is 150–240 ms on all screens (target < 60): frame_max 120–190 ms, parse max ~10 ms, so it's
+    full-tile repaints, not JSON.
+- **perf-usage** — usage: labels only re-set when the formatted string changes (`lv_label_set_text` always
+  invalidates, even with identical text); ring indicator color only re-applied when it changes (a same-value
+  `lv_obj_set_style_arc_color` invalidated each whole 200x200 ring = 2x40k px per state); model-mix segments only
+  resized/hidden when their width changes; chart: new points diffed against the shown ones, only changed bar columns
+  invalidated (`lv_chart_set_value_by_id`), whole chart only when >half the bars change (tpm shift, once/min in real
+  life) or the mode changes; no more `lv_chart_refresh` per state. Rings still animate only on a real value change;
+  countdowns are minute-granular strings, so they redraw once/min. A/B under one device lock, same tree
+  (fps / frame avg/max ms / px/frame / cpu %): demo 6.6-7.1 / 87-93/185-190 / 123-132k / 80 →
+  8.0-8.1 / 30/96-102 / 34k / 44-45 (settings on the same tree, ≈ global alert/toast overhead: 9.3 / 22/90 / 24k / 39);
+  --nodemo 0 fps / 9.2% → 0 fps / 9.8% (unchanged, already static). Remaining ≈10k px/state over the global floor:
+  demo shifts tpm every state → whole 424x62 chart redraw + stats/card labels; real host only shifts tpm once a minute.
+  Host hint (perf-link, usage.py): keep `tpm`/`hourly` arrays and `today.*` stable between minute boundaries
+  (no sub-minute jitter) and round `cost` to cents so strings stay unchanged.
+- **perf-link** — data path (firmware link/model + host daemon/providers). **Protocol: partial states** (PROTOCOL.md
+  "Partial `state`"): fw 0.2.0 hello carries `"caps":["part","screen"]`; the host then sends a full state only on
+  connect/hello/refresh and afterwards `{"t":"state","part":1,ts,tz,<only changed top-level parts>}` (+ 48-byte empty
+  heartbeat every 2 s). Old firmware / dev.py demo streams still get full states (verified both). Device reports the
+  visible screen (`{"t":"screen","id":..}`); host streams `system` only while the system screen shows (else every 30 s)
+  and runs `ps` every 30 s instead of 4 s. `sessions`/`totals` changes of only counters (tokens/cost/ctx_pct/tool_count/
+  *_today) throttled to 5 s; `usage` recomputed only on minute boundaries (stable tpm/hourly/today, cents);
+  `usage.*.at` floored to the minute; event bursts capped at 12/tick (older `tool` events dropped).
+  Firmware: bulk `Serial.read(buf,n)` + memchr; parse into a reusable doc that is **swapped** into the model (full
+  state / event: zero deep copy); partials either merge in place (small) or carry the unchanged parts over and swap
+  (big, e.g. sessions), whichever copies less. `{"t":"cmd","perf":1}` now also emits `{"t":"linkperf",...}`
+  (per message type: n, bytes, parse/apply avg+max ms).
+  Real daemon feed, home (before → after): state msgs 1.5/s × 6.8 KB = 10.2 KB/s → ~0.5/s, 0.9 KB/s;
+  link total 7.9 % → 1.2 % of wall (avg 0.24 → 0.03 ms/loop), link max 59 → 22 ms, parse avg 9.0 → 2.1 ms,
+  cpu_pct 35 → 19-29 % (other teams' changes mixed in); usage screen: 0 state parts in 12 s (heartbeats only), link
+  max 5 ms; system screen: 1 × 1.3 KB/s instead of 7.7 KB states. Demo stream (full states, dev.py): link avg
+  2.2 → 0.43 ms (home), full-state apply 3.3 ms → swap (~0).
+  Host daemon CPU (in-process, 60 s, busy machine w/ ~10 agents): self 0.8-1.0 % + ps children 0.6-1.0 % →
+  self 0.4-0.7 % + children 0-0.3 % on non-system screens (TICK 0.25 → 0.5 s with burst coalescing, non-live
+  transcripts stat'ed every 2 s, usage rescan 10 s, no snapshot while disconnected).
+  **Screen owners — adopt `model_part_version(part)` (model.h)**: returns the state version at which that top-level
+  part last changed; `update()` should early-out when the parts it shows are unchanged:
+  home: sessions+totals+usage; agents: sessions+totals; feed/detail: sessions; usage: usage+totals; system: system;
+  orbit: sessions; alerts/ambient: sessions(+totals). `model_state_version()` no longer bumps on empty heartbeats
+  (still at least every 10 s), so relative times should come from the screens' own 1 s timers.
+- **perf-agents** — agents: (1) guarded style setters (`sp_col`/`sp_num` compare the local value first) for every
+  per-update style write — `lv_obj_set_style_opa(list)` alone invalidated the whole 456x402 list on every state;
+  label long-mode only set when it differs; (2) update() skipped when `model_part_version("sessions")` and the link
+  state are unchanged; (3) stable order within a status (cards keep their on-screen slot; the host re-sorts by recency on
+  every tool call, which re-bound + fully redrew two cards per tool call: rebinds 6-20 → 0 per 5 s); (4) pulses = one
+  90 ms timer stepping only the thin strips' bg_opa (quantized), replacing per-card full-rate lv_anims; (5) new-session
+  fade uses text_opa on the name (no whole-card opa layer) and only for genuinely new sessions; (6) 4 cards pre-created
+  at boot (first-show update 106 → 60 ms). Measured update() cost: avg 4.3 ms, max ~11 ms; on_event < 1 ms.
+  demo (fps / frame avg/max ms / px/frame / cpu % / loop max ms / lvgl avg ms):
+  11.1-11.5 / 69-72/218 / 99-103k / 98 / 257 / 71-74 → 43-45 / 12/129-131 / 8.9-9.0k / 73 / 148-158 / 4.5
+  (high fps = small strip/flash frames). --nodemo (host offline, static): 36 / 11/126 / 11k / 51 → 1.0 / 23/24 / 28k / 11.6
+  (one 5.5-fps window right after the stream stops = the offline dim transition). Pulse-off A/B: strips cost ~6-10% cpu.
+  Remaining: ~130 ms frames on status changes (card refill + re-sort) and alert toast/glow (perf-alerts); JSON parse 6 ms.
+- **perf-alerts** — alerts overlay (fx/alerts.cpp) + settings About:
+  (1) glow: halo 15 px + mid 7 px are now static; only the 4 px core breathes, quantized to 6 levels (~6 redraws/s,
+  70 ms check timer, was 25 Hz on all 12 bars); style writes skipped when the level is unchanged; error flash 20 Hz.
+  (2) **LVGL 8.4 gotcha for everyone**: every object invalidation is grown by 5 px on each side
+  (`lv_obj_get_transformed_area` → `lv_area_increase(area,5,5)`), so a 4 px bar redraws 9-14 px. The glow sets its
+  styles with `lv_disp_enable_invalidation(d,false)` and invalidates the exact rects via `_lv_inv_area` → 16.9k → 7.4k px/frame.
+  (3) card/pill/toast/chip labels only rewritten when the text changed; card waiting time has minute resolution
+  ("just now" / "N min" / "1h05") → a static card costs 0 px. (4) `lv_obj_move_foreground` invalidates the WHOLE
+  screen when the order changes: now only raised above foreign layer_top objects (ambient), never among our own.
+  (5) confetti 22 → 10 pieces @25 fps, ~1.2 s, auto-stop (22 pieces = 44 inv areas > LV_INV_BUF_SIZE 32 ⇒ full-screen
+  redraw every confetti frame). (6) card slide 150 px/380 ms → 70 px/260 ms, shadow 24 → 14. (7) alerts_update()
+  early-outs on unchanged `model_part_version("sessions"/"totals")` (queue pruning moved to the 1 s tick).
+  (8) Settings About: labels/colour only set when changed, heap shown at KB resolution.
+  Glow cost isolated (crafted static state, 1 waiting session, no stream; settings tile):
+  25+ fps / 41k px/frame / cpu ~72 % (old build) → 6 fps / 7.4k px / 8.7-11 ms / +5-6 % cpu over the no-wait idle
+  (no-wait: 0 fps). home static waiting: 10.4 fps / 5.7k px (incl. home's own anim).
+  Demo stream (fps / frame avg/max / px/frame / cpu % / loop max), before → after (other teams' changes mixed in):
+  settings 13.9 / 44/124 / 53.8k / 80 / 171 → 14.3 / 20/90 / 20.8k / 42 / 97;
+  home 11.9 / 58/159 / 100k / 88 / 198 → 16.9 / 16/58 / 22.8k / 42 / 93;
+  agents (same tree, mid-round) 52.4 / 9.1/110 / 7.3k / 69 / 155 → 55.4 / 8.4/88 / 5.6k / 62 / 125.
+  NB: `dev.py flash` builds *before* waiting for the lock, so a flash that queued for minutes ships an old tree —
+  numbers showing ~25 fps of glow on static screens come from such stale builds.
+  Remaining: card/toast slide-ins (~260-280 ms of ~60-90k px frames) and 1 full-screen frame per celebration
+  (toast raise); glow ≈ 6 redraws/s × 7.4k px while anyone waits.
+- **perf-system** — system: profiled update() (esp_timer, temp log): old cost ≈ 46 ms per 1 Hz change
+  (mem 15 ms + claude 12 ms = `lv_obj_align_to`, which forces a whole-screen layout pass; procs 10 ms; cpu 8 ms).
+  Changes: (1) no `lv_obj_align_to` — "right of" positions computed with `lv_txt_get_width`, only when the text
+  changed; (2) every label/text color/bg color/hidden flag set change-only (`lv_label_set_text`, `set_style_*`,
+  `clear_flag(HIDDEN)` all invalidate even when equal); colors bucketed to 5 % steps (`load_color_q`);
+  (3) bars: no 500 ms animation (22 bars × anim = ~30 extra frames/s), solid bucketed color instead of a horizontal
+  gradient; (4) CPU (310×74) and net (62×48) charts are now opaque RGB565 canvases in PSRAM rendered by hand
+  (row-major fill with a per-row 4-color table, 2-px AA line, grid in-canvas), re-rendered only when points/scale/
+  color change — LVGL just blits them instead of masked faded-area fills; (5) update() early-outs on
+  `model_part_version("system")`, then hashes 6 sections (header/cpu/mem/procs/net/claude, ArduinoJson hash writer,
+  no buffer) and only rebinds changed ones (procs: every 4-30 s). update() now ≈ 0.5 ms on unchanged states and
+  ≈ 12-14 ms on a 1 Hz change (cpu chart render 3.9 ms — PSRAM-write bound, ~160 ns/px; 16 core rows 1.5-3 ms;
+  mem labels 2-3.5 ms; net 1.5 ms). A/B under the same tree, demo stream + real Mac metrics (fps / frame avg/max ms /
+  px/frame / cpu % / loop max ms / tick max ms): 14.8-17.2 / 29-33/197 / 30-35k / 69 / 281 / 51-53 →
+  8.1-8.3 / 32-35/185 / 33-36k / 45-47 / 230 / 14.7-14.9; --nodemo 0 fps / 9.4 % → 0 fps / 8.6 %.
+  Remaining: frame max/loop max ~185-230 ms are the alert glow/toast frames (perf-alerts), JSON parse 6.5 ms × 6/s.
+  Possible next step if heap allows: 4-bit indexed CPU canvas in internal RAM (11.5 KB) would cut the 3.9 ms chart
+  render to < 0.5 ms. Host hint (perf-link, system.py): round `load` to 1 decimal is already done; sending `cores`
+  quantized to 2 % and `mem.*` to 0.1 GB would skip more label updates.
+- **perf-orbit** — screens/screen_orbit.cpp + fx/ambient.cpp:
+  (1) **The 47 ms "calc" was the ring re-bake**: every status change re-ran `lv_canvas_fill_bg` + 52 stars + Clawd +
+  8 `lv_canvas_draw_arc` on the 480x480 canvas (~0.4-0.7 s per bake, ~1/s under demo) and then invalidated the
+  whole canvas (full-screen frame). Now stars + Clawd are drawn once into a pristine PSRAM copy (`base_buf`), and
+  rings are plotted straight into the canvas buffer with an 8-way Wu circle (~1.2 k px, < 0.5 ms), erased by
+  restoring from `base_buf`, **one ring per frame**, invalidating only 16 sector rects around that ring (~25-35 k px).
+  (2) Own dirty-rect collector: planets/labels/moons/sparks/ripples move by shifting `coords` and register old+new
+  rects in a ≤10-entry merging list flushed once per frame via `_lv_inv_area` (no LVGL +5 px slack, no 32-area
+  overflow ⇒ no accidental full-screen frames; was ~40-80 areas/frame with sparks). Spark/ripple opacity lives in
+  per-object `lv_style_t`s changed without LVGL's refresh path (quantized 16/32 steps); sparks/ripples shown/hidden
+  and resized through the collector (no set_size → no layout pass snapping them to style positions).
+  (3) Labels: opaque square C_BG tag (was 70 % + radius 4: blended + corner mask), transparent only while crossing
+  Clawd; 3 px move hysteresis (was 2). (4) Adaptive timer: 70 ms (~14 fps) while busy/subagents/fx/settling,
+  110 ms if only waiting (sonar), 125 ms when the backlight is dimmed, 250 ms when everything is calm (was fixed
+  60 ms). (5) update() and ambient_update() early-out on unchanged `model_part_version("sessions"/"totals")`.
+  (6) ambient: the night clock re-set the 120 px clock's text colour every 100 ms (style set = invalidate ⇒ ~10
+  redraws/s of the digits); now colours/opacity only on change and the saver work runs once per second.
+  Orbit hidden: timer paused, on_event returns early, update not called (verified: other screens show no orbit cost).
+  orbit demo (fps / frame avg/max ms / px/frame / cpu % / loop max ms / lvgl avg ms), before → after, 2 runs each:
+  8.6 / 72/157-181 / 102-110k / 92 / 412-413 / 19.6-20.7 → 14.1-14.4 / 38-39/122-131 / 22.0-22.4k / 70-72 / 155-170 / 4.1-4.4.
+  Screen's own log: calc 47 ms → 1.5 ms; render avg 116 → 42 ms. --nodemo (last demo state, 4 busy):
+  16.5 / 27/41 / 16k / 53 / 43 → 14.0 / 20-22/33 / 8.2-9.7k / 36-39 / 34-35.
+  Night clock (forced saver, no stream): 0 fps, 0 px, cpu 9 % (link polling floor), loop max 4 ms.
+  Remaining: frame max ~120-130 ms / loop max ~155-170 ms are not orbit's: they stay with planets frozen + fx off
+  (`dev_orbit` flags 6) ⇒ alert card/toast slide-ins + JSON parse; a ring change frame ≈ 30 k px (~20 ms).

@@ -1,14 +1,24 @@
 // Attention system on lv_layer_top() — sits above every screen and the detail overlay.
 //
-//  waiting  : amber edge glow (4 thin layered bars, opacity pulse) for as long as any session waits,
+//  waiting  : amber edge glow (4 edges x 3 layered bars) for as long as any session waits,
 //             + a "<name> needs you" card (queue, newest first, tap -> detail, X -> dismiss).
 //             The card collapses into a small top pill after a while; the pill stays while anyone waits.
 //  stop     : green toast "<name> finished" + a small confetti burst (rate-limited, merges bursts).
 //  error    : short red edge flash + red toast (rate-limited).
 //  subagent : tiny violet chip.
-// CPU: glow is driven by a 40 ms lv_timer that only runs while needed; confetti is 16 tiny objects.
+// CPU (the overlay is paid on every screen, cost ~ invalidated px x frequency):
+//  - glow: halo (15 px) + mid (7 px) are static; only the 4 px core breathes, stepped (quantized levels,
+//    ~6 Hz) and style writes are skipped when the level is unchanged, so a waiting session costs
+//    ~7.5k px x 6/s instead of ~30k px x 25/s. The short error flash runs at 20 Hz.
+//  - card/pill/toast labels are only rewritten when their text changes; the card's waiting time has
+//    minute resolution, so a static card costs nothing.
+//  - confetti: 10 tiny pieces at 25 fps for ~1.2 s, then the timer stops (<= 20 invalidated areas, so
+//    LVGL's 32-entry invalid-area buffer never overflows into a full-screen redraw).
+//  - lv_obj_move_foreground() invalidates the whole layer (=screen) when the order really changes:
+//    only call it when the object is not already on top.
 #include "alerts.h"
 #include <lvgl.h>
+#include <stdarg.h>
 #include "../ui/theme.h"
 #include "../screens/screens.h"
 #include "../screens/detail_api.h"
@@ -55,9 +65,15 @@ static bool card_collapsed = false;
 // objects
 static lv_obj_t *layer;
 static lv_obj_t *bars[4][3];               // side x layer
-static const uint8_t BAR_T[3] = {3, 8, 16};
-static const uint8_t BAR_OPA[3] = {255, 85, 30};
+static const uint8_t BAR_T[3] = {4, 7, 15};       // core (pulses), mid (pulses), halo (static)
+static const uint8_t BAR_OPA[3] = {255, 120, 40};
+static lv_color_t bar_col[3];
+static int16_t bar_opa_cur[3] = {-1, -1, -1};     // cache: skip style writes (= invalidations) if unchanged
 static lv_timer_t *glow_timer;
+static const uint32_t GLOW_PERIOD_MS = 2000;      // breathing period
+static const int GLOW_LEVELS = 6;                 // quantized brightness steps -> ~6 redraws/s of 4 px edges
+static const uint32_t GLOW_TICK_MS = 70;
+static const uint32_t FLASH_TICK_MS = 50;
 static uint32_t flash_until = 0;
 static lv_color_t flash_color;
 
@@ -73,7 +89,7 @@ static uint32_t last_confetti = 0, last_err = 0;
 static lv_obj_t *chip, *chip_lbl;
 static uint32_t chip_until = 0;
 
-#define NCONF 22
+#define NCONF 10
 static lv_obj_t *conf[NCONF];
 static float cx[NCONF], cy[NCONF], cvx[NCONF], cvy[NCONF];
 static int conf_ticks = 0;
@@ -107,6 +123,34 @@ static bool looking_at(const char *sid) {
   return d && *d && sid && !strcmp(d, sid);
 }
 
+// label text setters that don't invalidate when nothing changed
+static void set_text(lv_obj_t *l, const char *t) {
+  const char *cur = lv_label_get_text(l);
+  if (cur && !strcmp(cur, t)) return;
+  lv_label_set_text(l, t);
+}
+static void set_text_fmt(lv_obj_t *l, const char *fmt, ...) {
+  char buf[192];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  set_text(l, buf);
+}
+// Raise above foreign objects on lv_layer_top() (e.g. ambient's screensaver) only when one is actually
+// above us: a real move invalidates the whole screen. Our own objects keep their creation z-order
+// (bars < card < pill < toast < chip < confetti), all tagged with LV_OBJ_FLAG_USER_1.
+static const lv_obj_flag_t OURS = LV_OBJ_FLAG_USER_1;
+static void alerts_raise(lv_obj_t *o) {
+  lv_obj_t *p = lv_obj_get_parent(o);
+  uint32_t n = lv_obj_get_child_cnt(p);
+  for (uint32_t i = lv_obj_get_index(o) + 1; i < n; i++)
+    if (!lv_obj_has_flag(lv_obj_get_child(p, i), OURS)) {
+      lv_obj_move_foreground(o);
+      return;
+    }
+}
+
 static lv_obj_t *plain(lv_obj_t *parent) {
   lv_obj_t *o = lv_obj_create(parent);
   lv_obj_remove_style_all(o);
@@ -127,7 +171,7 @@ static void anim_hide_ready(lv_anim_t *a) { lv_obj_add_flag((lv_obj_t *)a->var, 
 
 static void slide_in(lv_obj_t *o, int32_t from_y, uint32_t ms) {
   lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_move_foreground(o);
+  alerts_raise(o);
   lv_anim_del(o, NULL);
   lv_anim_t a;
   lv_anim_init(&a);
@@ -162,45 +206,67 @@ static bool waiting_active() {
   return n_st_wait > 0 || nq > 0 || now_before(wait_hint_until);
 }
 
-static void bars_set(lv_color_t c, int32_t factor /*0..256*/) {
-  for (int s = 0; s < 4; s++)
-    for (int l = 0; l < 3; l++) {
-      lv_obj_set_style_bg_color(bars[s][l], c, 0);
-      lv_obj_set_style_bg_opa(bars[s][l], (lv_opa_t)(BAR_OPA[l] * factor / 256), 0);
+static void layer_set(int l, lv_color_t c, int opa) {
+  if (opa == bar_opa_cur[l] && lv_color_to32(c) == lv_color_to32(bar_col[l])) return;
+  bar_opa_cur[l] = opa;
+  bar_col[l] = c;
+  // LVGL 8.4 grows every object invalidation by 5 px on each side (lv_obj_get_transformed_area), which
+  // more than doubles the redrawn area of a 4 px bar. Set the styles with invalidation off and invalidate
+  // the exact bar rectangles ourselves.
+  lv_disp_t *d = lv_obj_get_disp(layer);
+  bool vis = !lv_obj_has_flag(bars[0][l], LV_OBJ_FLAG_HIDDEN);
+  if (vis) lv_disp_enable_invalidation(d, false);
+  for (int s = 0; s < 4; s++) {
+    lv_obj_set_style_bg_color(bars[s][l], c, 0);
+    lv_obj_set_style_bg_opa(bars[s][l], (lv_opa_t)opa, 0);
+  }
+  if (vis) {
+    lv_disp_enable_invalidation(d, true);
+    for (int s = 0; s < 4; s++) {
+      lv_area_t a;
+      lv_obj_get_coords(bars[s][l], &a);
+      _lv_inv_area(d, &a);
     }
+  }
 }
 static void bars_show(bool on) {
   for (int s = 0; s < 4; s++)
-    for (int l = 0; l < 3; l++) {
+    for (int l = 2; l >= 0; l--) {  // halo first so the core ends on top
       if (on) {
         if (lv_obj_has_flag(bars[s][l], LV_OBJ_FLAG_HIDDEN)) {
           lv_obj_clear_flag(bars[s][l], LV_OBJ_FLAG_HIDDEN);
-          lv_obj_move_foreground(bars[s][l]);
+          alerts_raise(bars[s][l]);
         }
-      } else {
+      } else if (!lv_obj_has_flag(bars[s][l], LV_OBJ_FLAG_HIDDEN)) {
         lv_obj_add_flag(bars[s][l], LV_OBJ_FLAG_HIDDEN);
       }
     }
 }
 
-static void glow_cb(lv_timer_t *) {
+static void glow_cb(lv_timer_t *t) {
   uint32_t now = millis();
   if (now_before(flash_until)) {
-    // quick double blink then fade
+    // quick double blink then fade (all layers, short-lived)
+    if (t->period != FLASH_TICK_MS) lv_timer_set_period(t, FLASH_TICK_MS);
     uint32_t left = flash_until - now;
     uint32_t el = FLASH_MS - left;
     int32_t f = el < 150 ? 256 : el < 260 ? 90 : el < 420 ? 256 : 256 * left / (FLASH_MS - 420);
+    f = f / 32 * 32;  // quantize the fade tail
     bars_show(true);
-    bars_set(flash_color, f);
+    for (int l = 2; l >= 0; l--) layer_set(l, flash_color, BAR_OPA[l] * f / 256);
     return;
   }
   if (waiting_active()) {
-    // slow breathing: 1.8 s period, 35%..100%
-    int16_t ang = (int16_t)((now % 1800) * 360 / 1800);
-    int32_t sn = lv_trigo_sin(ang);                 // -32767..32767
-    int32_t f = 90 + (166 * (sn + 32767) / 65534);  // 90..256
+    // slow breathing of the 4 px core only; mid + halo stay static (never re-rendered)
+    if (t->period != GLOW_TICK_MS) lv_timer_set_period(t, GLOW_TICK_MS);
+    int16_t ang = (int16_t)((now % GLOW_PERIOD_MS) * 360 / GLOW_PERIOD_MS);
+    int32_t sn = lv_trigo_sin(ang);                                   // -32767..32767
+    int32_t lvl = ((sn + 32767) * GLOW_LEVELS + 32767) / 65534;        // 0..GLOW_LEVELS
+    int32_t f = 112 + 144 * lvl / GLOW_LEVELS;                         // 112..256 (never faint)
     bars_show(true);
-    bars_set(C_WAITING, f);
+    layer_set(2, C_WAITING, BAR_OPA[2]);
+    layer_set(1, C_WAITING, BAR_OPA[1]);
+    layer_set(0, C_WAITING, BAR_OPA[0] * f / 256);
     return;
   }
   bars_show(false);
@@ -216,19 +282,21 @@ static void card_hide();
 static void card_render() {
   if (nq == 0) return;
   WaitEntry &e = q[0];
+  // minute resolution: a static card is re-rendered at most once a minute
   uint32_t secs = (millis() - e.since_ms) / 1000;
-  if (secs < 3600)
-    lv_label_set_text_fmt(card_kicker, "NEEDS YOU  #9C978E " LV_SYMBOL_BULLET " %u:%02u#", (unsigned)(secs / 60),
-                          (unsigned)(secs % 60));
+  if (secs < 60)
+    set_text(card_kicker, "NEEDS YOU  #9C978E " LV_SYMBOL_BULLET " just now#");
+  else if (secs < 3600)
+    set_text_fmt(card_kicker, "NEEDS YOU  #9C978E " LV_SYMBOL_BULLET " %u min#", (unsigned)(secs / 60));
   else
-    lv_label_set_text_fmt(card_kicker, "NEEDS YOU  #9C978E " LV_SYMBOL_BULLET " %uh%02u#", (unsigned)(secs / 3600),
-                          (unsigned)(secs / 60 % 60));
-  lv_label_set_text(card_title, e.name);
-  lv_label_set_text(card_body, e.text[0] ? e.text : "Waiting for your input");
+    set_text_fmt(card_kicker, "NEEDS YOU  #9C978E " LV_SYMBOL_BULLET " %uh%02u#", (unsigned)(secs / 3600),
+                 (unsigned)(secs / 60 % 60));
+  set_text(card_title, e.name);
+  set_text(card_body, e.text[0] ? e.text : "Waiting for your input");
   if (nq > 1) {
-    lv_label_set_text_fmt(card_more, "+%d more", nq - 1);
-    lv_obj_clear_flag(card_more, LV_OBJ_FLAG_HIDDEN);
-  } else {
+    set_text_fmt(card_more, "+%d more", nq - 1);
+    if (lv_obj_has_flag(card_more, LV_OBJ_FLAG_HIDDEN)) lv_obj_clear_flag(card_more, LV_OBJ_FLAG_HIDDEN);
+  } else if (!lv_obj_has_flag(card_more, LV_OBJ_FLAG_HIDDEN)) {
     lv_obj_add_flag(card_more, LV_OBJ_FLAG_HIDDEN);
   }
 }
@@ -246,9 +314,9 @@ static void card_show(bool bump) {
   card_render();
   card_collapsed = false;
   card_news_ms = millis();
-  if (!card_visible()) slide_in(card, 150, 380);
+  if (!card_visible()) slide_in(card, 70, 260);
   else if (bump) slide_in(card, 18, 220);
-  else lv_obj_move_foreground(card);
+  else alerts_raise(card);
   pill_refresh();
   glow_kick();
 }
@@ -289,12 +357,12 @@ static void pill_refresh() {
     int qi = q_find(first);
     const char *nm = qi >= 0 ? q[qi].name : first_name;
     if (!*nm) nm = model_find_session(first)["name"] | "agent";
-    lv_label_set_text_fmt(pill_lbl, LV_SYMBOL_BELL "  %s needs you", nm);
+    set_text_fmt(pill_lbl, LV_SYMBOL_BELL "  %s needs you", nm);
   } else {
-    lv_label_set_text_fmt(pill_lbl, LV_SYMBOL_BELL "  %d agents need you", n);
+    set_text_fmt(pill_lbl, LV_SYMBOL_BELL "  %d agents need you", n);
   }
   if (lv_obj_has_flag(pill, LV_OBJ_FLAG_HIDDEN) || lv_anim_get(pill, NULL)) slide_in(pill, 40, 260);
-  else lv_obj_move_foreground(pill);
+  else alerts_raise(pill);
 }
 
 static void enqueue(const char *sid, const char *name, const char *text, bool demo) {
@@ -352,16 +420,16 @@ static void pill_click_cb(lv_event_t *) {
 // toast (stop / error) + confetti
 static void conf_cb(lv_timer_t *) {
   conf_ticks++;
-  bool fade = conf_ticks > 26;
+  bool fade = conf_ticks > 20;
   for (int i = 0; i < NCONF; i++) {
-    cvy[i] += 0.55f;
-    cvx[i] *= 0.985f;
+    cvy[i] += 0.69f;  // tuned for the 40 ms step (was 0.55 @ 33 ms)
+    cvx[i] *= 0.982f;
     cx[i] += cvx[i];
     cy[i] += cvy[i];
     lv_obj_set_pos(conf[i], (lv_coord_t)cx[i], (lv_coord_t)cy[i]);
-    if (fade) lv_obj_set_style_bg_opa(conf[i], (lv_opa_t)LV_MAX(0, 255 - (conf_ticks - 26) * 26), 0);
+    if (fade) lv_obj_set_style_bg_opa(conf[i], (lv_opa_t)LV_MAX(0, 255 - (conf_ticks - 20) * 26), 0);
   }
-  if (conf_ticks > 36) {
+  if (conf_ticks > 29) {  // ~1.2 s at 25 fps, then stop
     for (int i = 0; i < NCONF; i++) lv_obj_add_flag(conf[i], LV_OBJ_FLAG_HIDDEN);
     lv_timer_pause(conf_timer);
   }
@@ -372,16 +440,16 @@ static void confetti_burst(int x0, int y0) {
   for (int i = 0; i < NCONF; i++) {
     cx[i] = x0 + (int)lv_rand(0, 160) - 80;
     cy[i] = y0;
-    cvx[i] = ((int)lv_rand(0, 200) - 100) / 10.0f;
-    cvy[i] = -6.5f - lv_rand(0, 70) / 10.0f;
+    cvx[i] = ((int)lv_rand(0, 240) - 120) / 10.0f;
+    cvy[i] = -7.8f - lv_rand(0, 80) / 10.0f;
     bool round = i & 1;
-    lv_obj_set_size(conf[i], round ? 8 : 6, round ? 8 : 12);
+    lv_obj_set_size(conf[i], round ? 9 : 7, round ? 9 : 13);
     lv_obj_set_style_radius(conf[i], round ? 4 : 1, 0);
     lv_obj_set_style_bg_color(conf[i], lv_color_hex(cols[i % 6]), 0);
     lv_obj_set_style_bg_opa(conf[i], LV_OPA_COVER, 0);
     lv_obj_set_pos(conf[i], (lv_coord_t)cx[i], (lv_coord_t)cy[i]);
     lv_obj_clear_flag(conf[i], LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(conf[i]);
+    alerts_raise(conf[i]);
   }
   conf_ticks = 0;
   lv_timer_resume(conf_timer);
@@ -453,7 +521,7 @@ static void error_flash(const char *sid, const char *name, const char *tool, con
 // ---------------------------------------------------------------------------------------------
 // chip (subagents)
 static void chip_show(const char *name, const char *text, bool start) {
-  lv_label_set_text_fmt(chip_lbl, "%s  %s", start ? LV_SYMBOL_PLUS : LV_SYMBOL_OK, text && *text ? text : "subagent");
+  set_text_fmt(chip_lbl, "%s  %s", start ? LV_SYMBOL_PLUS : LV_SYMBOL_OK, text && *text ? text : "subagent");
   (void)name;
   bool toast_on = !lv_obj_has_flag(toast, LV_OBJ_FLAG_HIDDEN);
   lv_obj_align(chip, LV_ALIGN_BOTTOM_MID, 0, toast_on ? lv_obj_get_y_aligned(toast) - 76 : stack_y());
@@ -470,6 +538,10 @@ static void tick_cb(lv_timer_t *) {
   if (!now_before(demo_until))
     for (int i = nq - 1; i >= 0; i--)
       if (q[i].demo) q_remove(i);
+  // event-first entries the state never confirmed (alerts_update() skips unchanged states, so prune here too)
+  if (seen_state)
+    for (int i = nq - 1; i >= 0; i--)
+      if (!q[i].demo && now - q[i].added_ms >= 4000 && !in_list(st_wait, n_st_wait, q[i].sid)) q_remove(i);
   if (card_visible()) {
     if (nq == 0 || looking_at(q[0].sid)) card_hide();
     else {
@@ -507,7 +579,7 @@ void alerts_init() {
       lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);
       bars[s][l] = b;
     }
-  glow_timer = lv_timer_create(glow_cb, 40, NULL);
+  glow_timer = lv_timer_create(glow_cb, GLOW_TICK_MS, NULL);
   lv_timer_pause(glow_timer);
 
   // --- waiting card
@@ -520,10 +592,10 @@ void alerts_init() {
   lv_obj_set_style_radius(card, 22, 0);
   lv_obj_set_style_border_width(card, 2, 0);
   lv_obj_set_style_border_color(card, C_WAITING, 0);
-  lv_obj_set_style_shadow_width(card, 24, 0);
+  lv_obj_set_style_shadow_width(card, 14, 0);  // smaller blur: cheaper whenever the card is re-rendered
   lv_obj_set_style_shadow_color(card, lv_color_black(), 0);
   lv_obj_set_style_shadow_opa(card, LV_OPA_60, 0);
-  lv_obj_set_style_shadow_ofs_y(card, 6, 0);
+  lv_obj_set_style_shadow_ofs_y(card, 4, 0);
   lv_obj_set_style_bg_color(card, lv_color_hex(0x3D3A36), LV_STATE_PRESSED);
   lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
@@ -650,13 +722,27 @@ void alerts_init() {
     conf[i] = plain(layer);
     lv_obj_add_flag(conf[i], LV_OBJ_FLAG_HIDDEN);
   }
-  conf_timer = lv_timer_create(conf_cb, 33, NULL);
+  conf_timer = lv_timer_create(conf_cb, 40, NULL);
   lv_timer_pause(conf_timer);
 
   tick_timer = lv_timer_create(tick_cb, 1000, NULL);
+
+  for (int s = 0; s < 4; s++)
+    for (int l = 0; l < 3; l++) lv_obj_add_flag(bars[s][l], OURS);
+  lv_obj_add_flag(card, OURS);
+  lv_obj_add_flag(pill, OURS);
+  lv_obj_add_flag(toast, OURS);
+  lv_obj_add_flag(chip, OURS);
+  for (int i = 0; i < NCONF; i++) lv_obj_add_flag(conf[i], OURS);
 }
 
 void alerts_update(JsonObjectConst state) {
+  // only sessions (+totals) matter here; equal part versions mean identical data
+  static uint32_t seen_sv = 0, seen_tv = 0;
+  uint32_t sv = model_part_version("sessions"), tv = model_part_version("totals");
+  if (seen_state && sv == seen_sv && tv == seen_tv) return;
+  seen_sv = sv;
+  seen_tv = tv;
   char cur[MAXW][16];
   int n = 0;
   st_first_sid[0] = 0;

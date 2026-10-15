@@ -19,6 +19,8 @@
 #include "../core/model.h"
 #include <math.h>
 #include <time.h>
+#include <stdarg.h>
+#include <string.h>
 
 #define C_FABLE   lv_color_hex(0xC9A0DC)
 #define C_SONNET  lv_color_hex(0x6A9BCC)
@@ -47,6 +49,21 @@ static void fmt_dur(char *b, size_t n, long s) {
   else if (h > 0) snprintf(b, n, "%ldh %02ldm", h, m);
   else snprintf(b, n, "%ldm", m < 1 ? 1 : m);
 }
+// Perf: lv_label_set_text() always invalidates (even with identical text), so only touch a label
+// when its displayed string actually changes. Same for style colors (refresh_style invalidates the
+// whole object -- 40k px for a 200 px ring).
+static void set_txt(lv_obj_t *l, const char *t) {
+  if (strcmp(lv_label_get_text(l), t)) lv_label_set_text(l, t);
+}
+static void set_txt_fmt(lv_obj_t *l, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void set_txt_fmt(lv_obj_t *l, const char *fmt, ...) {
+  char buf[96];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof buf, fmt, ap);
+  va_end(ap);
+  set_txt(l, buf);
+}
 static uint32_t now_epoch(JsonObjectConst s) {
   uint32_t t = model_now();
   return t ? t : (uint32_t)(s["ts"] | 0);
@@ -56,6 +73,7 @@ static uint32_t now_epoch(JsonObjectConst s) {
 struct Ring {
   lv_obj_t *arc, *title, *value, *sub;
   int shown;  // value currently displayed on the arc (0..1000), for animation
+  uint32_t col;  // indicator color currently applied (lv_color_to32), 0 = none yet
 };
 static Ring rings[2];
 
@@ -79,6 +97,7 @@ static void ring_create(lv_obj_t *p, Ring &r, int x, int y, int d) {
   lv_obj_set_style_arc_rounded(r.arc, true, LV_PART_INDICATOR);
   lv_obj_set_style_pad_all(r.arc, 0, 0);
   r.shown = 0;
+  r.col = 0;
 
   r.title = lv_label_create(r.arc);
   lv_obj_set_style_text_font(r.title, F_SMALL, 0);
@@ -101,10 +120,14 @@ static void ring_create(lv_obj_t *p, Ring &r, int x, int y, int d) {
 }
 
 static void ring_set(Ring &r, const char *title, const char *value, const char *sub, int permille, lv_color_t col) {
-  lv_label_set_text(r.title, title);
-  lv_label_set_text(r.value, value);
-  lv_label_set_text(r.sub, sub);
-  lv_obj_set_style_arc_color(r.arc, col, LV_PART_INDICATOR);
+  set_txt(r.title, title);
+  set_txt(r.value, value);
+  set_txt(r.sub, sub);
+  uint32_t c32 = lv_color_to32(col) | 0xFF000000u;
+  if (c32 != r.col) {
+    lv_obj_set_style_arc_color(r.arc, col, LV_PART_INDICATOR);
+    r.col = c32;
+  }
   if (permille < 0) permille = 0;
   if (permille > 1000) permille = 1000;
   if (permille != r.shown) {
@@ -153,6 +176,7 @@ static void stat_create(lv_obj_t *p, Stat &s, int x, int w) {
 #define MIX_N 5
 static const char *MIX_KEYS[MIX_N] = {"opus", "fable", "sonnet", "haiku", "other"};
 static lv_obj_t *mix_bar, *mix_seg[MIX_N], *mix_legend;
+static int mix_w[MIX_N];  // width currently applied to each segment (0 = hidden)
 static lv_color_t mix_color(int i) {
   switch (i) {
     case 0: return C_ACCENT;
@@ -325,33 +349,47 @@ static void create(lv_obj_t *p) {
 // ---------------------------------------------------------------- update
 static void load_series(JsonArrayConst arr, int n, int hl) {
   double mx = 0;
-  int got = 0;
   double vals[60];
   for (int i = 0; i < n; i++) vals[i] = 0;
   // right-align: if the host sends fewer values, the newest still sits at the right edge
   int sz = (int)arr.size();
-  for (int i = 0; i < n && i < sz; i++) {
-    double v = arr[sz - 1 - i] | 0.0;
-    vals[n - 1 - i] = v;
-    got++;
-  }
-  peak_idx = -1;
+  for (int i = 0; i < n && i < sz; i++) vals[n - 1 - i] = arr[sz - 1 - i] | 0.0;
+  int pk = -1;
   for (int i = 0; i < n; i++)
-    if (vals[i] > mx) { mx = vals[i]; peak_idx = i; }
+    if (vals[i] > mx) { mx = vals[i]; pk = i; }
+  lv_coord_t np[60];
   for (int i = 0; i < n; i++) {
     // sqrt-ish compression keeps small minutes visible next to big bursts
     double r = mx > 0 ? pow(vals[i] / mx, 0.6) : 0;
-    pts[i] = vals[i] > 0 ? (lv_coord_t)(r * 1000) : 0;
+    np[i] = vals[i] > 0 ? (lv_coord_t)(r * 1000) : 0;
   }
-  (void)got;
-  hilite = hl;
   if (npts != n) {
+    // mode switch: new point count / spacing -> full redraw
+    memcpy(pts, np, n * sizeof(lv_coord_t));
+    peak_idx = pk;
+    hilite = hl;
     npts = n;
     lv_chart_set_point_count(chart, n);
     lv_chart_set_ext_y_array(chart, ser, pts);
     lv_obj_set_style_pad_column(chart, n >= 60 ? 2 : (n >= 24 ? 5 : 10), 0);
+    lv_obj_invalidate(chart);
+    return;
   }
-  lv_chart_refresh(chart);
+  // Perf: only invalidate the bar columns whose height or color class changed. A shifted
+  // series (tpm rolls once a minute) changes nearly every bar -> one whole-chart invalidate.
+  int old_pk = peak_idx, old_hl = hilite;
+  peak_idx = pk;
+  hilite = hl;
+  bool dirty[60];
+  int nd = 0;
+  for (int i = 0; i < n; i++) {
+    dirty[i] = np[i] != pts[i] || ((i == old_pk) != (i == pk)) || ((i == old_hl) != (i == hl));
+    if (dirty[i]) { pts[i] = np[i]; nd++; }
+  }
+  if (!nd) return;
+  if (nd > n / 2) { lv_obj_invalidate(chart); return; }
+  for (int i = 0; i < n; i++)
+    if (dirty[i]) lv_chart_set_value_by_id(chart, ser, i, pts[i]);
 }
 
 static double sum_last(JsonArrayConst a, int k) {
@@ -386,9 +424,9 @@ static void update(JsonObjectConst s) {
 
   // ---- streak
   int streak = u["streak_days"] | 0;
-  if (streak > 1) lv_label_set_text_fmt(streak_lbl, LV_SYMBOL_CHARGE " %d-day streak", streak);
-  else if (streak == 1) lv_label_set_text(streak_lbl, LV_SYMBOL_CHARGE " active today");
-  else lv_label_set_text(streak_lbl, "");
+  if (streak > 1) set_txt_fmt(streak_lbl, LV_SYMBOL_CHARGE " %d-day streak", streak);
+  else if (streak == 1) set_txt(streak_lbl, LV_SYMBOL_CHARGE " active today");
+  else set_txt(streak_lbl, "");
 
   // ---- left ring: 5-hour plan limit, else estimated 5h block, else today's pace
   JsonObjectConst fh = u["five_hour"], win = u["window"];
@@ -432,25 +470,25 @@ static void update(JsonObjectConst s) {
 
   // ---- stats row
   fmt_usd(a, sizeof a, cost_today);
-  lv_label_set_text(stats[0].value, a);
+  set_txt(stats[0].value, a);
   double burn = u["burn"] | -1.0;
-  if (burn > 0.005) { fmt_usd(c, sizeof c, burn); lv_label_set_text_fmt(stats[0].label, "TODAY  %s/h", c); }
-  else lv_label_set_text(stats[0].label, "SPENT TODAY");
+  if (burn > 0.005) { fmt_usd(c, sizeof c, burn); set_txt_fmt(stats[0].label, "TODAY  %s/h", c); }
+  else set_txt(stats[0].label, "SPENT TODAY");
   fmt_tok(a, sizeof a, tok_today);
-  lv_label_set_text(stats[1].value, a);
+  set_txt(stats[1].value, a);
   int msgs = today["msgs"] | -1;
-  if (msgs > 0) lv_label_set_text_fmt(stats[1].label, "TOKENS  %d msgs", msgs);
-  else lv_label_set_text(stats[1].label, "TOKENS TODAY");
+  if (msgs > 0) set_txt_fmt(stats[1].label, "TOKENS  %d msgs", msgs);
+  else set_txt(stats[1].label, "TOKENS TODAY");
   JsonObjectConst wk = u["week"];
   double wcost = wk["cost"] | (dcost.size() ? sum_last(dcost, 7) : -1.0);
   if (wcost >= 0) {
     fmt_usd(a, sizeof a, wcost);
-    lv_label_set_text(stats[2].value, a);
-    lv_label_set_text(stats[2].label, "LAST 7 DAYS");
+    set_txt(stats[2].value, a);
+    set_txt(stats[2].label, "LAST 7 DAYS");
   } else {
     fmt_tok(a, sizeof a, sum_last(daily, 7));
-    lv_label_set_text(stats[2].value, a);
-    lv_label_set_text(stats[2].label, "TOKENS 7 DAYS");
+    set_txt(stats[2].value, a);
+    set_txt(stats[2].label, "TOKENS 7 DAYS");
   }
 
   // ---- model mix
@@ -469,8 +507,11 @@ static void update(JsonObjectConst s) {
   for (int i = 0; i < MIX_N; i++) {
     int w = mt > 0 ? (int)(440.0 * mv[i] / mt + 0.5) : 0;
     if (w < 3 && mv[i] > 0) w = 3;
-    if (w > 0) { lv_obj_clear_flag(mix_seg[i], LV_OBJ_FLAG_HIDDEN); lv_obj_set_width(mix_seg[i], w); }
-    else lv_obj_add_flag(mix_seg[i], LV_OBJ_FLAG_HIDDEN);
+    if (w != mix_w[i]) {
+      if (w > 0) { lv_obj_clear_flag(mix_seg[i], LV_OBJ_FLAG_HIDDEN); lv_obj_set_width(mix_seg[i], w); }
+      else lv_obj_add_flag(mix_seg[i], LV_OBJ_FLAG_HIDDEN);
+      mix_w[i] = w;
+    }
     if (mv[i] > 0 && shown < 4) {
       int pct = (int)(100 * mv[i] / mt + 0.5);
       lv_color32_t c32;
@@ -482,44 +523,44 @@ static void update(JsonObjectConst s) {
     }
   }
   if (!shown) snprintf(leg, sizeof leg, "model mix: no data yet");
-  lv_label_set_text(mix_legend, leg);
+  set_txt(mix_legend, leg);
 
   // ---- chart card
   int32_t tz = model_tz();
   long local = (long)now + tz;
   if (mode == MODE_HOUR) {
     load_series(tpm, 60, 59);
-    lv_label_set_text(card_title, "LAST HOUR");
+    set_txt(card_title, "LAST HOUR");
     fmt_tok(a, sizeof a, tpm_now);
-    lv_label_set_text_fmt(card_value, "%s/min", a);
-    lv_label_set_text(axis[0], "-60m");
-    lv_label_set_text(axis[1], "-30m");
-    lv_label_set_text(axis[2], "now");
+    set_txt_fmt(card_value, "%s/min", a);
+    set_txt(axis[0], "-60m");
+    set_txt(axis[1], "-30m");
+    set_txt(axis[2], "now");
   } else if (mode == MODE_TODAY) {
     int hr = (int)((local % 86400 + 86400) % 86400 / 3600);
     load_series(hourly, 24, hr);
-    lv_label_set_text(card_title, "TODAY");
+    set_txt(card_title, "TODAY");
     int ph = u["peak_hour"] | peak_idx;
     if (ph >= 0 && peak_idx >= 0) {
       fmt_tok(a, sizeof a, hourly[ph] | 0.0);
-      lv_label_set_text_fmt(card_value, "peak %02d:00  %s", ph, a);
-    } else lv_label_set_text(card_value, "");
-    lv_label_set_text(axis[0], "00:00");
-    lv_label_set_text(axis[1], "12:00");
-    lv_label_set_text(axis[2], "23:00");
+      set_txt_fmt(card_value, "peak %02d:00  %s", ph, a);
+    } else set_txt(card_value, "");
+    set_txt(axis[0], "00:00");
+    set_txt(axis[1], "12:00");
+    set_txt(axis[2], "23:00");
   } else {
     load_series(daily, 14, 13);
-    lv_label_set_text(card_title, "14 DAYS");
-    if (dcost.size()) { fmt_usd(a, sizeof a, sum_last(dcost, 14)); lv_label_set_text_fmt(card_value, "%s total", a); }
-    else { fmt_tok(a, sizeof a, sum_last(daily, 14)); lv_label_set_text_fmt(card_value, "%s tokens", a); }
+    set_txt(card_title, "14 DAYS");
+    if (dcost.size()) { fmt_usd(a, sizeof a, sum_last(dcost, 14)); set_txt_fmt(card_value, "%s total", a); }
+    else { fmt_tok(a, sizeof a, sum_last(daily, 14)); set_txt_fmt(card_value, "%s tokens", a); }
     static const char *WD[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
     for (int k = 0; k < 2; k++) {
       time_t t = (time_t)(local - (k == 0 ? 13 : 6) * 86400L);
       struct tm tmv;
       gmtime_r(&t, &tmv);
-      lv_label_set_text_fmt(axis[k], "%s %d", WD[tmv.tm_wday], tmv.tm_mday);
+      set_txt_fmt(axis[k], "%s %d", WD[tmv.tm_wday], tmv.tm_mday);
     }
-    lv_label_set_text(axis[2], "today");
+    set_txt(axis[2], "today");
   }
 }
 

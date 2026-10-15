@@ -10,9 +10,9 @@
 //   legs x 8,12,22,26 (2 wide), y 16..20
 //
 // CPU: the simulation runs every tick, but everything visible is reduced to a small discrete
-// render state (pixel offsets, poses). We only invalidate when that state changes: eye-only
-// changes repaint a small face box, pose changes repaint Clawd's box, helpers/z's/bubble tail have
-// their own boxes. Pixel-art motion is stepped anyway, so most ticks draw nothing.
+// render state (pixel offsets, poses). Only when that changes do we re-record the scene as a list of
+// rects and invalidate the pixel-exact difference to the previous list (see "display list" below),
+// so a marching step or a blink costs a few hundred to a few thousand pixels, not Clawd's whole box.
 #include "home_face.h"
 #include "screens.h"
 #include "../ui/theme.h"
@@ -74,24 +74,43 @@ static inline float progress(int r, uint32_t now) {
   return p < 0 ? 0 : (p > 1 ? 1 : p);
 }
 
-// ------------------------------------------------------------------ drawing
-static lv_draw_ctx_t *dc;
+// ------------------------------------------------------------------ display list
+// The whole scene (everything except the bubble tail and the "+N" label) is recorded as a list of
+// solid rects in face-local coordinates. draw_cb paints the list of the drawn state; on a state change
+// we record the new list and invalidate only pixels that can differ: for rect i (same draw order in
+// both lists) with the same colour/opacity that is old_i XOR new_i, otherwise both rects. Every
+// visual element pads itself to a fixed number of slots so indices stay aligned between poses.
+// E.g. a 3 px march bob of the body invalidates two 168x3 strips instead of Clawd's 350x200 box.
+struct PR { lv_area_t a; lv_color_t c; lv_opa_t o; };
+#define MAXR 160
+static PR rl[2][MAXR];
+static int rn[2] = {0, 0}, rdrawn = 0;
+static PR *rec;
+static int *rec_n;
+static int grp0;
+
 static float ox, oy, gp;  // sprite origin (top-left of the 36P box, top of body) + pixel size
 static lv_color_t ink;
 
+static void put(const lv_area_t &a, lv_color_t c, lv_opa_t o) {
+  if (*rec_n >= MAXR) return;
+  PR &r = rec[(*rec_n)++];
+  r.a = a; r.c = c; r.o = o;
+}
 static void px(float gx, float gy, float w, float h, lv_color_t c, lv_opa_t opa = LV_OPA_COVER) {
   lv_area_t a = {(lv_coord_t)lroundf(ox + gx * gp), (lv_coord_t)lroundf(oy + gy * gp),
                  (lv_coord_t)(lroundf(ox + (gx + w) * gp) - 1), (lv_coord_t)(lroundf(oy + (gy + h) * gp) - 1)};
-  if (a.x2 < a.x1 || a.y2 < a.y1 || !_lv_area_is_on(&a, dc->clip_area)) return;
-  lv_draw_rect_dsc_t d;
-  lv_draw_rect_dsc_init(&d);
-  d.bg_color = c;
-  d.bg_opa = opa;
-  lv_draw_rect(dc, &d, &a);
+  put(a, c, opa);
+}
+static void grp_begin() { grp0 = *rec_n; }
+static void grp_end(int slots) {  // pad with empty rects (x2 < x1)
+  static const lv_area_t E = {0, 0, -1, -1};
+  while (*rec_n < grp0 + slots && *rec_n < MAXR) put(E, C_BG, 0);
 }
 
 static void arm(bool left, uint8_t pose) {
   float x = left ? 2 : 30;
+  grp_begin();
   switch (pose) {
     case ARM_UP:  // "\o/": stepped diagonal up and out
       px(left ? 3 : 30, 6, 3, 3, ink);
@@ -101,11 +120,13 @@ static void arm(bool left, uint8_t pose) {
     case ARM_HIGH: px(x, 7, 4, 4, ink); break;
     default: px(x, 8, 4, 4, ink); break;
   }
+  grp_end(2);
 }
 
 static void eye(bool left, const RS &s) {
   float ex = (left ? 10 : 24) + s.edx, ey = 4 + s.edy;
   uint8_t shape = (!left && s.wink) ? EYE_HAPPY : s.eyes;
+  grp_begin();
   switch (shape) {
     case EYE_CLOSED: px(ex - 1, 6, 4, 1, COL_EYE); break;
     case EYE_HAPPY:  // ^
@@ -122,9 +143,10 @@ static void eye(bool left, const RS &s) {
       if (s.blink) px(ex, ey + 2, 2, 1, COL_EYE);
       else px(ex, ey, 2, 4, COL_EYE);
   }
+  grp_end(5);
 }
 
-// Full Clawd at (cx, ground) with pixel size p.
+// Full Clawd at (cx, ground) with pixel size p. Always records 23 slots (mini: 15).
 static void clawd(float cx, float ground, float p, lv_color_t body, const RS &s, bool mini) {
   gp = p;
   int body_drop = s.sit ? 3 : 0;
@@ -150,9 +172,13 @@ static void clawd(float cx, float ground, float p, lv_color_t body, const RS &s,
   }
   eye(true, s);
   eye(false, s);
+  grp_begin();
   if (s.blush) { px(7, 9, 3, 1, COL_BLUSH); px(26, 9, 3, 1, COL_BLUSH); }
+  grp_end(2);
+  grp_begin();
   if (s.mouth == 1) px(17, 10, 2, 2, COL_EYE);
   else if (s.mouth == 2) { px(16, 10, 4, 1, COL_EYE); px(17, 11, 2, 1, COL_EYE); }
+  grp_end(2);
 }
 
 // pixel "z" (5x5 cells of size b)
@@ -172,12 +198,74 @@ static void sparkle(float x, float y, int size, lv_color_t c) {
   ox = sox; oy = soy; gp = sgp;
 }
 
+// Record the scene for render state s into list `li` (face-local coordinates).
+static void record(const RS &s, int li) {
+  rec = rl[li];
+  rec_n = &rn[li];
+  *rec_n = 0;
+  const float cx = CX, ground = GROUND;
+
+  // Clawd
+  clawd(cx, ground, P, s.grey ? COL_GREY : COL_BODY, s, false);
+  // (ox, oy, gp) now describe the big sprite
+
+  // waiting "!" up-left of the head
+  grp_begin();
+  if (s.bang >= 0) {
+    float dy = s.bang ? -1 : 0;
+    px(0, -10 + dy, 2, 5, C_WAITING);
+    px(0, -4 + dy, 2, 2, C_WAITING);
+  }
+  grp_end(2);
+
+  // finish sparkles (pixel crosses popping around the head)
+  static const float SX[6] = {-3, 39, 1, 35, -6, 42}, SY[6] = {-6, -4, -12, -11, 4, 6};
+  static const lv_color_t SC[3] = {C_WAITING, C_TEXT, C_ACCENT2};
+  for (int k = 0; k < 6; k++) {
+    grp_begin();
+    int st = s.spark < 0 ? -1 : s.spark - k;  // each sparkle lives 4 steps, staggered
+    if (st >= 0 && st <= 3) sparkle(ox + SX[k] * P, oy + SY[k] * P, (st == 1 || st == 2) ? 2 : 1, SC[k % 3]);
+    grp_end(3);
+  }
+
+  // z's drifting up-right from the head
+  for (int k = 0; k < 3; k++) {
+    grp_begin();
+    if (s.z >= 0) {
+      int st = (s.z + k * 6) % 18;  // 0..17
+      float b = 2 + st / 6;         // 2,3,4 px cells
+      lv_opa_t o = st < 2 ? 120 : (st > 15 ? 110 : 220);
+      zee(ox + 31 * P + st * 3, oy - 2 * P - st * 4, b, o);
+    }
+    grp_end(5);
+  }
+
+  // helpers: mini-Clawds standing beside the big one, shuffling their feet
+  for (int k = 0; k < 4; k++) {
+    grp_begin();
+    int g = grp0;
+    if (k < s.nh) {
+      RS m = {};
+      bool ph = (s.mini_phase >> k) & 1;
+      m.legs = ph ? 0x5 : 0xA;
+      m.lift = ph ? 2 : 0;
+      m.edx = MINI_X[k] > 0 ? -1 : 1;
+      clawd(cx + MINI_X[k], ground, MINI_P, C_SUBAGENT, m, true);
+    }
+    grp0 = g;
+    grp_end(11);
+  }
+}
+
+static lv_area_t plus_box() {  // "+N" helpers label, face-local
+  return {(lv_coord_t)(CX + MINI_X[2] - 20), (lv_coord_t)(GROUND - 58), (lv_coord_t)(CX + MINI_X[2] + 20),
+          (lv_coord_t)(GROUND - 40)};
+}
+
 static void draw_cb(lv_event_t *e) {
-  dc = lv_event_get_draw_ctx(e);
+  lv_draw_ctx_t *dc = lv_event_get_draw_ctx(e);
   lv_area_t A;
   lv_obj_get_coords(face, &A);
-  const RS &s = drawn_rs;
-  const float cx = A.x1 + CX, ground = A.y1 + GROUND;
 
   // bubble tail (under the bubble, which is our child and drawn after us)
   if (bub_drawn > 0.02f && !lv_obj_has_flag(bubble, LV_OBJ_FLAG_HIDDEN)) {
@@ -186,66 +274,129 @@ static void draw_cb(lv_event_t *e) {
     lv_point_t pts[3] = {{(lv_coord_t)(B.x1 + 26), (lv_coord_t)(B.y2 - 4)},
                          {(lv_coord_t)(B.x1 + 50), (lv_coord_t)(B.y2 - 4)},
                          {(lv_coord_t)(B.x1 + 8), (lv_coord_t)(B.y2 + 16)}};
-    lv_draw_rect_dsc_t d;
-    lv_draw_rect_dsc_init(&d);
-    d.bg_color = C_SURFACE2;
-    d.bg_opa = (lv_opa_t)(bub_drawn * 255);
-    lv_draw_polygon(dc, &d, pts, 3);
-  }
-
-  // helpers: mini-Clawds standing beside the big one, shuffling their feet
-  for (int k = 0; k < s.nh && k < 4; k++) {
-    RS m = {};
-    bool ph = (s.mini_phase >> k) & 1;
-    m.legs = ph ? 0x5 : 0xA;
-    m.lift = ph ? 2 : 0;
-    m.edx = MINI_X[k] > 0 ? -1 : 1;
-    clawd(cx + MINI_X[k], ground, MINI_P, C_SUBAGENT, m, true);
-  }
-  if (s.nh > 4) {
-    lv_draw_label_dsc_t d;
-    lv_draw_label_dsc_init(&d);
-    d.font = F_SMALL;
-    d.color = C_SUBAGENT;
-    char b[8];
-    snprintf(b, sizeof b, "+%d", s.nh - 4);
-    lv_area_t a = {(lv_coord_t)(cx + MINI_X[2] - 20), (lv_coord_t)(ground - 58), (lv_coord_t)(cx + MINI_X[2] + 20),
-                   (lv_coord_t)(ground - 40)};
-    d.align = LV_TEXT_ALIGN_CENTER;
-    lv_draw_label(dc, &d, &a, b, nullptr);
-  }
-
-  // Clawd
-  clawd(cx, ground, P, s.grey ? COL_GREY : COL_BODY, s, false);
-  // (ox, oy, gp) now describe the big sprite
-
-  // waiting "!" up-left of the head
-  if (s.bang >= 0) {
-    float dy = s.bang ? -1 : 0;
-    px(0, -10 + dy, 2, 5, C_WAITING);
-    px(0, -4 + dy, 2, 2, C_WAITING);
-  }
-
-  // finish sparkles (pixel crosses popping around the head)
-  if (s.spark >= 0) {
-    static const float SX[6] = {-3, 39, 1, 35, -6, 42}, SY[6] = {-6, -4, -12, -11, 4, 6};
-    static const lv_color_t SC[3] = {C_WAITING, C_TEXT, C_ACCENT2};
-    for (int k = 0; k < 6; k++) {
-      int st = s.spark - k;  // each sparkle lives 4 steps, staggered
-      if (st < 0 || st > 3) continue;
-      sparkle(ox + SX[k] * P, oy + SY[k] * P, (st == 1 || st == 2) ? 2 : 1, SC[k % 3]);
+    lv_area_t tb = {(lv_coord_t)(B.x1 + 8), (lv_coord_t)(B.y2 - 4), (lv_coord_t)(B.x1 + 50), (lv_coord_t)(B.y2 + 16)};
+    if (_lv_area_is_on(&tb, dc->clip_area)) {
+      lv_draw_rect_dsc_t d;
+      lv_draw_rect_dsc_init(&d);
+      d.bg_color = C_SURFACE2;
+      d.bg_opa = (lv_opa_t)(bub_drawn * 255);
+      lv_draw_polygon(dc, &d, pts, 3);
     }
   }
 
-  // z's drifting up-right from the head
-  if (s.z >= 0) {
-    for (int k = 0; k < 3; k++) {
-      int st = (s.z + k * 6) % 18;  // 0..17
-      float b = 2 + st / 6;         // 2,3,4 px cells
-      lv_opa_t o = st < 2 ? 120 : (st > 15 ? 110 : 220);
-      zee(ox + 31 * P + st * 3, oy - 2 * P - st * 4, b, o);
+  lv_draw_rect_dsc_t d;
+  lv_draw_rect_dsc_init(&d);
+  const PR *L = rl[rdrawn];
+  for (int i = 0; i < rn[rdrawn]; i++) {
+    if (L[i].a.x2 < L[i].a.x1 || L[i].o == 0) continue;
+    lv_area_t a = L[i].a;
+    lv_area_move(&a, A.x1, A.y1);
+    if (!_lv_area_is_on(&a, dc->clip_area)) continue;
+    d.bg_color = L[i].c;
+    d.bg_opa = L[i].o;
+    lv_draw_rect(dc, &d, &a);
+  }
+
+  if (drawn_rs.nh > 4) {
+    lv_area_t a = plus_box();
+    lv_area_move(&a, A.x1, A.y1);
+    if (_lv_area_is_on(&a, dc->clip_area)) {
+      lv_draw_label_dsc_t ld;
+      lv_draw_label_dsc_init(&ld);
+      ld.font = F_SMALL;
+      ld.color = C_SUBAGENT;
+      ld.align = LV_TEXT_ALIGN_CENTER;
+      char b[8];
+      snprintf(b, sizeof b, "+%d", drawn_rs.nh - 4);
+      lv_draw_label(dc, &ld, &a, b, nullptr);
     }
   }
+}
+
+// ------------------------------------------------------------------ dirty rects
+#define MAXD 24
+static lv_area_t dirty[MAXD];
+static int nd;
+
+static uint32_t area_sz(const lv_area_t &a) { return (uint32_t)lv_area_get_width(&a) * lv_area_get_height(&a); }
+
+static void dirty_add(const lv_area_t &a) {
+  if (a.x2 < a.x1 || a.y2 < a.y1) return;
+  if (nd == MAXD) {  // full: fold into the last one
+    _lv_area_join(&dirty[MAXD - 1], &dirty[MAXD - 1], &a);
+    return;
+  }
+  dirty[nd++] = a;
+}
+
+// a \ b as up to 4 rects
+static void dirty_sub(const lv_area_t &a, const lv_area_t &b) {
+  lv_area_t i;
+  if (!_lv_area_intersect(&i, &a, &b)) { dirty_add(a); return; }
+  if (a.y1 < i.y1) dirty_add({a.x1, a.y1, a.x2, (lv_coord_t)(i.y1 - 1)});
+  if (i.y2 < a.y2) dirty_add({a.x1, (lv_coord_t)(i.y2 + 1), a.x2, a.y2});
+  if (a.x1 < i.x1) dirty_add({a.x1, i.y1, (lv_coord_t)(i.x1 - 1), i.y2});
+  if (i.x2 < a.x2) dirty_add({(lv_coord_t)(i.x2 + 1), i.y1, a.x2, i.y2});
+}
+
+static bool empty(const PR &r) { return r.a.x2 < r.a.x1 || r.o == 0; }
+
+static void diff_lists(int lo, int ln) {
+  int n = rn[lo] > rn[ln] ? rn[lo] : rn[ln];
+  static const PR E = {{0, 0, -1, -1}, {}, 0};
+  for (int i = 0; i < n; i++) {
+    const PR &o = i < rn[lo] ? rl[lo][i] : E;
+    const PR &w = i < rn[ln] ? rl[ln][i] : E;
+    bool eo = empty(o), ew = empty(w);
+    if (eo && ew) continue;
+    if (eo) { dirty_add(w.a); continue; }
+    if (ew) { dirty_add(o.a); continue; }
+    if (o.o != w.o || o.c.full != w.c.full) { dirty_add(o.a); dirty_add(w.a); continue; }
+    if (_lv_area_is_equal(&o.a, &w.a)) continue;
+    dirty_sub(o.a, w.a);
+    dirty_sub(w.a, o.a);
+  }
+}
+
+// Coalesce (like LVGL: join when the union is not bigger than the parts) and cap the count so we never
+// overflow LVGL's 32-entry invalid-area buffer (overflow = full-screen redraw).
+static void dirty_flush() {
+  bool merged = true;
+  while (merged) {
+    merged = false;
+    for (int i = 0; i < nd; i++)
+      for (int j = i + 1; j < nd; j++) {
+        lv_area_t u;
+        _lv_area_join(&u, &dirty[i], &dirty[j]);
+        if (area_sz(u) <= area_sz(dirty[i]) + area_sz(dirty[j]) + 64) {
+          dirty[i] = u;
+          dirty[j] = dirty[--nd];
+          merged = true;
+          j = i;  // restart inner scan for the grown area
+        }
+      }
+  }
+  while (nd > 6) {  // merge the cheapest pair
+    int bi = 0, bj = 1;
+    uint32_t best = UINT32_MAX;
+    for (int i = 0; i < nd; i++)
+      for (int j = i + 1; j < nd; j++) {
+        lv_area_t u;
+        _lv_area_join(&u, &dirty[i], &dirty[j]);
+        uint32_t c = area_sz(u) - area_sz(dirty[i]) - area_sz(dirty[j]);
+        if ((int32_t)c < 0) c = 0;
+        if (c < best) { best = c; bi = i; bj = j; }
+      }
+    _lv_area_join(&dirty[bi], &dirty[bi], &dirty[bj]);
+    dirty[bj] = dirty[--nd];
+  }
+  lv_area_t A;
+  lv_obj_get_coords(face, &A);
+  for (int i = 0; i < nd; i++) {
+    lv_area_move(&dirty[i], A.x1, A.y1);
+    lv_obj_invalidate_area(face, &dirty[i]);
+  }
+  nd = 0;
 }
 
 // ------------------------------------------------------------------ boxes
@@ -259,32 +410,6 @@ static lv_area_t sprite_box(const RS &s, bool extras) {
   if (extras && s.bang >= 0 && l > CX - 18 * P - 2) l = CX - 18 * P - 2;
   return {(lv_coord_t)(A.x1 + l + s.shake), (lv_coord_t)(A.y1 + top - 2), (lv_coord_t)(A.x1 + r + s.shake),
           (lv_coord_t)(A.y1 + GROUND + 1)};
-}
-
-static lv_area_t face_box(const RS &s) {
-  lv_area_t A;
-  lv_obj_get_coords(face, &A);
-  int x0 = A.x1 + CX - 18 * P + s.shake, y0 = A.y1 + GROUND - 20 * P - s.lift + (s.sit ? 3 * P : 0);
-  return {(lv_coord_t)(x0 + 6 * P), (lv_coord_t)(y0 + 2 * P), (lv_coord_t)(x0 + 30 * P - 1), (lv_coord_t)(y0 + 13 * P)};
-}
-
-static lv_area_t z_box(const RS &s) {
-  lv_area_t A;
-  lv_obj_get_coords(face, &A);
-  int x0 = A.x1 + CX - 18 * P + 31 * P, y0 = A.y1 + GROUND - 20 * P - s.lift + (s.sit ? 3 * P : 0);
-  return {(lv_coord_t)x0, (lv_coord_t)(y0 - 2 * P - 17 * 4 - 2), (lv_coord_t)(x0 + 17 * 3 + 22),
-          (lv_coord_t)(y0 - 2 * P + 22)};
-}
-
-static void minis_inval() {
-  lv_area_t A;
-  lv_obj_get_coords(face, &A);
-  lv_area_t l = {(lv_coord_t)(A.x1 + CX - 196 - 36), (lv_coord_t)(A.y1 + GROUND - 60), (lv_coord_t)(A.x1 + CX - 130 + 36),
-                 (lv_coord_t)(A.y1 + GROUND + 1)};
-  lv_area_t r = {(lv_coord_t)(A.x1 + CX + 130 - 36), (lv_coord_t)(A.y1 + GROUND - 60), (lv_coord_t)(A.x1 + CX + 196 + 36),
-                 (lv_coord_t)(A.y1 + GROUND + 1)};
-  lv_obj_invalidate_area(face, &l);
-  lv_obj_invalidate_area(face, &r);
 }
 
 // ------------------------------------------------------------------ input
@@ -377,8 +502,7 @@ void home_face_say(const char *txt, uint32_t ms, int prio) {
 bool home_face_bubble_visible() { return bub_until != 0; }
 void home_face_on_tap(void (*cb)()) { tap_cb = cb; }
 void home_face_resume() {
-  last_ms = lv_tick_get();
-  lv_obj_invalidate(face);
+  last_ms = lv_tick_get();  // the tile scrolling in repaints us; no extra invalidation needed
 }
 
 // ------------------------------------------------------------------ simulation -> render state
@@ -491,14 +615,6 @@ static RS compute(uint32_t now) {
   return s;
 }
 
-static bool only_face_changed(const RS &a, const RS &b) {
-  RS x = a, y = b;
-  x.eyes = y.eyes; x.wink = y.wink; x.blink = y.blink; x.blush = y.blush; x.mouth = y.mouth;
-  x.edx = y.edx; x.edy = y.edy;
-  x.nh = y.nh; x.mini_phase = y.mini_phase; x.z = y.z;
-  return memcmp(&x, &y, sizeof x) == 0;
-}
-
 void home_face_tick() {
   if (!face) return;
   uint32_t now = lv_tick_get();
@@ -519,9 +635,9 @@ void home_face_tick() {
   if (o == 0 && !lv_obj_has_flag(bubble, LV_OBJ_FLAG_HIDDEN)) {
     lv_obj_add_flag(bubble, LV_OBJ_FLAG_HIDDEN);
     bub_opa_set = -1;
-  } else if (o > 0 && abs(o - bub_opa_set) > 4) {
+  } else if (o > 0 && (abs(o - bub_opa_set) > 24 || (o >= 250 && bub_opa_set < 250))) {
     lv_obj_set_style_opa(bubble, o >= 250 ? LV_OPA_COVER : (lv_opa_t)o, 0);
-    bub_opa_set = o;
+    bub_opa_set = o >= 250 ? 255 : o;
   }
 
   cur_rs = compute(now);
@@ -537,27 +653,19 @@ void home_face_tick() {
     bub_drawn = bub_a;
     lv_obj_invalidate_area(face, &tb);
   }
-  if (first || memcmp(&cur_rs, &drawn_rs, sizeof(RS)) != 0) {
-    if (first) {
-      lv_obj_invalidate(face);
-    } else if (only_face_changed(cur_rs, drawn_rs)) {
-      if (memcmp(&cur_rs, &drawn_rs, sizeof(RS))) {
-        RS tmp = drawn_rs;  // anything face-ish changed?
-        tmp.nh = cur_rs.nh; tmp.mini_phase = cur_rs.mini_phase; tmp.z = cur_rs.z;
-        if (memcmp(&tmp, &cur_rs, sizeof(RS))) { lv_area_t fb = face_box(cur_rs); lv_obj_invalidate_area(face, &fb); }
-      }
-    } else {
-      lv_area_t a = sprite_box(drawn_rs, true), b = sprite_box(cur_rs, true);
-      lv_obj_invalidate_area(face, &a);
-      lv_obj_invalidate_area(face, &b);
-    }
-    if (cur_rs.nh != drawn_rs.nh || cur_rs.mini_phase != drawn_rs.mini_phase) minis_inval();
-    if (cur_rs.z != drawn_rs.z || cur_rs.lift != drawn_rs.lift || cur_rs.sit != drawn_rs.sit) {
-      lv_area_t a = z_box(drawn_rs), b = z_box(cur_rs);
-      lv_obj_invalidate_area(face, &a);
-      lv_obj_invalidate_area(face, &b);
-    }
+  if (first) {
+    record(cur_rs, rdrawn);
     drawn_rs = cur_rs;
+    lv_obj_invalidate(face);
     first = false;
+    return;
   }
+  if (memcmp(&cur_rs, &drawn_rs, sizeof(RS)) == 0) return;
+  int nl = rdrawn ^ 1;
+  record(cur_rs, nl);
+  diff_lists(rdrawn, nl);
+  if ((cur_rs.nh > 4 || drawn_rs.nh > 4) && cur_rs.nh != drawn_rs.nh) dirty_add(plus_box());
+  rdrawn = nl;  // draw_cb renders the new list from now on
+  drawn_rs = cur_rs;
+  dirty_flush();
 }

@@ -115,16 +115,30 @@ static void refresh_line() {
     strlcpy(shown_line, txt, sizeof shown_line);
     lv_label_set_text(line_lbl, txt);
   }
-  lv_obj_set_style_text_color(line_lbl, c, 0);
-  lv_obj_set_style_bg_color(line_dot, c, 0);
-  // waiting deserves more presence than "working"
-  lv_obj_set_style_text_opa(line_lbl, n_wait ? LV_OPA_COVER : LV_OPA_80, 0);
+  // style setters invalidate even when the value is unchanged: only touch them on a real change
+  static uint16_t shown_c = 0xFFFF;
+  static int shown_opa = -1;
+  lv_opa_t opa = n_wait ? LV_OPA_COVER : LV_OPA_80;   // waiting deserves more presence than "working"
+  if (c.full != shown_c) {
+    shown_c = c.full;
+    lv_obj_set_style_text_color(line_lbl, c, 0);
+    lv_obj_set_style_bg_color(line_dot, c, 0);
+  }
+  if (opa != shown_opa) {
+    shown_opa = opa;
+    lv_obj_set_style_text_opa(line_lbl, opa, 0);
+  }
 }
 
 static void refresh_clock(bool force) {
   uint32_t now = model_now();
+  // (called every 100 ms while the clock shows: a style set would invalidate the 120 px digits each time)
+  static int shown_night = -1;
   bool night = is_night();
-  lv_obj_set_style_text_color(clock_lbl, night ? lv_color_hex(0x9A7462) : lv_color_hex(0xB3ACA2), 0);
+  if ((int)night != shown_night || force) {
+    shown_night = night;
+    lv_obj_set_style_text_color(clock_lbl, night ? lv_color_hex(0x9A7462) : lv_color_hex(0xB3ACA2), 0);
+  }
   if (!now) {
     if (force || shown_min != -2) {
       lv_label_set_text(clock_lbl, "--:--");
@@ -318,6 +332,11 @@ static void activity(bool urgent, const char *why) {
 }
 
 void ambient_update(JsonObjectConst s) {
+  // reads only sessions + totals.tools_today: skip the walk when neither part changed
+  static uint32_t seen_sv = 0xFFFFFFFF, seen_tv = 0xFFFFFFFF;
+  uint32_t sv = model_part_version("sessions"), tv = model_part_version("totals");
+  if (sv == seen_sv && tv == seen_tv) return;
+  seen_sv = sv; seen_tv = tv;
   int b = 0, w = 0, i = 0, sub = 0, n = 0;
   uint32_t sig = 2166136261u;
   const char *wn = "";
@@ -403,7 +422,10 @@ void ambient_tick() {
     hal_set_brightness(bri_cur);
   }
 
-  if (ambient_saver_active()) {
+  // night clock: minute flip / 20 s drift / status line — checked once a second, each redraws only on change
+  static uint32_t sec_ms = 0;
+  if (ambient_saver_active() && now - sec_ms >= 1000) {
+    sec_ms = now;
     refresh_clock(false);
     drift(false);
     static uint32_t line_ms = 0;

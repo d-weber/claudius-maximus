@@ -1,9 +1,15 @@
 // System monitor tile (owner: system). btop-inspired host CPU / RAM dashboard.
 // Data: state.system (schema at the top of host/companion/providers/system.py).
 // Widgets are created once; update() only changes values. No timers / continuous animations.
+// Perf: update() only touches widgets whose *displayed* value changed (text compare, colour buckets),
+// never forces a layout pass (no lv_obj_align_to), and the two charts are rendered by hand into small
+// opaque canvases (cheap image blit instead of LVGL's masked gradient area fill).
 #include "screens.h"
+#include "../core/model.h"
 #include "../ui/theme.h"
 #include <math.h>
+#include <stdarg.h>
+#include <esp_heap_caps.h>
 
 #define SYS_HIST_N 60
 #define SYS_NET_N 40
@@ -15,10 +21,9 @@ static lv_obj_t *root, *placeholder;
 static lv_obj_t *lb_host, *lb_meta;
 // cpu card
 static lv_obj_t *cpu_card, *lb_cpu, *lb_load, *lb_cores_info, *lb_thermal, *thermal_dot;
-static lv_obj_t *cpu_chart, *lb_scale;
+static lv_obj_t *lb_scale;
 static int cpu_scale = 100;
-static lv_chart_series_t *cpu_ser;
-static lv_coord_t cpu_pts[SYS_HIST_N];
+static int16_t cpu_pts[SYS_HIST_N];
 static int n_cores = 0;
 static lv_obj_t *core_lb[SYS_MAX_CORES], *core_bar[SYS_MAX_CORES], *core_val[SYS_MAX_CORES];
 // mem card
@@ -27,13 +32,11 @@ static lv_obj_t *mem_seg[4], *mem_leg[4];
 // procs
 static lv_obj_t *pr_dot[SYS_PROCS], *pr_name[SYS_PROCS], *pr_bar[SYS_PROCS], *pr_cpu[SYS_PROCS], *pr_mem[SYS_PROCS];
 // net
-static lv_obj_t *lb_rx, *lb_tx, *net_chart;
-static lv_chart_series_t *rx_ser, *tx_ser;
-static lv_coord_t rx_pts[SYS_NET_N], tx_pts[SYS_NET_N];
+static lv_obj_t *lb_rx, *lb_tx;
+static int16_t rx_pts[SYS_NET_N], tx_pts[SYS_NET_N];
 // claude
 static lv_obj_t *lb_cl_pct, *lb_cl_sub, *lb_cl_detail;
 
-static uint32_t last_hash = 0;
 
 #define C_MEM_APP   C_ACCENT
 #define C_MEM_WIRED C_INFO
@@ -51,6 +54,44 @@ static lv_color_t load_color(int v) {
   if (v <= 65) return lv_color_mix(C_WAITING, C_IDLE, (uint8_t)((v - 40) * 255 / 25));
   if (v <= 85) return lv_color_mix(C_BUSY, C_WAITING, (uint8_t)((v - 65) * 255 / 20));
   return lv_color_mix(C_ERROR, C_BUSY, (uint8_t)((v - 85) * 255 / 15));
+}
+
+// quantised: colours only change in 5% steps, so style updates happen on bucket changes only
+static lv_color_t load_color_q(int v) { return load_color(v <= 40 ? v : (v / 5) * 5); }
+
+// ---- change-only setters (each LVGL setter invalidates / refreshes styles even if unchanged) ----
+static bool set_txt(lv_obj_t *l, const char *t) {
+  const char *o = lv_label_get_text(l);
+  if (o && !strcmp(o, t)) return false;
+  lv_label_set_text(l, t);
+  return true;
+}
+
+static bool set_txtf(lv_obj_t *l, const char *fmt, ...) {
+  char b[112];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(b, sizeof b, fmt, ap);
+  va_end(ap);
+  return set_txt(l, b);
+}
+
+static void set_tcolor(lv_obj_t *o, lv_color_t c) {
+  if (lv_obj_get_style_text_color(o, 0).full != c.full) lv_obj_set_style_text_color(o, c, 0);
+}
+
+static void set_bgcolor(lv_obj_t *o, lv_color_t c, lv_style_selector_t sel = 0) {
+  if (lv_obj_get_style_bg_color(o, sel).full != c.full) lv_obj_set_style_bg_color(o, c, sel);
+}
+
+static void show(lv_obj_t *o, bool on) {
+  if (lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN) != on) return;
+  if (on) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+  else lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+}
+
+static int txt_w(const lv_font_t *f, const char *t) {
+  return lv_txt_get_width(t, strlen(t), f, 0, LV_TEXT_FLAG_NONE);
 }
 
 static lv_obj_t *mk_card(lv_obj_t *p, int x, int y, int w, int h) {
@@ -109,18 +150,18 @@ static lv_obj_t *mk_bar(lv_obj_t *p, int x, int y, int w, int h) {
   lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_style_radius(b, h / 2, LV_PART_MAIN);
   lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(b, C_IDLE, LV_PART_INDICATOR);
   lv_obj_set_style_radius(b, h / 2, LV_PART_INDICATOR);
-  lv_obj_set_style_bg_grad_dir(b, LV_GRAD_DIR_HOR, LV_PART_INDICATOR);
-  lv_obj_set_style_anim_time(b, 500, LV_PART_MAIN);
+  lv_bar_set_value(b, 0, LV_ANIM_OFF);
   return b;
 }
 
+// solid bucketed colour, no animation (a 500 ms anim on 22 bars = ~30 extra frames every second)
 static void set_bar(lv_obj_t *b, int v) {
   if (v < 0) v = 0;
   if (v > 100) v = 100;
-  lv_obj_set_style_bg_color(b, C_IDLE, LV_PART_INDICATOR);
-  lv_obj_set_style_bg_grad_color(b, load_color(v), LV_PART_INDICATOR);
-  lv_bar_set_value(b, v, LV_ANIM_ON);
+  set_bgcolor(b, load_color_q(v), LV_PART_INDICATOR);
+  if (lv_bar_get_value(b) != v) lv_bar_set_value(b, v, LV_ANIM_OFF);
 }
 
 static void fmt_mb(char *out, size_t n, long mb) {
@@ -141,54 +182,124 @@ static void fmt_uptime(char *out, size_t n, long s) {
   else snprintf(out, n, "up %ldm", m);
 }
 
-// Faded area under chart lines (LVGL 8 "faded area" pattern).
-static void chart_area_cb(lv_event_t *e) {
-  lv_obj_t *obj = lv_event_get_target(e);
-  lv_obj_draw_part_dsc_t *dsc = lv_event_get_draw_part_dsc(e);
-  if (dsc->part != LV_PART_ITEMS || !dsc->p1 || !dsc->p2 || !dsc->line_dsc) return;
-  lv_opa_t top_opa = (lv_opa_t)(uintptr_t)lv_event_get_user_data(e);
-  lv_draw_mask_line_param_t line_mask;
-  lv_draw_mask_line_points_init(&line_mask, dsc->p1->x, dsc->p1->y, dsc->p2->x, dsc->p2->y,
-                                LV_DRAW_MASK_LINE_SIDE_BOTTOM);
-  int16_t line_id = lv_draw_mask_add(&line_mask, NULL);
-  lv_draw_mask_fade_param_t fade_mask;
-  lv_coord_t ytop = LV_MIN(dsc->p1->y, dsc->p2->y);
-  lv_draw_mask_fade_init(&fade_mask, &obj->coords, top_opa, ytop, LV_OPA_TRANSP, obj->coords.y2);
-  int16_t fade_id = lv_draw_mask_add(&fade_mask, NULL);
-  lv_draw_rect_dsc_t rd;
-  lv_draw_rect_dsc_init(&rd);
-  rd.bg_opa = LV_OPA_COVER;
-  rd.bg_color = dsc->line_dsc->color;
-  lv_area_t a;
-  a.x1 = dsc->p1->x;
-  a.x2 = dsc->p2->x - 1;
-  a.y1 = LV_MIN(dsc->p1->y, dsc->p2->y);
-  a.y2 = obj->coords.y2;
-  lv_draw_rect(dsc->draw_ctx, &rd, &a);
-  lv_draw_mask_free_param(&line_mask);
-  lv_draw_mask_free_param(&fade_mask);
-  lv_draw_mask_remove_id(line_id);
-  lv_draw_mask_remove_id(fade_id);
+// ---- canvas line charts --------------------------------------------------------------------------
+// Rendered by hand into an opaque RGB565 canvas in PSRAM: background + grid + faded area + 2-px
+// anti-aliased line. Costs ~1-2 ms for the 310x74 CPU chart and LVGL just blits it (no masks).
+#define SYS_PT_NONE INT16_MIN
+#define SYS_PLOT_MAXW 320
+#define SYS_Y_NONE INT16_MIN
+
+struct SysPlot {
+  lv_obj_t *cv = nullptr;
+  lv_color_t *buf = nullptr;
+  int w = 0, h = 0, lw = 2;
+  bool grid = false;
+  uint32_t sig = 0;
+};
+struct SysSeries { const int16_t *v; int n; lv_color_t col; lv_opa_t fill; };
+
+static SysPlot cpu_plot, net_plot;
+
+static void plot_create(SysPlot &p, lv_obj_t *parent, int x, int y, int w, int h, int lw, bool grid) {
+  p.w = w; p.h = h; p.lw = lw; p.grid = grid;
+  p.buf = (lv_color_t *)heap_caps_malloc((size_t)w * h * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+  if (!p.buf) return;
+  for (int i = 0; i < w * h; i++) p.buf[i] = C_SURFACE;
+  p.cv = lv_canvas_create(parent);
+  lv_canvas_set_buffer(p.cv, p.buf, w, h, LV_IMG_CF_TRUE_COLOR);
+  lv_obj_set_pos(p.cv, x, y);
+  lv_obj_clear_flag(p.cv, LV_OBJ_FLAG_CLICKABLE);
 }
 
-static lv_obj_t *mk_chart(lv_obj_t *p, int x, int y, int w, int h, int points, lv_opa_t fill_opa) {
-  lv_obj_t *c = lv_chart_create(p);
-  lv_obj_remove_style_all(c);
-  lv_obj_set_pos(c, x, y);
-  lv_obj_set_size(c, w, h);
-  lv_chart_set_type(c, LV_CHART_TYPE_LINE);
-  lv_chart_set_point_count(c, points);
-  lv_chart_set_update_mode(c, LV_CHART_UPDATE_MODE_SHIFT);
-  lv_chart_set_range(c, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
-  lv_chart_set_div_line_count(c, 0, 0);
-  lv_obj_set_style_line_width(c, 2, LV_PART_ITEMS);
-  lv_obj_set_style_line_rounded(c, true, LV_PART_ITEMS);
-  lv_obj_set_style_size(c, 0, LV_PART_INDICATOR);
-  lv_obj_clear_flag(c, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_event_cb(c, chart_area_cb, LV_EVENT_DRAW_PART_BEGIN, (void *)(uintptr_t)fill_opa);
-  return c;
+static uint32_t fnv1a(const void *d, size_t n, uint32_t h = 2166136261u) {
+  const uint8_t *s = (const uint8_t *)d;
+  for (size_t i = 0; i < n; i++) h = (h ^ s[i]) * 16777619u;
+  return h;
 }
+
+static void plot_render(SysPlot &p, const SysSeries *ser, int ns, int vmax) {
+  if (!p.buf || vmax <= 0) return;
+  // skip if nothing visible changed
+  uint32_t sig = fnv1a(&vmax, sizeof vmax);
+  for (int k = 0; k < ns; k++) {
+    sig = fnv1a(ser[k].v, ser[k].n * sizeof(int16_t), sig);
+    sig = fnv1a(&ser[k].col, sizeof(lv_color_t), sig);
+  }
+  if (sig == p.sig) return;
+  p.sig = sig;
+
+  const int W = p.w, H = p.h;
+  if (W > SYS_PLOT_MAXW || H > 255) return;
+  // per-column scratch, internal RAM (~1.9 KB): y in 8.8 fixed px (SYS_Y_NONE = no data), first filled row
+  static int16_t ys[2][SYS_PLOT_MAXW];
+  static uint8_t y0s[2][SYS_PLOT_MAXW];
+  const int32_t top = (p.lw * 256) / 2, span = (H - 1) * 256 - top;
+  for (int k = 0; k < 2; k++) {
+    if (k >= ns) { memset(y0s[k], H, W); continue; }
+    const SysSeries &s = ser[k];
+    for (int x = 0; x < W; x++) {
+      int32_t pos = s.n > 1 ? (int32_t)x * (s.n - 1) * 256 / (W - 1) : 0;
+      int i = pos >> 8, f = pos & 255;
+      int a = s.v[i], b = (i + 1 < s.n) ? s.v[i + 1] : a;
+      y0s[k][x] = H;
+      if (a == SYS_PT_NONE || (f && b == SYS_PT_NONE)) { ys[k][x] = SYS_Y_NONE; continue; }
+      if (b == SYS_PT_NONE) b = a;
+      int32_t v = a * 256 + (b - a) * f;
+      if (v < 0) v = 0;
+      if (v > vmax * 256) v = vmax * 256;
+      ys[k][x] = (int16_t)(top + span - v * (span >> 4) / (vmax * 16));  // H < 128 -> fits int32
+      if (s.fill) y0s[k][x] = (uint8_t)(ys[k][x] >> 8);
+    }
+  }
+  // background + grid + faded area in one row-major pass. The fill alpha depends on the row only
+  // (s.fill at the top of the plot -> 0 at the bottom), so each row needs just 4 precomputed
+  // colours (none / series 0 / series 1 / both) and the per-pixel work is a table lookup.
+  lv_color_t bg = C_SURFACE, gc = lv_color_mix(C_BORDER, C_SURFACE, LV_OPA_50);
+  lv_opa_t f0 = ns > 0 ? ser[0].fill : 0, f1 = ns > 1 ? ser[1].fill : 0;
+  lv_color_t c0 = ns > 0 ? ser[0].col : bg, c1 = ns > 1 ? ser[1].col : bg;
+  for (int r = 0; r < H; r++) {
+    bool g = p.grid && (r == H / 4 || r == H / 2 || r == H * 3 / 4);
+    lv_color_t t[4];
+    t[0] = g ? gc : bg;
+    uint8_t a0 = (uint8_t)(f0 * (H - r) / H), a1 = (uint8_t)(f1 * (H - r) / H);
+    t[1] = lv_color_mix(c0, t[0], a0);
+    t[2] = lv_color_mix(c1, t[0], a1);
+    t[3] = lv_color_mix(c1, t[1], a1);
+    lv_color_t *row = p.buf + r * W;
+    const uint8_t *ya = y0s[0], *yb = y0s[1];
+    int x = 0;
+    if (((uintptr_t)row & 3) == 0) {  // two pixels per 32-bit store
+      uint32_t *row32 = (uint32_t *)row;
+      for (; x + 1 < W; x += 2) {
+        uint32_t lo = t[(r >= ya[x]) | ((r >= yb[x]) << 1)].full;
+        uint32_t hi = t[(r >= ya[x + 1]) | ((r >= yb[x + 1]) << 1)].full;
+        row32[x >> 1] = lo | (hi << 16);
+      }
+    }
+    for (; x < W; x++) row[x] = t[(r >= ya[x]) | ((r >= yb[x]) << 1)];
+  }
+  // line: column x spans between the midpoints to its neighbours, thickened by lw, AA ends
+  const int32_t half = p.lw * 128;
+  for (int k = 0; k < ns && k < 2; k++) {
+    const int16_t *y = ys[k];
+    for (int x = 0; x < W; x++) {
+      if (y[x] == SYS_Y_NONE) continue;
+      int32_t yl = (x > 0 && y[x - 1] != SYS_Y_NONE) ? (y[x - 1] + y[x]) / 2 : y[x];
+      int32_t yr = (x + 1 < W && y[x + 1] != SYS_Y_NONE) ? (y[x + 1] + y[x]) / 2 : y[x];
+      int32_t lo = LV_MIN(LV_MIN(yl, yr), y[x]) - half, hi = LV_MAX(LV_MAX(yl, yr), y[x]) + half;
+      int r0 = LV_MAX(0, lo >> 8), r1 = LV_MIN(H - 1, hi >> 8);
+      for (int r = r0; r <= r1; r++) {
+        int32_t cov = LV_MIN(hi, (r + 1) * 256) - LV_MAX(lo, r * 256);
+        if (cov <= 0) continue;
+        lv_color_t *px = &p.buf[r * W + x];
+        *px = cov >= 255 ? ser[k].col : lv_color_mix(ser[k].col, *px, (uint8_t)cov);
+      }
+    }
+  }
+  lv_obj_invalidate(p.cv);
+}
+
+static void place_cl_sub();
 
 // ---- create ------------------------------------------------------------------------------------
 static void create_cores(int n) {
@@ -238,22 +349,18 @@ static void create(lv_obj_t *p) {
   mk_label(cpu_card, &lv_font_montserrat_12, C_MUTED, 14, 10, "CPU");
   lb_load = mk_rlabel(cpu_card, &lv_font_montserrat_12, C_MUTED, 200, 10, 242, "");
   lb_cpu = mk_label(cpu_card, F_HUGE, C_IDLE, 12, 28, "--");
+  lv_label_set_long_mode(lb_cpu, LV_LABEL_LONG_CLIP);
+  lv_obj_set_width(lb_cpu, 118);
   lb_cores_info = mk_label(cpu_card, &lv_font_montserrat_12, C_MUTED, 14, 80, "");
   thermal_dot = mk_rect(cpu_card, 15, 101, 7, 7, C_IDLE, 4);
   lb_thermal = mk_label(cpu_card, &lv_font_montserrat_12, C_MUTED, 27, 96, "");
 
-  // chart frame: subtle grid lines (25/50/75%)
+  // chart (grid lines 25/50/75% drawn inside the canvas) + baseline
   int cx = 132, cy = 30, cw = 310, ch = 74;
-  for (int i = 1; i <= 3; i++) {
-    lv_obj_t *g = mk_rect(cpu_card, cx, cy + ch * i / 4, cw, 1, C_BORDER, 0);
-    lv_obj_set_style_bg_opa(g, LV_OPA_50, 0);
-  }
   lv_obj_t *base = mk_rect(cpu_card, cx, cy + ch, cw, 1, C_BORDER, 0);
   (void)base;
-  cpu_chart = mk_chart(cpu_card, cx, cy, cw, ch, SYS_HIST_N, LV_OPA_70);
-  cpu_ser = lv_chart_add_series(cpu_chart, C_ACCENT, LV_CHART_AXIS_PRIMARY_Y);
-  for (auto &v : cpu_pts) v = LV_CHART_POINT_NONE;
-  lv_chart_set_ext_y_array(cpu_chart, cpu_ser, cpu_pts);
+  plot_create(cpu_plot, cpu_card, cx, cy, cw, ch, 2, true);
+  for (auto &v : cpu_pts) v = SYS_PT_NONE;
   lb_scale = mk_label(cpu_card, &lv_font_montserrat_10, C_DIM, cx + 2, cy - 1, "100%");
   lv_obj_t *l60 = mk_label(cpu_card, &lv_font_montserrat_10, C_DIM, cx, cy + ch + 1, "-60s");
   (void)l60;
@@ -304,13 +411,8 @@ static void create(lv_obj_t *p) {
   mk_label(nc, &lv_font_montserrat_12, C_MUTED, 12, 8, "NETWORK");
   lb_rx = mk_label(nc, &lv_font_montserrat_12, C_RX, 12, 26, "");
   lb_tx = mk_label(nc, &lv_font_montserrat_12, C_TX, 12, 44, "");
-  net_chart = mk_chart(nc, 92, 10, 62, 48, SYS_NET_N, LV_OPA_50);
-  lv_obj_set_style_line_width(net_chart, 1, LV_PART_ITEMS);
-  rx_ser = lv_chart_add_series(net_chart, C_RX, LV_CHART_AXIS_PRIMARY_Y);
-  tx_ser = lv_chart_add_series(net_chart, C_TX, LV_CHART_AXIS_PRIMARY_Y);
-  for (int i = 0; i < SYS_NET_N; i++) rx_pts[i] = tx_pts[i] = LV_CHART_POINT_NONE;
-  lv_chart_set_ext_y_array(net_chart, rx_ser, rx_pts);
-  lv_chart_set_ext_y_array(net_chart, tx_ser, tx_pts);
+  plot_create(net_plot, nc, 92, 10, 62, 48, 1, false);
+  for (int i = 0; i < SYS_NET_N; i++) rx_pts[i] = tx_pts[i] = SYS_PT_NONE;
 
   // Claude footprint card
   lv_obj_t *cc = mk_card(root, 304, 390, 164, 66);
@@ -322,39 +424,30 @@ static void create(lv_obj_t *p) {
   lb_cl_pct = mk_label(cc, F_TITLE, C_ACCENT2, 12, 24, "--");
   lb_cl_sub = mk_label(cc, &lv_font_montserrat_12, C_MUTED, 0, 33, "cpu");
   lb_cl_detail = mk_label(cc, &lv_font_montserrat_12, C_MUTED, 12, 50, "");
+  place_cl_sub();
   lv_label_set_long_mode(lb_cl_detail, LV_LABEL_LONG_CLIP);
   lv_obj_set_width(lb_cl_detail, 146);
 }
 
 // ---- update ------------------------------------------------------------------------------------
-static uint32_t fnv1a(const char *s, size_t n) {
-  uint32_t h = 2166136261u;
-  for (size_t i = 0; i < n; i++) h = (h ^ (uint8_t)s[i]) * 16777619u;
-  return h;
-}
-
 static void update_cpu(JsonObjectConst sy) {
   int cpu = sy["cpu"] | 0;
-  lv_label_set_text_fmt(lb_cpu, "%d%%", cpu);
-  lv_obj_set_style_text_color(lb_cpu, load_color(cpu), 0);
+  set_txtf(lb_cpu, "%d%%", cpu);
+  set_tcolor(lb_cpu, load_color_q(cpu));
 
   JsonArrayConst load = sy["load"].as<JsonArrayConst>();
   if (load.size() >= 3)
-  {
-    char lb[48];
-    snprintf(lb, sizeof lb, "load  %.1f  %.1f  %.1f", (double)(load[0] | 0.0f), (double)(load[1] | 0.0f),
+    set_txtf(lb_load, "load  %.1f  %.1f  %.1f", (double)(load[0] | 0.0f), (double)(load[1] | 0.0f),
              (double)(load[2] | 0.0f));
-    lv_label_set_text(lb_load, lb);
-  }
   else
-    lv_label_set_text(lb_load, "");
+    set_txt(lb_load, "");
 
   // history (right-aligned)
   JsonArrayConst hist = sy["hist"].as<JsonArrayConst>();
   int n = hist.size();
   if (n > SYS_HIST_N) n = SYS_HIST_N;
   int skip = (int)hist.size() - n, off = SYS_HIST_N - n, i = 0;
-  for (int k = 0; k < off; k++) cpu_pts[k] = LV_CHART_POINT_NONE;
+  for (int k = 0; k < off; k++) cpu_pts[k] = SYS_PT_NONE;
   for (JsonVariantConst v : hist) {
     if (i++ < skip) continue;
     int x = v | 0;
@@ -363,15 +456,14 @@ static void update_cpu(JsonObjectConst sy) {
   // auto-scale so an idle machine still shows texture (25 / 50 / 100 %)
   int mx = 0;
   for (int k = 0; k < SYS_HIST_N; k++)
-    if (cpu_pts[k] != LV_CHART_POINT_NONE && cpu_pts[k] > mx) mx = cpu_pts[k];
+    if (cpu_pts[k] != SYS_PT_NONE && cpu_pts[k] > mx) mx = cpu_pts[k];
   int scale = mx <= 22 ? 25 : mx <= 45 ? 50 : 100;
   if (scale != cpu_scale) {
     cpu_scale = scale;
-    lv_chart_set_range(cpu_chart, LV_CHART_AXIS_PRIMARY_Y, 0, scale);
-    lv_label_set_text_fmt(lb_scale, "%d%%", scale);
+    set_txtf(lb_scale, "%d%%", scale);
   }
-  lv_chart_refresh(cpu_chart);
-  lv_chart_set_series_color(cpu_chart, cpu_ser, lv_color_mix(load_color(cpu), C_ACCENT, 110));
+  SysSeries cs = {cpu_pts, SYS_HIST_N, lv_color_mix(load_color_q(cpu), C_ACCENT, 110), LV_OPA_70};
+  plot_render(cpu_plot, &cs, 1, cpu_scale);
 
   // cores
   JsonArrayConst cores = sy["cores"].as<JsonArrayConst>();
@@ -387,19 +479,19 @@ static void update_cpu(JsonObjectConst sy) {
     int v = cores[k] | 0;
     if (use_kinds) {
       bool e = kinds[k] == 'E';
-      lv_label_set_text_fmt(core_lb[k], "%c%d", e ? 'E' : 'P', e ? ++ie : ++ip);
-      lv_obj_set_style_text_color(core_lb[k], e ? C_DIM : C_MUTED, 0);
+      set_txtf(core_lb[k], "%c%d", e ? 'E' : 'P', e ? ++ie : ++ip);
+      set_tcolor(core_lb[k], e ? C_DIM : C_MUTED);
     } else {
-      lv_label_set_text_fmt(core_lb[k], "%d", k + 1);
+      set_txtf(core_lb[k], "%d", k + 1);
     }
     set_bar(core_bar[k], v);
-    lv_label_set_text_fmt(core_val[k], "%d%%", v);
-    lv_obj_set_style_text_color(core_val[k], v >= 85 ? load_color(v) : C_MUTED, 0);
+    set_txtf(core_val[k], "%d%%", v);
+    set_tcolor(core_val[k], v >= 85 ? load_color_q(v) : C_MUTED);
   }
   if (use_kinds && ne && np)
-    lv_label_set_text_fmt(lb_cores_info, "%dP + %dE cores", np, ne);
+    set_txtf(lb_cores_info, "%dP + %dE cores", np, ne);
   else
-    lv_label_set_text_fmt(lb_cores_info, "%d cores", (int)(sy["ncpu"] | nc));
+    set_txtf(lb_cores_info, "%d cores", (int)(sy["ncpu"] | nc));
 
   const char *th = sy["thermal"] | "";
   if (*th) {
@@ -407,12 +499,12 @@ static void update_cpu(JsonObjectConst sy) {
                    : !strcmp(th, "fair")  ? C_WAITING
                    : !strcmp(th, "serious") ? C_BUSY
                                             : C_ERROR;
-    lv_label_set_text_fmt(lb_thermal, "thermal %s", th);
-    lv_obj_set_style_bg_color(thermal_dot, c, 0);
-    lv_obj_clear_flag(thermal_dot, LV_OBJ_FLAG_HIDDEN);
+    set_txtf(lb_thermal, "thermal %s", th);
+    set_bgcolor(thermal_dot, c);
+    show(thermal_dot, true);
   } else {
-    lv_label_set_text(lb_thermal, "");
-    lv_obj_add_flag(thermal_dot, LV_OBJ_FLAG_HIDDEN);
+    set_txt(lb_thermal, "");
+    show(thermal_dot, false);
   }
 }
 
@@ -421,20 +513,25 @@ static void update_mem(JsonObjectConst sy) {
   long total = m["total"] | 0L, used = m["used"] | 0L;
   char a[16], b[16];
   if (total <= 0) {
-    lv_label_set_text(lb_mem_used, "--");
-    lv_label_set_text(lb_mem_total, "");
-    lv_label_set_text(lb_mem_pct, "");
+    set_txt(lb_mem_used, "--");
+    set_txt(lb_mem_total, "");
+    set_txt(lb_mem_pct, "");
     return;
   }
   int pct = (int)(used * 100 / total);
   snprintf(a, sizeof a, "%.1f", used / 1024.0);
-  lv_label_set_text(lb_mem_used, a);
+  bool moved = set_txt(lb_mem_used, a);
   snprintf(a, sizeof a, "/ %.0f GB", total / 1024.0);
-  lv_label_set_text(lb_mem_total, a);
-  lv_obj_align_to(lb_mem_total, lb_mem_used, LV_ALIGN_OUT_RIGHT_BOTTOM, 6, -3);
-  lv_label_set_text_fmt(lb_mem_pct, "%d%%", pct);
-  lv_obj_set_style_text_color(lb_mem_pct, load_color(pct), 0);
-  lv_obj_align_to(lb_mem_pct, lb_mem_total, LV_ALIGN_OUT_RIGHT_MID, 6, 0);
+  moved |= set_txt(lb_mem_total, a);
+  moved |= set_txtf(lb_mem_pct, "%d%%", pct);
+  set_tcolor(lb_mem_pct, load_color_q(pct));
+  if (moved) {  // manual "align right of" (lv_obj_align_to forces a full-screen layout pass)
+    int lh_big = lv_font_get_line_height(F_TITLE), lh = lv_font_get_line_height(F_SMALL);
+    int x = 14 + txt_w(F_TITLE, lv_label_get_text(lb_mem_used)) + 6, y = 26 + lh_big - lh - 3;
+    lv_obj_set_pos(lb_mem_total, x, y);
+    x += txt_w(F_SMALL, lv_label_get_text(lb_mem_total)) + 6;
+    lv_obj_set_pos(lb_mem_pct, x, y);
+  }
 
   long seg[4] = {m["app"] | -1L, m["wired"] | -1L, m["comp"] | -1L, m["cache"] | -1L};
   static const char *names[4] = {"app", "wired", "comp", "cache"};
@@ -448,22 +545,19 @@ static void update_mem(JsonObjectConst sy) {
     long v = seg[i] < 0 ? 0 : seg[i];
     int w = (int)(v * W / total);
     if (x + w > W) w = W - x;
-    lv_obj_set_x(mem_seg[i], x);
+    lv_obj_set_x(mem_seg[i], x);      // both are no-ops when unchanged
     lv_obj_set_width(mem_seg[i], w);
     x += w;
   }
   // legend under the bar, one quarter each
   for (int i = 0; i < 4; i++) {
     lv_obj_t *dot = (lv_obj_t *)lv_obj_get_user_data(mem_leg[i]);
-    if (!have || seg[i] < 0) {
-      lv_obj_add_flag(mem_leg[i], LV_OBJ_FLAG_HIDDEN);
-      lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN);
-      continue;
-    }
-    lv_obj_clear_flag(mem_leg[i], LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(dot, LV_OBJ_FLAG_HIDDEN);
+    bool on = have && seg[i] >= 0;
+    show(mem_leg[i], on);
+    show(dot, on);
+    if (!on) continue;
     fmt_mb(a, sizeof a, seg[i]);
-    lv_label_set_text_fmt(mem_leg[i], "%s %s", names[i], a);
+    set_txtf(mem_leg[i], "%s %s", names[i], a);
     int lx = 14 + i * 108;
     lv_obj_set_pos(dot, lx, 74);
     lv_obj_set_pos(mem_leg[i], lx + 12, 70);
@@ -475,8 +569,8 @@ static void update_mem(JsonObjectConst sy) {
   fmt_mb(b, sizeof b, sw);
   char pr[24] = "";
   if (pres >= 0) snprintf(pr, sizeof pr, "pressure %d%%   ", pres);
-  lv_label_set_text_fmt(lb_mem_right, "%sswap %s", pr, sw > 0 ? b : "0");
-  lv_obj_set_style_text_color(lb_mem_right, !strcmp(lvl, "critical") ? C_ERROR : !strcmp(lvl, "warn") ? C_WAITING : C_MUTED, 0);
+  set_txtf(lb_mem_right, "%sswap %s", pr, sw > 0 ? b : "0");
+  set_tcolor(lb_mem_right, !strcmp(lvl, "critical") ? C_ERROR : !strcmp(lvl, "warn") ? C_WAITING : C_MUTED);
 }
 
 static void update_procs(JsonObjectConst sy) {
@@ -484,29 +578,23 @@ static void update_procs(JsonObjectConst sy) {
   for (int i = 0; i < SYS_PROCS; i++) {
     JsonObjectConst p = procs[i];
     bool on = !p.isNull();
-    lv_obj_t *objs[5] = {pr_dot[i], pr_name[i], pr_bar[i], pr_cpu[i], pr_mem[i]};
-    for (auto o : objs) {
-      if (on) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
-      else lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
-    }
+    bool cl = on && (p["cl"] | 0) != 0;
+    show(pr_dot[i], cl);
+    show(pr_name[i], on);
+    show(pr_bar[i], on);
+    show(pr_cpu[i], on);
+    show(pr_mem[i], on);
     if (!on) continue;
-    bool cl = (p["cl"] | 0) != 0;
     float c = p["c"] | 0.0f;
     long mb = p["m"] | 0L;
     char mbs[16];
     fmt_mb(mbs, sizeof mbs, mb);
-    lv_label_set_text(pr_name[i], p["n"] | "?");
-    lv_obj_set_style_text_color(pr_name[i], cl ? C_ACCENT2 : C_TEXT, 0);
-    if (cl) lv_obj_clear_flag(pr_dot[i], LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(pr_dot[i], LV_OBJ_FLAG_HIDDEN);
-    if (c >= 10) lv_label_set_text_fmt(pr_cpu[i], "%d%%", (int)lroundf(c));
-    else {
-      char cb[12];
-      snprintf(cb, sizeof cb, "%.1f%%", (double)c);
-      lv_label_set_text(pr_cpu[i], cb);
-    }
-    lv_obj_set_style_text_color(pr_cpu[i], c >= 85 ? load_color((int)c) : C_TEXT, 0);
-    lv_label_set_text(pr_mem[i], mbs);
+    set_txt(pr_name[i], p["n"] | "?");
+    set_tcolor(pr_name[i], cl ? C_ACCENT2 : C_TEXT);
+    if (c >= 10) set_txtf(pr_cpu[i], "%d%%", (int)lroundf(c));
+    else set_txtf(pr_cpu[i], "%.1f%%", (double)c);
+    set_tcolor(pr_cpu[i], c >= 85 ? load_color_q((int)c) : C_TEXT);
+    set_txt(pr_mem[i], mbs);
     set_bar(pr_bar[i], (int)c);
   }
 }
@@ -515,55 +603,60 @@ static void update_net(JsonObjectConst sy) {
   JsonObjectConst n = sy["net"];
   char a[20];
   if (n.isNull()) {
-    lv_label_set_text(lb_rx, LV_SYMBOL_DOWN " --");
-    lv_label_set_text(lb_tx, LV_SYMBOL_UP " --");
+    set_txt(lb_rx, LV_SYMBOL_DOWN " --");
+    set_txt(lb_tx, LV_SYMBOL_UP " --");
     return;
   }
   fmt_rate(a, sizeof a, n["rx"] | 0L);
-  lv_label_set_text_fmt(lb_rx, LV_SYMBOL_DOWN " %s", a);
+  set_txtf(lb_rx, LV_SYMBOL_DOWN " %s", a);
   fmt_rate(a, sizeof a, n["tx"] | 0L);
-  lv_label_set_text_fmt(lb_tx, LV_SYMBOL_UP " %s", a);
+  set_txtf(lb_tx, LV_SYMBOL_UP " %s", a);
   JsonArrayConst rh = n["rx_hist"].as<JsonArrayConst>(), th = n["tx_hist"].as<JsonArrayConst>();
   long mx = 64;  // KB/s floor so idle links don't look busy
   for (JsonVariantConst v : rh) mx = max(mx, (long)(v | 0L));
   for (JsonVariantConst v : th) mx = max(mx, (long)(v | 0L));
-  struct { JsonArrayConst a; lv_coord_t *pts; } s[2] = {{rh, rx_pts}, {th, tx_pts}};
+  struct { JsonArrayConst a; int16_t *pts; } s[2] = {{rh, rx_pts}, {th, tx_pts}};
   for (auto &e : s) {
     int cnt = e.a.size();
     if (cnt > SYS_NET_N) cnt = SYS_NET_N;
     int skip = (int)e.a.size() - cnt, off = SYS_NET_N - cnt, i = 0;
-    for (int k = 0; k < off; k++) e.pts[k] = LV_CHART_POINT_NONE;
+    for (int k = 0; k < off; k++) e.pts[k] = SYS_PT_NONE;
     for (JsonVariantConst v : e.a) {
       if (i++ < skip) continue;
-      e.pts[off++] = (lv_coord_t)((v | 0L) * 100 / mx);
+      e.pts[off++] = (int16_t)((v | 0L) * 100 / mx);
     }
   }
-  lv_chart_refresh(net_chart);
+  SysSeries ns[2] = {{rx_pts, SYS_NET_N, C_RX, LV_OPA_50}, {tx_pts, SYS_NET_N, C_TX, LV_OPA_50}};
+  plot_render(net_plot, ns, 2, 100);
+}
+
+static void place_cl_sub() {  // manual "align right-bottom of lb_cl_pct"
+  int x = 12 + txt_w(F_TITLE, lv_label_get_text(lb_cl_pct)) + 5;
+  int y = 24 + lv_font_get_line_height(F_TITLE) - lv_font_get_line_height(&lv_font_montserrat_12) - 3;
+  lv_obj_set_pos(lb_cl_sub, x, y);
 }
 
 static void update_claude(JsonObjectConst sy) {
   JsonObjectConst c = sy["claude"];
   if (c.isNull()) {
-    lv_label_set_text(lb_cl_pct, "--");
-    lv_label_set_text(lb_cl_detail, "no data");
-    lv_obj_align_to(lb_cl_sub, lb_cl_pct, LV_ALIGN_OUT_RIGHT_BOTTOM, 5, -3);
+    if (set_txt(lb_cl_pct, "--")) place_cl_sub();
+    set_txt(lb_cl_detail, "no data");
     return;
   }
   int ncpu = sy["ncpu"] | 1;
   float cpu = c["cpu"] | 0.0f;
   int share = (int)lroundf(cpu / (ncpu > 0 ? ncpu : 1));
   if (share > 100) share = 100;
-  lv_label_set_text_fmt(lb_cl_pct, "%d%%", share);
-  lv_obj_align_to(lb_cl_sub, lb_cl_pct, LV_ALIGN_OUT_RIGHT_BOTTOM, 5, -3);
+  if (set_txtf(lb_cl_pct, "%d%%", share)) place_cl_sub();
   char mb[16];
   fmt_mb(mb, sizeof mb, c["mem"] | 0L);
   int ns = c["n"] | 0, kids = c["kids"] | 0;
-  lv_label_set_text_fmt(lb_cl_detail, "%s  %d sess  %d procs", mb, ns, kids);
-  lv_label_set_text(lb_cl_sub, "of cpu");
+  set_txtf(lb_cl_detail, "%s  %d sess  %d procs", mb, ns, kids);
+  set_txt(lb_cl_sub, "of cpu");
 }
 
 static void update_header(JsonObjectConst sy) {
-  lv_label_set_text(lb_host, sy["host"] | "this computer");
+  set_txt(lb_host, sy["host"] | "this computer");
   char buf[96], up[24] = "";
   long upt = sy["uptime"] | 0L;
   if (upt > 0) fmt_uptime(up, sizeof up, upt);
@@ -584,36 +677,64 @@ static void update_header(JsonObjectConst sy) {
              plug ? LV_SYMBOL_CHARGE " " : "", sym, pct);
   }
   snprintf(buf, sizeof buf, "%s%s%s", up, disk, bat);
-  lv_label_set_text(lb_meta, buf);
+  set_txt(lb_meta, buf);
 }
+
+// FNV-1a over the JSON serialisation, without a buffer (ArduinoJson custom writer)
+struct SysHashWriter {
+  uint32_t h = 2166136261u;
+  size_t write(uint8_t c) { h = (h ^ c) * 16777619u; return 1; }
+  size_t write(const uint8_t *s, size_t n) { for (size_t i = 0; i < n; i++) h = (h ^ s[i]) * 16777619u; return n; }
+};
+
+static uint32_t sec_hash(JsonObjectConst sy, const char *const *keys, int nk) {
+  SysHashWriter w;
+  for (int i = 0; i < nk; i++) {
+    w.write((uint8_t)i);
+    serializeJson(sy[keys[i]], w);
+  }
+  return w.h ? w.h : 1;
+}
+
+enum { SEC_HDR, SEC_CPU, SEC_MEM, SEC_PROCS, SEC_NET, SEC_CL, SEC__N };
+static uint32_t sec_h[SEC__N];  // 0 = force update
 
 static void update(JsonObjectConst s) {
   JsonObjectConst sy = s["system"];
   if (sy.isNull()) {
-    lv_obj_add_flag(root, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(placeholder, LV_OBJ_FLAG_HIDDEN);
-    last_hash = 0;
+    show(root, false);
+    show(placeholder, true);
+    memset(sec_h, 0, sizeof sec_h);
     return;
   }
-  // state arrives up to 4x/s; system metrics change at 1 Hz -> skip identical snapshots
-  static char buf[3072];
-  size_t n = serializeJson(sy, buf, sizeof buf);
-  uint32_t h = fnv1a(buf, n);
-  if (h == last_hash) return;
-  last_hash = h;
-
-  lv_obj_add_flag(placeholder, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_clear_flag(root, LV_OBJ_FLAG_HIDDEN);
-  update_header(sy);
-  update_cpu(sy);
-  update_mem(sy);
-  update_procs(sy);
-  update_net(sy);
-  update_claude(sy);
+  // Skip states where the host did not re-send / change the system part (perf-link part versions).
+  static uint32_t seen_ver = 0;
+  uint32_t ver = model_part_version("system");
+  if (ver && ver == seen_ver && sec_h[0]) return;
+  seen_ver = ver;
+  // State arrives up to 4x/s (sessions churn); system metrics change at 1 Hz and the process table
+  // every 4 s -> hash each section and only rebind the ones whose data changed.
+  static const char *const k_hdr[] = {"host", "uptime", "disk", "batt"};
+  static const char *const k_cpu[] = {"cpu", "load", "hist", "cores", "kinds", "thermal", "ncpu"};
+  static const char *const k_mem[] = {"mem"};
+  static const char *const k_procs[] = {"procs"};
+  static const char *const k_net[] = {"net"};
+  static const char *const k_cl[] = {"claude", "ncpu"};
+  static const struct { const char *const *k; int n; void (*fn)(JsonObjectConst); } secs[SEC__N] = {
+      {k_hdr, 4, update_header}, {k_cpu, 7, update_cpu},  {k_mem, 1, update_mem},
+      {k_procs, 1, update_procs}, {k_net, 1, update_net}, {k_cl, 2, update_claude}};
+  show(placeholder, false);
+  show(root, true);
+  for (int i = 0; i < SEC__N; i++) {
+    uint32_t h = sec_hash(sy, secs[i].k, secs[i].n);
+    if (h == sec_h[i]) continue;
+    sec_h[i] = h;
+    secs[i].fn(sy);
+  }
 }
 
 static void on_show(bool visible) {
-  if (visible) last_hash = 0;  // force a full refresh when we come back
+  if (visible) memset(sec_h, 0, sizeof sec_h);  // force a full rebind when we come back
 }
 
 const ScreenDef screen_system = {"system", "System", create, update, nullptr, on_show};

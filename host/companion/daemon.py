@@ -53,7 +53,15 @@ def dev_wants_device(now: float) -> bool:
     return False
 
 HEARTBEAT_S = 2.0
-TICK_S = 0.25
+TICK_S = 0.5            # periodic tick; hook datagrams and device messages wake the loop immediately
+MIN_TICK_GAP_S = 0.04   # coalesce bursts of wake-ups (several hooks in a row) into one tick
+SYSTEM_HIDDEN_S = 30.0  # partial-capable device not showing the system screen: refresh `system` this often only
+MAX_EVENTS_PER_TICK = 12
+# counters that tick with every assistant message: a change of only these is sent at most every MINOR_EVERY_S
+MINOR_EVERY_S = 5.0
+MINOR_KEYS = frozenset(("tokens", "cost", "ctx_pct", "tool_count", "tokens_today", "cost_today", "tools_today",
+                        "prompts_today"))
+META_KEYS = ("t", "ts", "tz", "part")
 RETRY_NO_DEVICE_S = 2.0
 RETRY_LOCKED_S = 3.0
 YIELD_EVERY_S = float(os.environ.get("CLAUDIUS_YIELD_S", "20"))  # 0 = never yield the device lock
@@ -260,6 +268,28 @@ class EventFilter:
         return out
 
 
+def _strip_minor(o):
+    if isinstance(o, dict):
+        return {k: _strip_minor(v) for k, v in o.items() if k not in MINOR_KEYS}
+    if isinstance(o, list):
+        return [_strip_minor(v) for v in o]
+    return o
+
+
+def coalesce_events(events: list, limit: int) -> list:
+    """A burst of events in one tick: keep every non-`tool` event, and only the most recent `tool` events."""
+    keep_tools = max(0, limit - sum(1 for e in events if e.get("kind") != "tool"))
+    out = []
+    for e in reversed(events):
+        if e.get("kind") == "tool":
+            if keep_tools <= 0:
+                continue
+            keep_tools -= 1
+        out.append(e)
+    out.reverse()
+    return out
+
+
 # ---------------------------------------------------------------------------------------------
 # text sanitizing: device fonts are ASCII only
 # ---------------------------------------------------------------------------------------------
@@ -322,8 +352,15 @@ class Daemon:
         self.link = DeviceLink(port, lock_path=DEVLOCK)
         self.filter = EventFilter()
         self.stop = False
-        self.last_body = None
+        self.last_body = None       # None => next state goes out in full (connect / hello / refresh)
+        self.last_parts: dict[str, str] = {}   # top-level key -> json of what the device has
         self.last_sent_at = 0.0
+        self.last_system_at = 0.0
+        self.last_major: dict[str, str] = {}   # part -> json without MINOR_KEYS, as last sent
+        self.part_sent_at: dict[str, float] = {}
+        self.dev_caps: set[str] = set()       # from the device hello: "part", "screen"
+        self.dev_screen: str | None = None
+        self.last_tick = 0.0
         self.next_connect = 0.0
         self.yield_at = 0.0
         self.fw = None
@@ -345,7 +382,15 @@ class Daemon:
             return True
         return self.link.send(msg)
 
+    def _notify_providers(self, msg: dict):
+        for p in self.providers:
+            try:
+                p.on_device_message(msg)
+            except Exception:
+                _log_throttled("devmsg", "on_device_message failed")
+
     def _on_disconnect(self, why: str):
+        self._notify_providers({"t": "disconnected"})
         log.info("device disconnected (%s)", why or "?")
         self.next_connect = time.time() + RETRY_NO_DEVICE_S
         self.next_status = 0
@@ -358,6 +403,7 @@ class Daemon:
             if self.link.connected:
                 self.link.close()
                 log.debug("dev tool wants the device: stepping aside")
+                self._notify_providers({"t": "disconnected"})
             self.next_connect = now + 1.0
             return
         if self.link.connected:
@@ -373,6 +419,7 @@ class Daemon:
             log.info("device connected on %s", self.link.port)
             self.yield_at = now + YIELD_EVERY_S
             self.last_body = None  # force full state
+            self.dev_caps, self.dev_screen = set(), None   # until the device's hello says otherwise
             self.next_status = 0
             self.link.send({"t": "cmd", "hello": 1})
         else:
@@ -393,8 +440,16 @@ class Daemon:
         if t == "hello":
             self.fw = msg.get("fw")
             self.last_hello = int(time.time())
+            caps = msg.get("caps")
+            self.dev_caps = {str(c) for c in caps} if isinstance(caps, list) else set()
+            self.dev_screen = msg.get("screen") if "screen" in self.dev_caps else None
             log.info("device hello fw=%s", self.fw)
             self.last_body = None  # re-send full state on next tick
+        elif t == "screen":
+            prev, self.dev_screen = self.dev_screen, msg.get("id")
+            log.debug("device screen %s", self.dev_screen)
+            if self.dev_screen == "system" and prev != "system":
+                self.last_system_at = 0.0   # stream system metrics right away
         elif t == "log":
             log.info("device: %s", str(msg.get("msg"))[:300])
         elif t == "action":
@@ -435,29 +490,74 @@ class Daemon:
                 events += self.filter.filter(p, p.drain_events(), hook_sids)
             except Exception:
                 _log_throttled("drain:" + type(p).__name__, "drain_events failed: %s", type(p).__name__)
-        state = snapshot(self.providers)
-        self.last_state = state
-        try:
-            body = json.dumps({k: v for k, v in state.items() if k != "ts"}, sort_keys=True, default=str)
-        except Exception:
-            _log_throttled("dumps", "state not serializable")
-            return
+        if len(events) > MAX_EVENTS_PER_TICK:
+            events = coalesce_events(events, MAX_EVENTS_PER_TICK)
 
         self.ensure_connected(now)
         was_connected = self.link.connected
+        status_due = not self.dry_run and now >= self.next_status
+        if self.dry_run or was_connected or status_due:   # nobody to send to: skip building the state
+            self.last_state = state = snapshot(self.providers)
         if self.dry_run or was_connected:
             for e in events:
                 self.emit(e)
-            if body != self.last_body or now - self.last_sent_at > HEARTBEAT_S:
-                if self.emit(state):
-                    self.last_body, self.last_sent_at = body, now
+            self.send_state(state, now)
             for msg in self.link.read_messages():
                 self.handle_device(msg)
             if was_connected and not self.link.connected:
                 self._on_disconnect(self.link.last_error)
-        if not self.dry_run and now >= self.next_status:
+        if status_due:
             self.next_status = now + STATUS_EVERY_S
             self.write_status(now)
+
+    def send_state(self, state: dict, now: float) -> None:
+        """Send policy. Full snapshot after (re)connect / hello / refresh, or always for firmware without the
+        "part" capability (then only on change + heartbeat, like before). Otherwise only the top-level parts
+        whose content changed go out as a partial state; nothing changed => tiny heartbeat every HEARTBEAT_S.
+        `system` (1 Hz metrics, only shown on the system screen) is refreshed every SYSTEM_HIDDEN_S while the
+        device reports another screen."""
+        try:
+            parts = {k: json.dumps(v, sort_keys=True, separators=(",", ":"), default=str)
+                     for k, v in state.items() if k not in META_KEYS}
+        except Exception:
+            _log_throttled("dumps", "state not serializable")
+            return
+        partial_ok = "part" in self.dev_caps and not self.dry_run
+        if self.last_body is None or not partial_ok:
+            body = "".join(f"{k}={v}\n" for k, v in sorted(parts.items())) + str(state.get("tz"))
+            if body != self.last_body or now - self.last_sent_at > HEARTBEAT_S:
+                if self.emit(state):
+                    self.last_body, self.last_sent_at = body, now
+                    self.last_parts, self.last_system_at = parts, now
+            return
+        changed = [k for k, v in parts.items() if self.last_parts.get(k) != v]
+        removed = [k for k in self.last_parts if k not in parts]
+        if "system" in changed and self.dev_screen not in (None, "system") \
+                and now - self.last_system_at < SYSTEM_HIDDEN_S:
+            changed.remove("system")
+        majors = {}
+        for k in [k for k in changed if k in ("sessions", "totals")]:
+            majors[k] = json.dumps(_strip_minor(state[k]), sort_keys=True, separators=(",", ":"), default=str)
+            if majors[k] == self.last_major.get(k) and now - self.part_sent_at.get(k, 0) < MINOR_EVERY_S:
+                changed.remove(k)
+        if not changed and not removed and now - self.last_sent_at <= HEARTBEAT_S:
+            return
+        msg = {"t": "state", "part": 1, "ts": state.get("ts"), "tz": state.get("tz")}
+        for k in changed:
+            msg[k] = state[k]
+        for k in removed:
+            msg[k] = None
+        if self.emit(msg):
+            self.last_sent_at = now
+            for k in changed:
+                self.last_parts[k] = parts[k]
+                self.part_sent_at[k] = now
+                if k in majors:
+                    self.last_major[k] = majors[k]
+                if k == "system":
+                    self.last_system_at = now
+            for k in removed:
+                self.last_parts.pop(k, None)
 
     def write_status(self, now: float):
         sess = [{"id": s.get("id"), "name": s.get("name"), "status": s.get("status")}
@@ -468,6 +568,7 @@ class Daemon:
             "device_error": "" if self.link.connected else self.link.last_error,
             "lock_holder": "" if self.link.connected else self.link.lock_holder(),
             "providers": [type(p).__name__ for p in self.providers],
+            "device_caps": sorted(self.dev_caps), "device_screen": self.dev_screen,
             "hooks": {"listening": bool(self.hooks and self.hooks.sock), "received": getattr(self.hooks, "received", 0),
                       "last_at": int(getattr(self.hooks, "last_hook_at", 0))},
             "rate_limits_at": getattr(self.hooks, "rate_limits_at", 0),
@@ -493,6 +594,10 @@ class Daemon:
 
     def run(self):
         while not self.stop:
+            gap = self.last_tick + MIN_TICK_GAP_S - time.time()
+            if gap > 0:
+                time.sleep(gap)
+            self.last_tick = time.time()
             try:
                 self.tick()
             except Exception:

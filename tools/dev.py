@@ -91,6 +91,31 @@ def device_lock(what: str):
         want.unlink(missing_ok=True)
 
 
+LASTFLASH = FW / ".pio" / "lastflash.json"   # what is (probably) on the device: written by every `flash`
+
+
+def fw_tree_hash(fw: Path = FW) -> str:
+    """Short hash of the firmware sources (src/, include/, lib/, platformio.ini) = identity of a build."""
+    import hashlib
+    h = hashlib.sha1()
+    files = [fw / "platformio.ini"]
+    for d in ("src", "include", "lib"):
+        files += sorted(p for p in (fw / d).rglob("*") if p.is_file())
+    for p in files:
+        try:
+            h.update(str(p.relative_to(fw)).encode() + b"\0" + p.read_bytes() + b"\0")
+        except OSError:
+            pass
+    return h.hexdigest()[:10]
+
+
+def last_flash() -> dict:
+    try:
+        return json.loads(LASTFLASH.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
 def pio(*args: str) -> int:
     env = dict(os.environ, PLATFORMIO_BUILD_DIR=str(build_dir()))
     return subprocess.call(["pio", "run", *args], cwd=FW, env=env)
@@ -101,11 +126,17 @@ def cmd_build(_a) -> int:
 
 
 def cmd_flash(_a) -> int:
+    tree = fw_tree_hash()  # hash before building: what this build is made of
     rc = pio()
     if rc:
         return rc
     with device_lock("flash"):
         rc = pio("-t", "upload")
+        if rc == 0:
+            try:
+                LASTFLASH.write_text(json.dumps({"by": dev_name(), "ts": int(time.time()), "tree": tree}))
+            except OSError:
+                pass
         time.sleep(2.5)  # let it boot
     return rc
 

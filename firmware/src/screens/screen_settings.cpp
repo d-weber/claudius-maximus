@@ -8,6 +8,7 @@
 #include "../core/model.h"
 #include "../fx/alerts.h"
 #include <esp_heap_caps.h>
+#include <stdarg.h>
 #include <Wire.h>
 #include "WS_CH32_IO.h"
 
@@ -267,28 +268,45 @@ static void fmt_bytes(char *out, size_t n, size_t b) {
   else snprintf(out, n, "%u KB", (unsigned)(b >> 10));
 }
 
+// Only touch labels whose text/colour actually changed: lv_label_set_text() and style setters
+// always invalidate, and this runs every second while the tile is visible.
+static void set_if(lv_obj_t *l, const char *fmt, ...) {
+  char buf[64];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  if (strcmp(lv_label_get_text(l), buf)) lv_label_set_text(l, buf);
+}
+
 static void about_refresh(lv_timer_t *) {
+  static int host_state = -1;
   bool up = model_host_connected();
-  lv_label_set_text(ab_host, up ? LV_SYMBOL_OK " Connected" : (model_state_version() ? "Lost" : "Not connected"));
-  lv_obj_set_style_text_color(ab_host, up ? C_IDLE : C_ERROR, 0);
+  int hs = up ? 2 : model_state_version() ? 1 : 0;
+  if (hs != host_state) {
+    host_state = hs;
+    lv_label_set_text(ab_host, hs == 2 ? LV_SYMBOL_OK " Connected" : hs == 1 ? "Lost" : "Not connected");
+    lv_obj_set_style_text_color(ab_host, up ? C_IDLE : C_ERROR, 0);
+  }
   JsonObjectConst st = model_state();
   JsonObjectConst t = st["totals"];
   int n = st["sessions"].size();
   int w = t["waiting"] | 0;
-  if (w) lv_label_set_text_fmt(ab_sessions, "%d  (%d busy, %d waiting)", n, (int)(t["busy"] | 0), w);
-  else lv_label_set_text_fmt(ab_sessions, "%d  (%d busy)", n, (int)(t["busy"] | 0));
+  if (w) set_if(ab_sessions, "%d  (%d busy, %d waiting)", n, (int)(t["busy"] | 0), w);
+  else set_if(ab_sessions, "%d  (%d busy)", n, (int)(t["busy"] | 0));
   char a[24], b[24];
-  fmt_bytes(a, sizeof a, heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-  fmt_bytes(b, sizeof b, heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-  lv_label_set_text_fmt(ab_heap, "%s  (max %s)", a, b);
+  // KB resolution: byte-level heap jitter would otherwise redraw these rows every second
+  fmt_bytes(a, sizeof a, heap_caps_get_free_size(MALLOC_CAP_INTERNAL) & ~(size_t)1023);
+  fmt_bytes(b, sizeof b, heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) & ~(size_t)1023);
+  set_if(ab_heap, "%s  (max %s)", a, b);
   fmt_bytes(a, sizeof a, heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   fmt_bytes(b, sizeof b, heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
-  lv_label_set_text_fmt(ab_psram, "%s / %s", a, b);
+  set_if(ab_psram, "%s / %s", a, b);
   uint32_t s = millis() / 1000;
-  if (s < 3600) lv_label_set_text_fmt(ab_uptime, "%um %02us", (unsigned)(s / 60), (unsigned)(s % 60));
-  else if (s < 86400) lv_label_set_text_fmt(ab_uptime, "%uh %02um", (unsigned)(s / 3600), (unsigned)(s / 60 % 60));
-  else lv_label_set_text_fmt(ab_uptime, "%ud %uh", (unsigned)(s / 86400), (unsigned)(s / 3600 % 24));
-  lv_label_set_text_fmt(ab_bl, "%u%%", hal_get_brightness());
+  if (s < 3600) set_if(ab_uptime, "%um %02us", (unsigned)(s / 60), (unsigned)(s % 60));
+  else if (s < 86400) set_if(ab_uptime, "%uh %02um", (unsigned)(s / 3600), (unsigned)(s / 60 % 60));
+  else set_if(ab_uptime, "%ud %uh", (unsigned)(s / 86400), (unsigned)(s / 3600 % 24));
+  set_if(ab_bl, "%u%%", hal_get_brightness());
 }
 
 // ---------------------------------------------------------------------------------------------

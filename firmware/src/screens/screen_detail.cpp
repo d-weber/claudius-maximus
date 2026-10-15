@@ -71,9 +71,21 @@ static void set_text_if(lv_obj_t *l, const char *t) {
   const char *o = lv_label_get_text(l);
   if (!o || strcmp(o, t)) lv_label_set_text(l, t);
 }
+// Only touch widgets when the value actually changes: every style/flag/text set invalidates the
+// object, and detail_update runs on every state (~6/s) — unconditional sets repainted most of the panel.
 static void show(lv_obj_t *o, bool v) {
-  if (v) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
-  else lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+  bool hidden = lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN);
+  if (v && hidden) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+  else if (!v && !hidden) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+}
+static void set_bg_if(lv_obj_t *o, lv_color_t c, lv_style_selector_t sel = 0) {
+  if (lv_obj_get_style_bg_color(o, sel & 0xFF0000).full != c.full) lv_obj_set_style_bg_color(o, c, sel);
+}
+static void set_fg_if(lv_obj_t *o, lv_color_t c) {
+  if (lv_obj_get_style_text_color(o, 0).full != c.full) lv_obj_set_style_text_color(o, c, 0);
+}
+static void set_border_if(lv_obj_t *o, lv_color_t c) {
+  if (lv_obj_get_style_border_color(o, 0).full != c.full) lv_obj_set_style_border_color(o, c, 0);
 }
 static const char *status_word(const char *s) {
   if (!strcmp(s, "busy")) return "WORKING";
@@ -147,15 +159,14 @@ static void refresh_events() {
     bool sub = !ev["agent"].isNull() && !strncmp(kind, "tool", 4);
     FeedKindStyle st = feed_kind_style(kind, tool, sub);
     set_text_if(r.glyph, st.glyph);
-    lv_obj_set_style_text_color(r.glyph, st.color, 0);
+    set_fg_if(r.glyph, st.color);
     char t[96], clean[84];
     feed_sanitize(clean, sizeof(clean), ev["text"] | "");
     const char *what = st.verb ? st.verb : tool;
     if (!strcmp(kind, "tool_error")) snprintf(t, sizeof(t), "%s failed  #9C978E %s#", tool, clean);
     else snprintf(t, sizeof(t), "%s%s  #9C978E %s#", sub ? "sub " : "", what, clean);
     set_text_if(r.txt, t);
-    lv_obj_set_style_text_color(r.txt, !strcmp(kind, "waiting") ? C_WAITING
-                                       : !strcmp(kind, "tool_error") ? C_ERROR : C_TEXT, 0);
+    set_fg_if(r.txt, !strcmp(kind, "waiting") ? C_WAITING : !strcmp(kind, "tool_error") ? C_ERROR : C_TEXT);
     r.ts = ev["ts"] | 0;
     show(r.obj, true);
   }
@@ -455,7 +466,7 @@ void detail_update(JsonObjectConst) {
   show(gone_lbl, gone);
   if (gone) {
     lv_obj_set_user_data(pill_lbl, (void *)"GONE");
-    lv_obj_set_style_bg_color(pill, C_OFFLINE, 0);
+    set_bg_if(pill, C_OFFLINE);
     set_text_if(hdr_name, cur_sid);
     show(wait_card, false);
     refresh_times();
@@ -463,7 +474,7 @@ void detail_update(JsonObjectConst) {
   }
 
   char buf[160];
-  lv_obj_set_style_bg_color(hdr_bar, feed_session_color(cur_sid), 0);
+  set_bg_if(hdr_bar, feed_session_color(cur_sid));
   feed_sanitize(buf, sizeof(buf), s["project"] | (s["name"] | cur_sid));
   set_text_if(hdr_name, buf);
   feed_sanitize(buf, sizeof(buf), s["title"] | (s["cwd"] | ""));
@@ -472,7 +483,8 @@ void detail_update(JsonObjectConst) {
   const char *status = s["status"] | "offline";
   lv_color_t sc = status_color(status);
   lv_obj_set_user_data(pill_lbl, (void *)status_word(status));  // static strings
-  lv_obj_set_style_bg_color(pill, sc, 0);
+  set_bg_if(pill, sc);
+  uint32_t prev_since = st_since;
   st_since = s["since"] | 0;
   st_started = s["started"] | 0;
   if (st_started) {
@@ -490,7 +502,7 @@ void detail_update(JsonObjectConst) {
     feed_sanitize(buf, sizeof(buf), s["activity"]["detail"] | "Claude is waiting for you in the terminal.");
     lv_label_set_text(wait_text, buf);
   }
-  if (!waiting) lv_label_set_text(wait_text, "");
+  if (!waiting) set_text_if(wait_text, "");
 
   // activity
   JsonObjectConst act = s["activity"];
@@ -500,22 +512,22 @@ void detail_update(JsonObjectConst) {
   lv_color_t ac = busy ? C_BUSY : waiting ? C_WAITING : C_MUTED;
   set_text_if(act_cap, busy ? "NOW" : waiting ? "BLOCKED ON" : "LAST ACTIVITY");
   if (!strcmp(status, "idle")) {
-    lv_label_set_text(act_glyph, LV_SYMBOL_OK);
-    lv_obj_set_style_text_color(act_glyph, C_IDLE, 0);
-    lv_obj_set_style_bg_color(act_glyph, C_IDLE, 0);
+    set_text_if(act_glyph, LV_SYMBOL_OK);
+    set_fg_if(act_glyph, C_IDLE);
+    set_bg_if(act_glyph, C_IDLE);
     set_text_if(act_tool, "Ready");
-    lv_obj_set_style_text_color(act_tool, C_IDLE, 0);
+    set_fg_if(act_tool, C_IDLE);
     feed_sanitize(buf, sizeof(buf), *tool ? (act["detail"] | "") : "");
     char x[200];
     snprintf(x, sizeof(x), "Waiting for your next prompt.%s%s%s", *tool ? "\nLast: " : "", tool, *buf ? "  " : "");
     strlcat(x, buf, sizeof(x));
     set_text_if(act_detail, x);
   } else {
-    lv_label_set_text(act_glyph, feed_tool_glyph(tool));
-    lv_obj_set_style_text_color(act_glyph, ac, 0);
-    lv_obj_set_style_bg_color(act_glyph, ac, 0);
+    set_text_if(act_glyph, feed_tool_glyph(tool));
+    set_fg_if(act_glyph, ac);
+    set_bg_if(act_glyph, ac);
     set_text_if(act_tool, *tool ? tool : "Thinking");
-    lv_obj_set_style_text_color(act_tool, ac, 0);
+    set_fg_if(act_tool, ac);
     feed_sanitize(buf, sizeof(buf), act["detail"] | "");
     set_text_if(act_detail, buf);
   }
@@ -532,9 +544,9 @@ void detail_update(JsonObjectConst) {
   snprintf(buf, sizeof(buf), "%d%%", ctx);
   set_text_if(met_val[2], buf);
   lv_color_t cc = ctx >= 85 ? C_ERROR : ctx >= 70 ? C_WAITING : C_INFO;
-  lv_obj_set_style_text_color(met_val[2], ctx >= 70 ? cc : C_TEXT, 0);
+  set_fg_if(met_val[2], ctx >= 70 ? cc : C_TEXT);
   lv_bar_set_value(ctx_bar, ctx, LV_ANIM_OFF);
-  lv_obj_set_style_bg_color(ctx_bar, cc, LV_PART_INDICATOR);
+  set_bg_if(ctx_bar, cc, LV_PART_INDICATOR);
   snprintf(buf, sizeof(buf), "%d", (int)(s["tool_count"] | 0));
   set_text_if(met_val[3], buf);
   feed_sanitize(buf, sizeof(buf), s["model"] | "-");
@@ -564,8 +576,8 @@ void detail_update(JsonObjectConst) {
       lv_obj_t *b = todo_boxes[i];
       show(b, i < total);
       bool d = i < done, cur = i == done;
-      lv_obj_set_style_bg_color(b, d ? C_IDLE : C_SURFACE, 0);
-      lv_obj_set_style_border_color(b, d ? C_IDLE : cur ? C_ACCENT : C_BORDER, 0);
+      set_bg_if(b, d ? C_IDLE : C_SURFACE);
+      set_border_if(b, d ? C_IDLE : cur ? C_ACCENT : C_BORDER);
       show(lv_obj_get_child(b, 0), d);
     }
     lv_bar_set_range(todo_bar, 0, total);
@@ -589,10 +601,10 @@ void detail_update(JsonObjectConst) {
     active += b;
     if (n >= SUB_POOL) continue;
     SubRow &r = subs[n++];
-    lv_obj_set_style_bg_color(r.dot, b ? C_SUBAGENT : C_DIM, 0);
+    set_bg_if(r.dot, b ? C_SUBAGENT : C_DIM);
     feed_sanitize(buf, sizeof(buf), a["desc"] | (a["type"] | "subagent"));
     set_text_if(r.desc, buf);
-    lv_obj_set_style_text_color(r.desc, b ? C_TEXT : C_MUTED, 0);
+    set_fg_if(r.desc, b ? C_TEXT : C_MUTED);
     char tok[16], dur[16], det[64];
     feed_fmt_num(tok, sizeof(tok), (double)(a["tokens"] | 0));
     uint32_t st = a["started"] | 0;
@@ -613,7 +625,7 @@ void detail_update(JsonObjectConst) {
     set_text_if(sub_cap, buf);
   }
 
-  refresh_events();
+  if (st_since != prev_since) refresh_events();
   refresh_times();
 #ifdef DETAIL_DEBUG_SCROLL
   lv_obj_update_layout(body);

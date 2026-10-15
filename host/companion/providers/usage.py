@@ -78,7 +78,7 @@ PRICES = [
 DEFAULT_PRICE = (4.0, 20.0, 0.20)
 FAMILIES = ("opus", "fable", "sonnet", "haiku")
 
-RESCAN_S = 5.0          # how often to glob for new / grown files
+RESCAN_S = 10.0         # how often to glob for new / grown files (stats are recomputed <= every 10 s anyway)
 BUDGET_S = 0.15         # max parse time per poll()
 MINUTE_KEEP_S = 48 * 3600
 DAY_KEEP = 400
@@ -138,6 +138,7 @@ class UsageProvider(Provider):
         self._load_stats_cache()
         self.dirty = True
         self.cache_key = None
+        self.computed_at = 0
         self.cached: dict = {}
         self.initial_done = False
         self._rl_mtime: dict = {}
@@ -289,11 +290,14 @@ class UsageProvider(Provider):
 
     def contribute(self, state: dict) -> None:
         now = int(time.time())
-        key = (now // 15, self.dirty)
-        if self.dirty or key != self.cache_key:
+        # recompute only at minute boundaries (tpm/hourly/today stay stable within a minute; the device
+        # string-compares and skips redraws, and every change of the ~1 KB usage part is re-sent)
+        minute = now // 60
+        if not self.cached or minute != self.cache_key or (self.dirty and not self.initial_done):
             self.cached = self._compute(now)
             self.dirty = False
-            self.cache_key = (now // 15, False)
+            self.cache_key = minute
+            self.computed_at = now
         usage = dict(self.cached)
         usage.update(self._rate_limits(now))
         state["usage"] = usage
@@ -406,13 +410,15 @@ class UsageProvider(Provider):
                 if pct is None:
                     continue
                 ra = parse_ts(v.get("resets_at") or 0)
-                o = {"pct": 0 if (ra and ra < now) else int(round(float(pct))), "at": seen}
+                # `at` floored to the minute: the tee is rewritten every few seconds and each change of the
+                # usage part is re-sent to the device
+                o = {"pct": 0 if (ra and ra < now) else int(round(float(pct))), "at": seen - seen % 60}
                 if ra and ra >= now:
                     o["resets_at"] = ra
                 if key == "spend_limit":
                     for k in ("used_usd", "limit_usd", "period"):
                         if k in v:
-                            o[k] = v[k]
+                            o[k] = round(v[k], 2) if isinstance(v[k], float) else v[k]
                     key = "spend"
                 out[key] = o
             if out:

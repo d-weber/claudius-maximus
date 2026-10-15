@@ -62,6 +62,7 @@ except Exception:  # pragma: no cover
 HIST_N = 60
 NET_HIST_N = 40
 PROC_EVERY_S = 4.0
+PROC_HIDDEN_S = 30.0   # process table refresh while the device reports another screen (ps costs ~40 ms CPU)
 TOP_N = 6
 _SKIP_NIC = ("lo", "utun", "awdl", "llw", "bridge", "gif", "stf", "anpi", "ap", "ipsec", "ppp", "vmenet")
 
@@ -182,6 +183,7 @@ class SystemProvider(Provider):
         self.ncpu = os.cpu_count() or 1
         self.kinds = _core_kinds(self.ncpu)
         self.node_is_claude: dict[int, bool] = {}
+        self.visible: bool | None = False   # device shows the system screen? None = unknown (old firmware hello)
         try:
             self.mach = _Mach()
         except Exception:
@@ -341,7 +343,8 @@ class SystemProvider(Provider):
                     d["thermal"] = th
             except Exception:
                 self.thermal = None
-        if now - self.last_procs >= PROC_EVERY_S or not self.procs:
+        every = PROC_HIDDEN_S if self.visible is False else PROC_EVERY_S
+        if now - self.last_procs >= every or not self.procs:
             self.last_procs = now
             try:
                 self._sample_procs()
@@ -361,6 +364,20 @@ class SystemProvider(Provider):
             self._sample(now)
         except Exception:
             log.exception("system sample failed")
+
+    def on_device_message(self, msg: dict) -> None:
+        t = msg.get("t")
+        if t == "hello":
+            vis = msg.get("screen") == "system" if "screen" in (msg.get("caps") or ()) else None
+        elif t == "screen":
+            vis = msg.get("id") == "system"
+        elif t == "disconnected":
+            vis = False                 # nobody is looking: slow process sampling until the next hello
+        else:
+            return
+        if vis and not self.visible:
+            self.last_procs = 0.0   # fresh process list right away
+        self.visible = vis
 
     def contribute(self, state: dict) -> None:
         if self.data:

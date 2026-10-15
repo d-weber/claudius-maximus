@@ -67,6 +67,23 @@ Firmware screens must read every field **defensively** (missing key ⇒ sensible
 }
 ```
 
+### Partial `state` (perf round, 2026-10-15) — only for firmware announcing `"caps":["part",...]` in its hello
+```jsonc
+{ "t": "state", "part": 1, "ts": 1792068345, "tz": 7200, "system": { ... } }   // only `system` changed
+{ "t": "state", "part": 1, "ts": 1792068347, "tz": 7200 }                        // heartbeat, nothing changed
+```
+Every top-level key present (other than `t`/`ts`/`tz`/`part`) **replaces** that key of the device's snapshot;
+keys absent are kept; `"key": null` removes it. The host sends a full `state` after (re)connect, on `hello` and on
+`refresh`, then partials with only the parts whose content changed (`sessions`, `totals`, `usage`, `system`, ...),
+and an empty partial as heartbeat (≥ every 2 s). Firmware without the cap keeps getting full snapshots (same
+send-on-change + 2 s heartbeat as before). Firmware: `model_part_version("usage")` tells which parts changed;
+`model_state_version()` no longer bumps on empty heartbeats (but at least every 10 s).
+`system` is refreshed only every 30 s while the device reports a screen other than `system` (see `screen` below).
+`usage` is recomputed only on minute boundaries (stable within a minute, costs rounded to cents), `usage.*.at` is
+floored to the minute. In `sessions`/`totals`, a change of only the counters `tokens`, `cost`, `ctx_pct`,
+`tool_count`, `*_today` is sent at most every 5 s (status/activity/subagent changes go out immediately).
+Bursts of > 12 events in one host tick keep every non-`tool` event and only the most recent `tool` events.
+
 ### `event` — something just happened (for feeds, animations, alerts)
 ```jsonc
 { "t": "event", "kind": "tool", "sid": "969ca7a9", "name": "claudius-maximus",
@@ -96,7 +113,8 @@ Firmware screens must read every field **defensively** (missing key ⇒ sensible
 
 ## Device → host
 ```jsonc
-{ "t": "hello", "fw": "0.1.0", "w": 480, "h": 480 }       // on boot / on host connect
+{ "t": "hello", "fw": "0.2.0", "w": 480, "h": 480, "caps": ["part", "screen"], "screen": "home" } // on boot / on host connect
+{ "t": "screen", "id": "system" }                          // visible screen changed (tile id, or "detail")
 { "t": "log", "msg": "..." }
 { "t": "action", "action": "focus", "sid": "969ca7a9" }   // user tapped "focus" → host raises that terminal
 { "t": "shot", "w": 480, "h": 480, "fmt": "rgb565le", "len": 460800 } // followed immediately by len raw bytes
