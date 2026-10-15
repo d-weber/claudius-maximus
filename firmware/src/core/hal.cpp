@@ -48,6 +48,13 @@ static void touch_cb(lv_indev_drv_t *, lv_indev_data_t *data) {
   data->state = pressed ? LV_INDEV_STATE_PR : LV_INDEV_STATE_REL;
 }
 
+// The CH32 helper keeps its outputs latched across ESP32 resets (it is only reset by power-cycling),
+// so a glitched I2C write during reflashing can leave the buzzer on. Re-assert the safe output state
+// periodically: power/LCD/touch enabled, buzzer off. We never use the buzzer.
+static void ch32_guard_cb(lv_timer_t *) {
+  WS_CH32_IO::writeRegister(Wire, WS_CH32_IO::REG_OUTPUT, WS_CH32_IO::OUT_DISPLAY_ON, WS_CH32_IO::I2C_ADDRESS, 1);
+}
+
 void hal_init() {
   WS_CH32_IO::begin(Wire, 15, 7, 400000, nullptr);
   for (uint8_t addr : {0x5D, 0x14}) {
@@ -76,6 +83,8 @@ void hal_init() {
   lv_indev_drv_register(&id);
   last_touch = millis();
   hal_set_brightness(100);
+  ch32_guard_cb(nullptr);
+  lv_timer_create(ch32_guard_cb, 3000, nullptr);
 }
 
 void hal_set_brightness(uint8_t pct) {

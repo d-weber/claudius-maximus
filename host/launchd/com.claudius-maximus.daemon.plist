@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: tools/install.sh replaces @PYTHON@ @ROOT@ @HOME@ and installs it in ~/Library/LaunchAgents -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.claudius-maximus.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@PYTHON@</string>
+    <string>-m</string>
+    <string>companion</string>
+    <string>run</string>
+    <string>--log</string>
+    <string>@HOME@/Library/Logs/claudius-maximus.log</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>@ROOT@/host</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+    <key>PYTHONDONTWRITEBYTECODE</key>
+    <string>1</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>Nice</key>
+  <integer>5</integer>
+  <key>StandardOutPath</key>
+  <string>@HOME@/Library/Logs/claudius-maximus.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/Library/Logs/claudius-maximus.out.log</string>
+</dict>
+</plist>

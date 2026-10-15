@@ -2,6 +2,8 @@
 
 Simulates several sessions cycling busy → waiting → idle, with tool calls, subagents and todos.
 Deterministic for a given seed so screenshots are reproducible.
+Text and extra fields mirror what providers/sessions.py produces from real Claude Code data
+(e.g. `waiting` text, `kind`, `perm_mode`, subagent `model`/`cost`, tool_error `error`).
 """
 from __future__ import annotations
 
@@ -20,12 +22,14 @@ PROJECTS = [
 TOOLS = [
     ("Read", ["src/server.ts", "README.md", "package.json", "src/routes/auth.ts"]),
     ("Edit", ["src/middleware/ratelimit.ts", "tests/chart.spec.ts", "src/main.cpp"]),
-    ("Bash", ["npm test", "pio run -t upload", "git status", "pytest -x tests/"]),
-    ("Grep", ["\"TODO\" in src/", "useEffect", "class Provider"]),
+    ("Bash", ["npm test", "pio run -t upload", "git status", "pytest -x tests/", "Build firmware and flash"]),
+    ("Grep", ["\"TODO\" in src/", "\"useEffect\" in *.tsx", "\"class Provider\""]),
     ("WebSearch", ["ST7701 init sequence", "LVGL 8 tileview"]),
+    ("WebFetch", ["docs.lvgl.io/8.4/widgets/tileview.html", "waveshare.com/wiki/ESP32-S3-Touch-LCD-4"]),
     ("Write", ["src/fx/alerts.cpp", "docs/PLAN.md"]),
     ("Agent", ["Explore auth module", "Research pricing"]),
 ]
+TOOL_ERRORS = ["Exit code 1", "File has not been read yet", "String to replace not found in file"]
 TODOS = ["Read codebase", "Write tests", "Implement feature", "Fix lint", "Run test suite", "Update docs"]
 
 
@@ -53,7 +57,11 @@ class DemoProvider(Provider):
                 "tool_count": 10 + 7 * i,
                 "todos": {"done": i, "total": 5, "current": TODOS[i]},
                 "subagents": [],
+                "kind": "interactive", "perm_mode": ["default", "auto", "acceptEdits", "plan", "auto"][i % 5],
+                "branch": "main",
             })
+            if self.sessions[-1]["status"] == "waiting":
+                self.sessions[-1]["waiting"] = "Allow Bash: npm run deploy?"
         self.next_change = time.time()
         self.tpm = [self.rng.randint(0, 8000) for _ in range(60)]
         self.hourly = [0] * 24
@@ -85,14 +93,19 @@ class DemoProvider(Provider):
                 s["cost"] = round(s["cost"] + self.rng.uniform(0.01, 0.12), 2)
                 s["ctx_pct"] = min(98, s["ctx_pct"] + self.rng.randint(0, 2))
                 self._ev("tool", s, tool=tool, text=detail)
+                if tool in ("Bash", "Edit") and self.rng.random() < 0.12:
+                    self._ev("tool_error", s, tool=tool, text=detail, error=self.rng.choice(TOOL_ERRORS))
                 if tool == "Agent" and len(s["subagents"]) < 3:
-                    a = {"id": f"{self.rng.getrandbits(32):08x}", "desc": detail, "type": "Explore",
-                         "status": "busy", "tool": "Grep", "detail": "searching", "started": t, "tokens": 0}
+                    a = {"id": f"{self.rng.getrandbits(32):08x}", "desc": detail,
+                         "type": self.rng.choice(["Explore", "general-purpose"]),
+                         "status": "busy", "tool": "Grep", "detail": "\"auth\" in src/", "started": t, "tokens": 0,
+                         "cost": 0.0, "model": "opus-5.5", "ctx_pct": 3}
                     s["subagents"].append(a)
                     self._ev("subagent_start", s, agent=a["id"], text=detail)
             elif r < 0.80:
                 s["status"], s["since"] = "waiting", t
-                self._ev("waiting", s, text=f"Allow Bash: {self.rng.choice(TOOLS[2][1])}?")
+                s["waiting"] = f"Allow Bash: {self.rng.choice(TOOLS[2][1])}?"
+                self._ev("waiting", s, text=s["waiting"])
             elif r < 0.90:
                 s["status"], s["since"] = "idle", t
                 self._ev("stop", s, text="Done - all tests passing.")
@@ -103,6 +116,7 @@ class DemoProvider(Provider):
                 td["current"] = TODOS[td["done"] % len(TODOS)]
         elif s["status"] == "waiting" and r < 0.5:
             s["status"], s["since"] = "busy", t
+            s.pop("waiting", None)
             s["activity"] = {"tool": "Bash", "detail": "npm test", "ts": t}
             self._ev("tool", s, tool="Bash", text="npm test")
         elif s["status"] == "idle" and r < 0.4:
@@ -113,7 +127,10 @@ class DemoProvider(Provider):
         for a in s["subagents"]:
             if a["status"] == "busy":
                 a["tokens"] += self.rng.randint(2000, 15000)
-                a["tool"] = self.rng.choice(["Read", "Grep", "Glob", "WebFetch"])
+                a["cost"] = round(a["tokens"] * 9e-6, 2)
+                a["ctx_pct"] = min(60, 3 + a["tokens"] // 10000)
+                a["tool"], a["detail"] = self.rng.choice([("Read", "src/routes/auth.ts"), ("Grep", "\"session\" in src/"),
+                                                          ("Glob", "src/**/*.ts"), ("WebFetch", "docs.stripe.com/api")])
                 if self.rng.random() < 0.15:
                     a["status"] = "done"
                     self._ev("subagent_stop", s, agent=a["id"], text=a["desc"])
@@ -130,6 +147,7 @@ class DemoProvider(Provider):
             "busy": sum(s["status"] == "busy" for s in ss),
             "waiting": sum(s["status"] == "waiting" for s in ss),
             "idle": sum(s["status"] == "idle" for s in ss),
+            "offline": sum(s["status"] == "offline" for s in ss),
             "subagents_active": sum(a["status"] == "busy" for s in ss for a in s["subagents"]),
             "tokens_today": tok, "cost_today": round(sum(s["cost"] for s in ss), 2),
             "tools_today": self.tools_today, "prompts_today": self.prompts_today,

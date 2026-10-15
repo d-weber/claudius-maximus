@@ -39,6 +39,17 @@ from companion.link import DeviceLink  # noqa: E402
 from companion.providers.demo import DemoProvider  # noqa: E402
 from companion.daemon import snapshot  # noqa: E402
 
+
+def extra_providers() -> list:
+    """Real (non-session) providers that are safe to mix into demo streams, e.g. host system metrics."""
+    out = []
+    try:
+        from companion.providers.system import SystemProvider
+        out.append(SystemProvider())
+    except Exception:
+        pass
+    return out
+
 FW = ROOT / "firmware"
 LOCK = ROOT / ".devlock"
 
@@ -105,13 +116,16 @@ def open_link() -> DeviceLink:
 
 def stream_demo(link: DeviceLink, seconds: float, demo: DemoProvider | None = None) -> DemoProvider:
     demo = demo or DemoProvider(speed=3.0)
+    if not hasattr(demo, "_extras"):
+        demo._extras = extra_providers()
     t_end = time.time() + seconds
     while time.time() < t_end:
         now = time.time()
-        demo.poll(now)
+        for p in [demo, *demo._extras]:
+            p.poll(now)
         for e in demo.drain_events():
             link.send(e)
-        link.send(snapshot([demo]))
+        link.send(snapshot([demo, *demo._extras]))
         for m in link.read_messages():
             if m.get("t") == "log":
                 print("[device]", m.get("msg"))

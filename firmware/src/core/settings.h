@@ -1,5 +1,6 @@
 #pragma once
-// Persistent user settings (NVS). Owned by the settings agent; read by anyone.
+// Persistent user settings (NVS). Owned by alerts-settings; read by anyone.
+// Existing fields are stable (ambient.cpp etc. read them). New fields are appended at the end.
 #include <Arduino.h>
 
 struct Settings {
@@ -12,8 +13,13 @@ struct Settings {
   bool night_mode = true;           // extra dim + clock between night_start_h and night_end_h
   uint8_t night_start_h = 22;
   uint8_t night_end_h = 7;
+  // --- appended fields ---
+  bool alert_errors = true;         // red flash + toast on tool_error
+  bool alert_subagents = true;      // tiny violet chips on subagent start/stop
 };
 
 Settings &settings();
 void settings_load();               // call once at boot (applies brightness)
-void settings_save();
+void settings_save();               // write to NVS now
+void settings_save_later();         // debounced save (~1.5 s after the last call); use from UI controls
+bool settings_night_now(uint32_t epoch, int32_t tz);  // true if night mode is on and local time is in the window

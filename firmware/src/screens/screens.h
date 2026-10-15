@@ -6,6 +6,7 @@ extern const ScreenDef screen_home;      // screen_home.cpp      (companion)
 extern const ScreenDef screen_agents;    // screen_agents.cpp    (agents overview)
 extern const ScreenDef screen_feed;      // screen_feed.cpp      (activity feed)
 extern const ScreenDef screen_usage;     // screen_usage.cpp     (usage & stats)
+extern const ScreenDef screen_system;     // screen_system.cpp    (host cpu/ram monitor)
 extern const ScreenDef screen_orbit;     // screen_orbit.cpp     (ambient visualization)
 extern const ScreenDef screen_settings;  // screen_settings.cpp  (settings)
 

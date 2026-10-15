@@ -6,7 +6,7 @@
 #include "../fx/ambient.h"
 
 static const ScreenDef *SCREENS[] = {
-    &screen_home, &screen_agents, &screen_feed, &screen_usage, &screen_orbit, &screen_settings,
+    &screen_home, &screen_agents, &screen_feed, &screen_usage, &screen_system, &screen_orbit, &screen_settings,
 };
 static const int N = sizeof(SCREENS) / sizeof(SCREENS[0]);
 static lv_obj_t *tv;

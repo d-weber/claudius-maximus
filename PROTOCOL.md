@@ -101,3 +101,7 @@ Firmware screens must read every field **defensively** (missing key ⇒ sensible
 { "t": "action", "action": "focus", "sid": "969ca7a9" }   // user tapped "focus" → host raises that terminal
 { "t": "shot", "w": 480, "h": 480, "fmt": "rgb565le", "len": 460800 } // followed immediately by len raw bytes
 ```
+
+### `state.system` — host machine metrics (providers/system.py, owned by the "system" agent)
+Schema defined at the top of host/companion/providers/system.py. Present in both real and demo mode.
+- [from usage] added optional fields under `state.usage` (real host fills them; firmware falls back when absent; full doc at top of host/companion/providers/usage.py): `daily_cost[14]` USD/day; `today {tokens,in,out,cache_read,cache_write,cost,msgs,cache_pct,saved}`; `week {tokens,cost}`; `tpm_now` (avg tok/min last 5 min); `burn` (USD last 60 min); `peak_hour` (0-23 or -1); `best_day {tokens,cost}`; `window {start,resets_at,tokens,cost,pct,est:1}` = ESTIMATED current 5-hour block (pct relative to your biggest recent block, not a plan limit). Definition: usage "tokens" = input + cache_write + output (cache reads excluded, reported in `today.cache_read`). `by_model` keys are families (opus/fable/sonnet/haiku/other), summed over the 14 days. Please add to the spec; host-sessions: demo.py could emit these too (see usage report).
