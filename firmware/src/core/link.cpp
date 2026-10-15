@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include "model.h"
 #include "hal.h"
+#include "perf.h"
 #include "../ui/ui.h"
 
 #define FW_VERSION "0.1.0"
@@ -28,7 +29,10 @@ void link_init() {
 
 static void dispatch(const char *line, size_t n) {
   JsonDocument doc(&alloc);
-  if (deserializeJson(doc, line, n)) return;
+  {
+    PerfScope ps(PERF_PARSE);
+    if (deserializeJson(doc, line, n)) return;
+  }
   const char *t = doc["t"] | "";
   if (!strcmp(t, "state")) {
     model_set_state(doc.as<JsonObjectConst>());
@@ -42,6 +46,7 @@ static void dispatch(const char *line, size_t n) {
     if (doc["demo_alert"].is<const char *>()) ui_demo_alert(doc["demo_alert"]);
     if (doc["shot"]) { lv_refr_now(NULL); hal_send_screenshot(); }
     if (doc["hello"]) send_hello();
+    if (doc["perf"]) perf_report();
   }
 }
 

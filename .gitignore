@@ -5,3 +5,4 @@ backup/*.bin
 .devlock
 *.png
 !docs/**/*.png
+.devwant.*

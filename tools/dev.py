@@ -12,6 +12,8 @@ it takes an exclusive lock (.devlock). Builds use a per-developer build dir so t
       --alert KIND              trigger alerts_demo(KIND) before the shot
       --seconds N               seconds of demo data to stream before the shot (default 4)
       --nodemo                  don't stream demo data
+  perf [--screen ID] [--seconds N] [--nodemo] [--detail]
+                                measure fps / frame time / cpu% / heap on a screen (locked)
   demo [--seconds N]            stream demo data to the device (locked)
   send JSON                     send one raw JSON line (locked)
   monitor [--seconds N]         print device output (locked)
@@ -64,6 +66,8 @@ def build_dir() -> Path:
 
 @contextmanager
 def device_lock(what: str):
+    want = ROOT / f".devwant.{os.getpid()}"   # tells the companion daemon to release the port now
+    want.touch()
     fd = os.open(LOCK, os.O_CREAT | os.O_RDWR)
     t0 = time.time()
     while True:
@@ -84,6 +88,7 @@ def device_lock(what: str):
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
+        want.unlink(missing_ok=True)
 
 
 def pio(*args: str) -> int:
@@ -176,6 +181,41 @@ def cmd_shot(a) -> int:
     return 0
 
 
+def read_perf(link: DeviceLink, timeout: float = 3.0) -> dict | None:
+    link.send({"t": "cmd", "perf": 1})
+    t_end = time.time() + timeout
+    while time.time() < t_end:
+        for m in link.read_messages():
+            if m.get("t") == "perf":
+                return m
+        time.sleep(0.05)
+    return None
+
+
+def cmd_perf(a) -> int:
+    """Measure firmware performance on a screen: resets the window, runs N s (demo stream unless --nodemo)."""
+    with device_lock("perf"):
+        link = open_link()
+        demo = None if a.nodemo else stream_demo(link, 0.5)
+        if a.screen:
+            link.send({"t": "cmd", "nav": a.screen})
+        if a.detail and demo:
+            link.send({"t": "cmd", "open": "detail", "sid": demo.sessions[0]["id"]})
+        time.sleep(0.5)
+        read_perf(link)  # discard warm-up window, start fresh
+        if a.nodemo:
+            time.sleep(a.seconds)
+        else:
+            stream_demo(link, a.seconds, demo)
+        res = read_perf(link)
+        link.close()
+    if not res:
+        print("no perf reply", file=sys.stderr)
+        return 1
+    print(json.dumps(res, indent=None if a.compact else 2))
+    return 0
+
+
 def cmd_demo(a) -> int:
     with device_lock("demo"):
         link = open_link()
@@ -219,6 +259,13 @@ def main() -> int:
     s.add_argument("--seconds", type=float, default=4)
     s.add_argument("--nodemo", action="store_true")
     s.set_defaults(f=cmd_shot)
+    pf = sub.add_parser("perf")
+    pf.add_argument("--screen")
+    pf.add_argument("--detail", action="store_true")
+    pf.add_argument("--seconds", type=float, default=10)
+    pf.add_argument("--nodemo", action="store_true")
+    pf.add_argument("--compact", action="store_true")
+    pf.set_defaults(f=cmd_perf)
     d = sub.add_parser("demo")
     d.add_argument("--seconds", type=float, default=20)
     d.set_defaults(f=cmd_demo)

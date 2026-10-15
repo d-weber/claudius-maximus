@@ -4,6 +4,7 @@
 #include <Arduino_GFX_Library.h>
 #include <TouchDrvGT911.hpp>
 #include "WS_CH32_IO.h"
+#include "perf.h"
 
 static Arduino_DataBus *bus = new Arduino_SWSPI(GFX_NOT_DEFINED, 42, 2, 1, GFX_NOT_DEFINED);
 static Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
@@ -24,6 +25,7 @@ static uint32_t last_touch = 0;
 static lv_disp_draw_buf_t draw_buf;
 
 static void flush_cb(lv_disp_drv_t *d, const lv_area_t *a, lv_color_t *c) {
+  PerfScope ps(PERF_FLUSH);
   gfx->draw16bitRGBBitmap(a->x1, a->y1, (uint16_t *)&c->full, a->x2 - a->x1 + 1, a->y2 - a->y1 + 1);
   lv_disp_flush_ready(d);
 }
@@ -75,6 +77,7 @@ void hal_init() {
   dd.ver_res = 480;
   dd.flush_cb = flush_cb;
   dd.draw_buf = &draw_buf;
+  perf_init(&dd);
   lv_disp_drv_register(&dd);
   static lv_indev_drv_t id;
   lv_indev_drv_init(&id);

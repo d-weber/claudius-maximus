@@ -34,6 +34,23 @@ log = logging.getLogger("companion")
 
 ROOT = Path(__file__).resolve().parents[2]
 DEVLOCK = ROOT / ".devlock"
+DEVWANT_GLOB = ".devwant.*"   # tools/dev.py drops <root>/.devwant.<pid> while it waits for / holds the device
+
+
+def dev_wants_device(now: float) -> bool:
+    """True while a dev tool is waiting for or using the device (fresh marker file from a live pid)."""
+    for f in ROOT.glob(DEVWANT_GLOB):
+        try:
+            pid = int(f.suffix[1:])
+            os.kill(pid, 0)
+            if now - f.stat().st_mtime < 900:
+                return True
+        except (ValueError, ProcessLookupError, PermissionError, FileNotFoundError):
+            try:
+                f.unlink()
+            except OSError:
+                pass
+    return False
 
 HEARTBEAT_S = 2.0
 TICK_S = 0.25
@@ -336,6 +353,12 @@ class Daemon:
     # -- device ---------------------------------------------------------------------------
     def ensure_connected(self, now: float):
         if self.dry_run:
+            return
+        if dev_wants_device(now):
+            if self.link.connected:
+                self.link.close()
+                log.debug("dev tool wants the device: stepping aside")
+            self.next_connect = now + 1.0
             return
         if self.link.connected:
             # yield the shared device lock now and then so tools/dev.py users get a turn

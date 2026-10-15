@@ -1,5 +1,9 @@
 # Team rules — read fully before writing code
 
+> **Current round: performance optimization** — see docs/PERF.md (probe, targets, baseline) and the
+> "Perf round ownership" table below, which overrides the original table for this round.
+
+
 We are building **Claudius Maximus**: a 4" 480×480 touch screen (Waveshare ESP32-S3-Touch-LCD-4 V4) that
 sits on a developer's desk and mirrors what their Claude Code agents are doing — a friendly, glanceable
 companion. Audience: developers running several agents/subagents in parallel. It must be *useful at a
@@ -36,6 +40,21 @@ tools/dev.py                 build / flash / screenshot tool (shared device lock
 | alerts-settings | firmware/src/fx/alerts.cpp, firmware/src/core/settings.{h,cpp}, firmware/src/screens/screen_settings.cpp |
 | system | host/companion/providers/system.py, firmware/src/screens/screen_system.cpp, new system_* files |
 | orbit-ambient | firmware/src/screens/screen_orbit.cpp, firmware/src/fx/ambient.cpp, new orbit_*/ambient_* files |
+
+### Perf round ownership
+| Owner | Files |
+|---|---|
+| perf-core | firmware/platformio.ini, include/lv_conf.h, include/lv_psram_alloc.h, src/main.cpp, src/core/hal.*, src/ui/ui.cpp, src/ui/theme.h |
+| perf-link | src/core/link.*, src/core/model.*, host/companion/daemon.py, link.py, providers/hooks.py, providers/sessions.py, sessions_*.py, providers/system.py, providers/usage.py |
+| perf-home | src/screens/screen_home.cpp, home_* |
+| perf-agents | src/screens/screen_agents.cpp, agents_* |
+| perf-feed | src/screens/screen_feed.cpp, screen_detail.cpp, feed_*, detail_* |
+| perf-usage | src/screens/screen_usage.cpp, usage_* (firmware only) |
+| perf-system | src/screens/screen_system.cpp, system_* (firmware only) |
+| perf-orbit | src/screens/screen_orbit.cpp, orbit_*, src/fx/ambient.*, ambient_* |
+| perf-alerts | src/fx/alerts.*, src/core/settings.*, src/screens/screen_settings.cpp |
+| perf-bench | tools/bench.py (new), docs/PERF.md results section, tools/dev.py (additive only) |
+Everyone may append to docs/PERF.md "## Results". src/core/perf.* is lead-owned (ask perf-core via the lead if you need more probes).
 
 Lead-owned (ask the lead, don't edit): ui.h, ui.cpp, theme.h, screens.h, hal.*, model.*, link.*, main.cpp, platformio.ini, lv_conf.h, PROTOCOL.md, tools/dev.py.
 Exception: you may *append* a short request to the `## Requests` section at the end of PROTOCOL.md if you need data
