@@ -1,0 +1,7 @@
+.pio/
+.venv/
+__pycache__/
+backup/*.bin
+.devlock
+*.png
+!docs/**/*.png
