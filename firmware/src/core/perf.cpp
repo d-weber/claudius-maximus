@@ -1,6 +1,7 @@
 #include "perf.h"
 #include <esp_heap_caps.h>
 #include "../ui/ui.h"
+#include "hal.h"
 
 static const char *NAMES[PERF__N] = {"link", "tick", "lvgl", "flush", "parse"};
 static uint64_t sum_us[PERF__N];
@@ -70,6 +71,11 @@ void perf_report() {
   o += ",\"heap_int_min\":" + String(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
   o += ",\"heap_int_largest\":" + String(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
   o += ",\"psram_free\":" + String(heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+  static uint32_t polls0, presses0;
+  uint32_t polls = hal_touch_polls(), presses = hal_touch_presses();
+  o += ",\"touch_hz\":" + String((polls - polls0) / win, 0) + ",\"touch_presses\":" + String(presses - presses0);
+  polls0 = polls; presses0 = presses;
+  o += ",\"up_s\":" + String(millis() / 1000);
   o += ",\"lv_objs_note\":\"cpu_pct = loop work time / wall time (excl. delay)\"}";
   Serial.println(o);
   reset();

@@ -196,3 +196,38 @@ JSON parse of a state ≈ 5.6 ms (≈ 6/s). Flush (copy to PSRAM framebuffer) �
   Night clock (forced saver, no stream): 0 fps, 0 px, cpu 9 % (link polling floor), loop max 4 ms.
   Remaining: frame max ~120-130 ms / loop max ~155-170 ms are not orbit's: they stay with planets frozen + fx off
   (`dev_orbit` flags 6) ⇒ alert card/toast slide-ins + JSON parse; a ring change frame ≈ 30 k px (~20 ms).
+- **perf-core** — global render pipeline (2026-10-16, device used exclusively, one device-lock hold per variant,
+  same tree (HEAD 8d69ad6) otherwise, demo 8 s per screen; frame avg ms home/agents/feed/usage/system/orbit/settings).
+  Root cause of the ≈0.6 µs/px: Arduino_GFX's RGB panel uses **bounce buffers**, i.e. an ISR on the LVGL core
+  memcpy's the whole 460 KB PSRAM framebuffer into SRAM on every panel refresh (~42 Hz ≈ 19 MB/s), stealing
+  25–40 % of core 1 and 77 KB of internal RAM.
+  - base: 16.6 / 15.0 / 14.6 / 25.6 / 26.5 / 41.4 / 19.2; static cpu 9.4 %; heap_int 79 KB.
+  - **KEPT — own esp_lcd RGB panel setup in hal.cpp, no bounce buffer** (GDMA scans PSRAM directly; ST7701 init
+    still via Arduino_GFX SWSPI + init table; 180° blit + esp_cache_msync in flush): 12.2 / 9.3 / 9.0 / 17.5 / 20.0 /
+    26.6 / 13.6 (−26…−38 %), cpu −9…−15 pts, **heap_int 79 → 156 KB**. Same driver with the 40-line bounce buffer =
+    base numbers (control). Fallback if the panel ever shows shifted/garbled lines: `-DHAL_BOUNCE_PX=19200`.
+  - **KEPT — async flush on core 0** (flush task: blit+cache writeback overlaps LVGL rendering the next band into the
+    2nd draw buffer): 10.5 / 8.0 / 7.8 / 15.4 / 18.0 / 23.8 / 12.3 (≈ −10 %). Note: `flush` stage time is now core-0
+    time, no longer inside cpu_pct.
+  - **KEPT — GT911 polling in a core-0 task** (100 Hz, touch_cb only reads the last sample) **+ loop sleeps until the
+    next LVGL timer (1–5 ms) instead of delay(2)**: static cpu 6.4 → 1.2 %, demo cpu −3…−4 pts. perf now reports
+    `touch_hz` (≈100), `touch_presses`, `up_s`.
+  - **KEPT — `-O2` instead of `-Os`** (our code + LVGL/GFX/JSON; prebuilt Arduino libs unaffected): −3…−8 % frame
+    time, +96 KB flash (1.24 MB of 6.5 MB).
+  - REJECTED (no measurable gain): LVGL heap internal-first with 64 KB reserve, or big (≥1 KB) allocs internal
+    (frame times identical to PSRAM heap); `LV_ATTRIBUTE_FAST_MEM IRAM_ATTR` (≤ 5 %, costs 12 KB internal RAM);
+    `LV_MEMCPY_MEMSET_STD`, `LV_CIRCLE_CACHE_SIZE 16`, refresh period 16 ms (identical); draw buffers 2×480×96
+    instead of 2×480×60 (identical, −69 KB RAM).
+  - REJECTED — the earlier WIP (docs/patches/perf-core-dualcore-WIP.patch): it moved the *bounce-buffer ISR* to core 0
+    via gfx->begin() in a core-0 task. Same speed gain, but **USB-CDC bulk TX then breaks**: screenshots truncate
+    (0/8 right after boot, intermittently later), also with the CDC ISR on core 0, a staging buffer or a 1 s TX timeout.
+    Removing the bounce buffer instead has no such issue (8/8 shots after flash, 9/9 + 3/3 during soaks).
+  - Stability: 10-min soak (demo stream, screen cycle every 25 s incl. detail, brightness toggle every 7 s, shots):
+    no reset (uptime monotonic), heap_int flat 147 484 B, psram flat, touch_hz 100, all shots intact; 60 s of
+    brightness writes every 0.5 s (CH32 I2C on core 1) vs touch polling (core 0): zero error lines. 4-min soak on
+    the final -O2 build: same. **Not verifiable remotely: physical touch and the panel image itself (only the
+    framebuffer is captured) — check by eye/finger: no shifted/flickering lines, taps/swipes/sliders work.**
+  - Final (all kept changes, 2 runs each), base → after: see docs/STATUS.md table.
+  - Notes for owners: remaining frame_max / loop_max spikes (55–125 ms) are single full-area repaints from screen
+    content (alert toasts sliding over a tile, orbit's ~23k px/frame at 18 fps = orbit's own animation), not the
+    pipeline. Orbit is still the most expensive per pixel (~1.1 µs/px: many overlapping AA arcs/circles).
