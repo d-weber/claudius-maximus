@@ -1,0 +1,261 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>13 Reviewing code</title>
+<script src="../lib/iso.js"></script>
+</head>
+<body>
+<script>
+const { C, SHADE } = Iso;
+const R = Iso.rect, P = Iso.px;
+
+// ---------------------------------------------------------------- layout
+const MON = { x: 76, y: 56 };            // monitor, screen faces down-right (toward Clawd and the viewer)
+const CL = { x: 128, y: 77 };            // Clawd's feet (nudged right to free the printout spot)
+const PAPER = { x: 100, y: 79 };         // printed diff, flat on the desk, front-left of Clawd
+const STAMP_REST = { x: 122, y: 98 };    // the LGTM stamp waits here
+const MAG_REST = { x: 164, y: 90 };      // where the magnifier lands when he tosses it over his shoulder
+const STAMP_H = 16;                      // base 4 + handle 8 + knob 4
+
+// ---------------------------------------------------------------- timeline (10 fps, 40 frames)
+const TL = [
+  ['scanA', 4], ['scanB', 4], ['ok', 4],   // 0-11  squint at the diff, a good line: green check + nod
+  ['spot', 2], ['shock', 3],                // 12-16 a line flashes red, a bug pops out; huge eye goes wide, "!"
+  ['crawl', 7],                             // 17-23 bug climbs down the monitor onto the printout, lens tracks it
+  ['grab', 2], ['wind', 3],                 // 24-28 drop the glass, grab the stamp, wind up (stretch)
+  ['slam', 3],                              // 29-31 STAMP! squash, impact ticks, shake
+  ['lgtm', 5],                              // 32-36 lift: green LGTM + flat bug; happy, blush
+  ['reset', 3],                             // 37-39 printout poofs (merged), glass back up to the eye
+];
+const N = Iso.seq.len(TL);
+const phaseAt = (i) => Iso.seq(TL, i);
+const startOf = (name) => { let f = 0; for (const [n, h] of TL) { if (n === name) return f; f += h; } return 0; };
+
+// ---------------------------------------------------------------- helpers
+// Big magnifying glass held at the eye. (cx, cy) = lens centre. The magnified eye is drawn inside.
+function bigLens(ctx, cx, cy, hand, eye) {
+  const r = 7;
+  if (hand) { // 2 px wooden handle from the rim to the hand
+    const hx0 = cx - 5, hy0 = cy + 5;
+    Iso.line(ctx, hx0, hy0, hand.x, hand.y, C.woodLeft);
+    Iso.line(ctx, hx0 + 1, hy0, hand.x + 1, hand.y, C.woodRight);
+  }
+  // glass: sparse blue dither so the face shows through
+  for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+    if (dx * dx + dy * dy <= (r - 1.5) * (r - 1.5) && ((dx + dy) & 3) === 0 && (dx & 1) === 0) P(ctx, cx + dx, cy + dy, C.blueLight);
+  }
+  if (eye) { // the HUGE eye
+    const ex = cx + (eye.gx || 0), ey = cy + (eye.gy || 0);
+    if (eye.shape === 'happy') {
+      const arc = ['..####..', '.#....#.', '#......#'];
+      Iso.sprite(ctx, ex - 4, ey - 1, arc, { '#': C.eye });
+      Iso.sprite(ctx, ex - 4, ey, arc, { '#': C.eye });
+    } else if (eye.shape === 'blink') {
+      R(ctx, ex - 3, ey, 7, 2, C.eye);
+    } else if (eye.shape === 'wide') {
+      R(ctx, ex - 3, ey - 5, 7, 11, C.eye);
+      R(ctx, ex - 2, ey - 4, 2, 2, C.text); P(ctx, ex + 2, ey + 3, C.text);
+    } else {
+      R(ctx, ex - 2, ey - 4, 5, 9, C.eye);
+      R(ctx, ex - 1, ey - 3, 2, 2, C.text);
+    }
+  }
+  // rim, lit from the top-left
+  for (let dy = -r - 1; dy <= r + 1; dy++) for (let dx = -r - 1; dx <= r + 1; dx++) {
+    const d = Math.sqrt(dx * dx + dy * dy);
+    if (d > r - 1.2 && d <= r + 0.5) P(ctx, cx + dx, cy + dy, (dx + dy < -2) ? C.text : (dx + dy > 3 ? C.greyDark : C.muted));
+  }
+  P(ctx, cx - 3, cy - 4, C.text); P(ctx, cx - 4, cy - 3, C.text); P(ctx, cx - 4, cy - 2, C.text); // glare
+}
+
+// Rubber stamp. (x, y) = footprint centre on the desk, z = lift. Knob top sits at y - z - STAMP_H.
+function stamp(ctx, x, y, z) {
+  if (z > 0) Iso.tile(ctx, x, y, 3, 3, C.woodShadow);
+  Iso.box(ctx, x, y, z, 4, 4, 4, SHADE.red);
+  Iso.box(ctx, x, y, z + 4, 2, 2, 8, SHADE.wood);
+  Iso.box(ctx, x, y, z + 12, 3, 3, 4, SHADE.red, { round: true });
+}
+// Stamp hanging from a hand: footprint stays over the printout, the knob meets the hand.
+function stampAtHand(ctx, hand) {
+  const z = Math.max(0, Math.round(PAPER.y - hand.y - STAMP_H));
+  stamp(ctx, Math.round(hand.x), PAPER.y, z);
+}
+
+// Tiny pixel bug, side view. dir 1 = walks right, -1 = left. step alternates the legs.
+function bug(ctx, x, y, step, dir) {
+  const body = ['......k', '.hhh.k.', 'hrrrrkw', 'rrrrrkk'];
+  const legs = step ? '.k.k.k.' : 'k.k.k..';
+  Iso.sprite(ctx, x - 3, y - 4, body.concat([legs]), { h: SHADE.red.top, r: C.red, k: C.eye, w: C.text }, dir < 0);
+}
+function bugSplat(ctx, x, y) {
+  Iso.sprite(ctx, x - 5, y - 1, ['k...r..k..', '.rrhrrrrkw', 'k.r...k..k'], { h: SHADE.red.top, r: C.red, k: C.eye, w: C.text });
+}
+
+// Printed diff: + / - gutters on a sheet, optional LGTM imprint.
+function printout(ctx, x, y, lgtm, splat) {
+  const r = Iso.box(ctx, x, y, 0, 9, 7, 1, SHADE.paper);
+  const rows = [[1, 5, 0], [2, 4, 1], [3, 6, 0], [4, 3, -1], [5, 5, 0]];
+  for (const [j, n, g] of rows) {
+    const c = g > 0 ? C.green : g < 0 ? C.red : C.muted;
+    if (g) r.top.cell(1, j, c);
+    for (let i = 2; i < 2 + n; i++) r.top.cell(i, j, c);
+  }
+  if (lgtm) {
+    R(ctx, x - 9, y - 5, 19, 9, C.paper);
+    Iso.text(ctx, x - 7, y - 2, 'LGTM', C.greenDark);
+    R(ctx, x - 9, y - 4, 19, 1, C.greenDark); R(ctx, x - 9, y + 4, 19, 1, C.greenDark);
+    R(ctx, x - 9, y - 4, 1, 9, C.greenDark); R(ctx, x + 9, y - 4, 1, 9, C.greenDark);
+  }
+  if (splat) bugSplat(ctx, x - 13, y + 1);
+}
+
+// Monitor content: a scrolling diff with + / - gutters. bad = row 2 highlighted red; fixed = all green.
+function diffScreen(scroll, bad, fixed) {
+  return function (p, A) {
+    const rows = [[0, 7, '+'], [2, 9, ' '], [2, 5, '-'], [4, 8, '+'], [2, 6, ' '], [0, 4, '+'], [2, 9, '-'], [4, 5, ' ']];
+    for (let r = 0; r * 2 + 1 < A.h; r++) {
+      const q = rows[(r + scroll) % rows.length];
+      const row = 1 + r * 2, isBad = bad && r === 2;
+      if (isBad) p.rect(A.u, A.v + row - 1, A.w, 3, C.redDark);
+      let g = q[2] === '+' ? C.green : q[2] === '-' ? C.red : C.dim;
+      if (fixed && q[2] === '-') g = C.green;
+      p.rect(A.u + 1, A.v + row, 1, 1, g);
+      p.rect(A.u + 3 + q[0], A.v + row, Math.min(q[1], A.w - 4 - q[0]), 1, isBad ? C.text : (q[2] === ' ' ? C.muted : g));
+    }
+  };
+}
+
+Iso.player({
+  name: '13-reviewing-code',
+  fps: 10,
+  frames: N,
+  loop: true,
+  notes: 'Code review, detective style. <b>Loop, 40 frames @ 10 fps = 4.0 s.</b> Clawd squints through a big magnifying glass that blows one eye up HUGE, scanning a diff on the monitor; a good line earns a green check and a nod. Then a line flashes red and a tiny pixel bug crawls out of the screen, down the stand and onto the printed diff, the giant eye tracking it in horror. He drops the glass, grabs the rubber stamp, winds up and STAMPS: the stamp lifts on a green "LGTM" with a flattened bug beside it. The printout poofs away (merged) and the glass goes back up.',
+  draw(ctx, i) {
+    const ph = phaseAt(i), k = i - startOf(ph);
+    Iso.drawDesk(ctx);
+
+    // ---- monitor
+    const scanning = ph === 'scanA' || ph === 'scanB';
+    const scroll = scanning ? Math.floor(i / 3) % 8 : 3;
+    const bad = ['spot', 'shock', 'crawl', 'grab', 'wind', 'slam'].includes(ph) && (ph !== 'spot' || k === 0);
+    const fixed = ph === 'lgtm' || ph === 'reset';
+    const m = Iso.prop.monitor(ctx, MON.x, MON.y, { facing: 'right', screen: diffScreen(scroll, bad, fixed) });
+    const scr = m.screen, A = m.area;
+
+    // ---- printout (flat, so it goes under Clawd's feet) and the bug on it
+    const showPaper = !(ph === 'reset' && k < 2);
+    if (showPaper) printout(ctx, PAPER.x, PAPER.y, ph === 'lgtm', ph === 'lgtm');
+
+    let bugPos = null, bugStep = i & 1, bugDir = 1, bugAlarm = false;
+    const out = scr.at(A.u + 9, A.v + 5);
+    if (ph === 'shock') bugPos = { x: out.x, y: out.y + 1 - Math.min(k, 1) };
+    if (ph === 'crawl') {
+      const path = [[out.x + 1, out.y + 4], [out.x + 2, out.y + 9], [out.x + 2, out.y + 14], [out.x + 4, out.y + 18],
+                    [out.x + 8, out.y + 20], [PAPER.x - 4, PAPER.y - 1], [PAPER.x, PAPER.y]];
+      bugPos = { x: path[k][0], y: path[k][1] }; bugDir = 1;
+    }
+    if (ph === 'grab' || ph === 'wind') { bugPos = { x: PAPER.x, y: PAPER.y }; bugStep = 0; bugAlarm = ph === 'wind'; }
+
+    // ---- Clawd's pose for this frame
+    let pose, lens = null, stampHeld = false;
+    const fx = [];
+    switch (ph) {
+      case 'scanA': case 'scanB': {
+        pose = { eyes: { shape: 'open', r: 'closed', gazeY: -1 }, arms: { l: 'forward', r: 'out' }, mouth: 'flat' };
+        lens = { gx: ph === 'scanA' ? -2 : 0, gy: k === 3 ? -1 : -2, shape: (ph === 'scanB' && k === 2) ? 'blink' : 'open' };
+        break;
+      }
+      case 'ok':
+        pose = { eyes: { shape: 'open', r: 'closed', gazeY: -1 }, arms: { l: 'forward', r: 'out' }, mouth: 'smile', squash: k === 1 ? 2 : 0 };
+        lens = { gx: 0, gy: k === 1 ? 0 : -1, shape: 'open' };
+        fx.push(['check', k]);
+        break;
+      case 'spot':
+        pose = { eyes: { shape: 'open', r: 'closed' }, arms: { l: 'forward', r: 'out' }, mouth: 'flat' };
+        lens = { gx: -2, gy: -2, shape: 'open' };
+        break;
+      case 'shock':
+        pose = { eyes: { shape: 'wide' }, arms: { l: 'forward', r: 'up' }, mouth: 'o', squash: k === 0 ? -3 : 0 };
+        lens = { gx: -2, gy: -2, shape: 'wide' };
+        fx.push(['bang']);
+        break;
+      case 'crawl':
+        pose = { eyes: { shape: 'wide', gazeX: -1, gazeY: Math.min(2, k - 1) }, arms: { l: 'forward', r: 'out' }, mouth: 'wobbly' };
+        lens = { gx: -2 + (k >= 5 ? 1 : 0), gy: Math.min(3, -2 + k), shape: 'wide' };
+        if (k >= 3) fx.push(['sweat']);
+        break;
+      case 'grab':
+        pose = { eyes: { shape: 'wince' }, arms: { l: 'high', r: 'out' }, mouth: 'flat', shadowLens: true };
+        stampHeld = true;
+        break;
+      case 'wind':
+        pose = { eyes: { shape: 'wince' }, arms: { l: 'up', r: 'up' }, mouth: 'flat', squash: k === 2 ? -4 : -3 };
+        stampHeld = true;
+        break;
+      case 'slam':
+        pose = { eyes: { shape: 'wince' }, arms: { l: 'forward', r: 'down' }, mouth: 'laugh', squash: k === 0 ? 4 : 2, shake: [-1, 1, 0][k] };
+        stampHeld = true;
+        fx.push(['ticks', k]);
+        break;
+      case 'lgtm':
+        pose = { eyes: { shape: 'happy' }, arms: { l: k === 0 ? 'high' : 'out', r: 'high' }, mouth: 'smile', blush: true, squash: k === 2 ? 1 : 0 };
+        fx.push(['spark', k]);
+        break;
+      case 'reset':
+        pose = { eyes: { shape: 'open', gazeX: -1 }, arms: { l: 'forward', r: 'out' }, mouth: 'none' };
+        lens = k === 2 ? { gx: -1, gy: -1, shape: 'open' } : null;
+        fx.push(['poof', k]);
+        break;
+    }
+    delete pose.shadowLens;
+
+    // the bug crawling down the monitor is in front of the monitor, behind Clawd
+    if (bugPos) {
+      bug(ctx, bugPos.x, bugPos.y, bugStep, bugDir);
+      if (bugAlarm) { R(ctx, bugPos.x, bugPos.y - 9, 1, 3, C.amber); P(ctx, bugPos.x, bugPos.y - 5, C.amber); }
+    }
+
+    const a = Iso.drawClawd(ctx, Object.assign({ x: CL.x, y: CL.y }, pose));
+
+    // ---- front props
+    if (stampHeld) stampAtHand(ctx, a.hand.l);
+    else stamp(ctx, STAMP_REST.x, STAMP_REST.y, 0);
+    if (!lens) {
+      // tossed glass: arcs over his head on 'grab', lies on the desk, gets picked up on 'reset'
+      let mx = MAG_REST.x, my = MAG_REST.y;
+      if (ph === 'grab' && k === 0) { mx = 140; my = 26; }   // flung over his shoulder
+      if (ph === 'grab' && k === 1) { mx = 158; my = 60; }
+      if (ph === 'wind' && k === 0) my -= 2;     // little bounce
+      if (ph === 'reset' && k === 1) { mx = a.hand.l.x - 2; my = a.hand.l.y - 4; }
+      Iso.prop.magnifier(ctx, mx, my, { handle: 'dr' });
+    }
+
+    // ---- the magnifier at his eye (on top of the face)
+    if (lens) bigLens(ctx, a.eyes.l.x - 1, a.eyes.l.y + 5, a.hand.l, lens);
+
+    // ---- FX
+    for (const f of fx) {
+      if (f[0] === 'check') {
+        const p = scr.at(A.u + A.w, A.v + 2);
+        Iso.fx.check(ctx, p.x + 5, p.y - 4 - (f[1] === 0 ? 1 : 0), C.green);
+        if (f[1] < 2) Iso.fx.sparkle(ctx, p.x + 11, p.y - 9, f[1] + 1, C.green);
+      }
+      if (f[0] === 'bang') Iso.fx.bang(ctx, a.head.x - 6, a.head.y - 9, {});
+      if (f[0] === 'sweat') Iso.fx.sweat(ctx, a.head.x + 14, a.head.y + 4 + (i & 1));
+      if (f[0] === 'ticks' && f[1] < 2) {
+        Iso.fx.ticks(ctx, PAPER.x - 14, PAPER.y - 4, 'left', C.amber);
+        Iso.fx.ticks(ctx, PAPER.x + 14, PAPER.y - 4, 'right', C.amber);
+      }
+      if (f[0] === 'spark') {
+        Iso.fx.sparkle(ctx, PAPER.x - 14, PAPER.y - 8, [1, 2, 3, 2, 1][f[1]], C.green);
+        Iso.fx.sparkle(ctx, a.head.x + 18, a.head.y - 4, [0, 1, 2, 3, 2][f[1]], C.amber);
+      }
+      if (f[0] === 'poof') Iso.fx.poof(ctx, PAPER.x, PAPER.y - 3, f[1] + 1, C.muted);
+    }
+  },
+});
+</script>
+</body>
+</html>

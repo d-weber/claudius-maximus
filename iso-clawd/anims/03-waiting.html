@@ -1,0 +1,124 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>03 Waiting</title>
+<script src="../lib/iso.js"></script>
+</head>
+<body>
+<script>
+const { C, SPOT } = Iso;
+
+// Expression presets
+const ALERT = { eyes: { shape: 'wide' }, mouth: 'o' };
+const PLEAD = { eyes: { shape: 'wide', gazeY: -2 }, mouth: 'wobbly', blush: true };
+
+// Pose table. hey: which side the "HEY!" shout pops on. sign: PLS sign lift (0 none, 1 half, 2 full).
+const POSE = {
+  alert:  Object.assign({ arms: 'out' }, ALERT),
+  alertB: Object.assign({ arms: 'out', legs: 'tap' }, ALERT),
+  crouch: Object.assign({ arms: 'down', squash: 3 }, ALERT, { eyes: { shape: 'closed' } }),
+  launch: Object.assign({ arms: 'high', z: 5, squash: -3 }, ALERT),
+  apexL:  Object.assign({ arms: { l: 'up', r: 'high' }, z: 10, hey: 'l' }, ALERT),
+  apexR:  Object.assign({ arms: { l: 'waveB', r: 'high' }, z: 10, hey: 'r' }, ALERT),
+  fall:   Object.assign({ arms: 'high', z: 4 }, ALERT),
+  land:   Object.assign({ arms: 'out', squash: 4 }, ALERT, { eyes: { shape: 'wince' } }),
+  waveA:  Object.assign({ arms: { l: 'waveB', r: 'out' }, wave: 1, shake: -1 }, ALERT, { mouth: 'laugh' }),
+  waveB:  Object.assign({ arms: { l: 'high', r: 'out' }, wave: 2, shake: 1 }, ALERT, { mouth: 'laugh' }),
+  signUp: Object.assign({ arms: { l: 'high', r: 'out' }, sign: 1 }, ALERT),
+  plead:  Object.assign({ arms: { l: 'up', r: 'out' }, sign: 2 }, PLEAD),
+  pleadT: Object.assign({ arms: { l: 'up', r: 'out' }, sign: 2, legs: 'tap' }, PLEAD),
+  pleadBl:Object.assign({ arms: { l: 'up', r: 'out' }, sign: 2 }, PLEAD, { eyes: { shape: 'blink' } }),
+  signDn: Object.assign({ arms: { l: 'high', r: 'out' }, sign: 1 }, ALERT),
+};
+
+const TIMELINE = [
+  ['alert', 1], ['alertB', 1],
+  // hop 1: "HEY!"
+  ['crouch', 1], ['launch', 1], ['apexL', 2], ['fall', 1], ['land', 1],
+  // hop 2: "HEY!"
+  ['crouch', 1], ['launch', 1], ['apexR', 2], ['fall', 1], ['land', 1],
+  // friendly wave at the viewer
+  ['waveA', 2], ['waveB', 1], ['waveA', 1], ['waveB', 2],
+  // the gag: up comes a tiny "PLS" sign + puppy eyes, foot tapping
+  ['signUp', 1], ['plead', 2], ['pleadT', 1], ['pleadBl', 1], ['plead', 1], ['pleadT', 1], ['plead', 1],
+  ['signDn', 1],
+];
+
+// Tiny hand-held sign: a stick from the hand plus an amber card with "PLS" (or "?" while it rises).
+function drawSign(ctx, hand, lift, frame) {
+  const txt = lift === 2 ? 'PLS' : '?';
+  const tw = Iso.textWidth(txt);
+  const w = tw + 6, h = 10;
+  const stick = lift === 2 ? 6 : 3;
+  const cx = hand.x, top = hand.y - stick - h;
+  Iso.rect(ctx, cx, hand.y - stick, 1, stick, C.woodLeft);           // stick
+  const x0 = cx - (w >> 1);
+  Iso.rect(ctx, x0 + 1, top, w - 2, h, C.amberDark);                 // card border
+  Iso.rect(ctx, x0, top + 1, w, h - 2, C.amberDark);
+  Iso.rect(ctx, x0 + 1, top + 1, w - 2, h - 2, C.amber);
+  Iso.rect(ctx, x0 + 1, top + h - 2, w - 2, 1, C.amberDark);         // card thickness
+  Iso.text(ctx, x0 + 3, top + 2, txt, C.eye);
+  Iso.rect(ctx, cx - 1, hand.y - stick, 3, 1, C.amberDark);
+  // tiny wiggle ticks so it reads as "shaking the sign"
+  if (lift === 2 && frame % 2 === 0) Iso.fx.ticks(ctx, x0 - 1, top + 4, 'left', C.amber);
+}
+
+Iso.player({
+  name: '03-waiting',
+  fps: 10,
+  frames: Iso.seq.len(TIMELINE),   // 29 frames = 2.9 s
+  loop: true,
+  notes: 'NEEDS YOU (loop, 29 f @ 10 fps = 2.9 s). Clawd is blocked on the human: wide eyes, "o" mouth and an amber "!" badge ' +
+    'bobbing over his head. Beat: alert foot-tap, then a double "HEY! HEY!" hop (crouch, stretch, apex with one arm thrown up, ' +
+    'squash-land), a friendly wave straight at the viewer, then the gag: he raises a tiny amber sign that flips from "?" to "PLS" ' +
+    'and gives puppy eyes (looking up, wobbly mouth, blush, nervous foot tap), lowers it and starts again. Amber is the only accent.',
+  draw(ctx, i, t) {
+    const name = Iso.seq(TIMELINE, i);
+    const p = POSE[name];
+
+    Iso.drawDesk(ctx);
+    // amber-headed notepad on the desk: the pending question
+    Iso.prop.notepad(ctx, SPOT.backRight.x + 8, SPOT.backRight.y + 2, { lines: 2 });
+    Iso.prop.mug(ctx, 66, 72, { frame: i, steam: true });
+
+    const a = Iso.drawClawd(ctx, {
+      x: SPOT.clawd.x, y: SPOT.clawd.y, z: p.z || 0,
+      eyes: p.eyes, mouth: p.mouth, blush: !!p.blush,
+      arms: p.arms, legs: p.legs || 'stand', squash: p.squash || 0, shake: p.shake || 0,
+    });
+
+    Iso.prop.paper(ctx, SPOT.frontLeft.x - 4, SPOT.frontLeft.y, { lines: 3 });
+
+    // ---- FX
+    // "!" badge: bobs on a 4-frame cycle, rides the head through the hops
+    const bob = Iso.cycle([0, -1, -2, -1], i);
+    const bx = a.head.x, by = a.head.y - 9 + bob;
+    Iso.fx.bang(ctx, bx, by, { badge: true });
+    // urgency pulse around the badge, on and off
+    if (i % 4 < 2) Iso.fx.ticks(ctx, bx, by - 6, 'up', C.amber);
+
+    // HEY! shouts at the hop apexes
+    if (p.hey === 'l') {
+      Iso.text(ctx, a.bbox.x - 20, a.head.y + 12, 'HEY!', C.amber);
+      Iso.fx.ticks(ctx, a.bbox.x - 22, a.head.y + 14, 'left', C.amber);
+    } else if (p.hey === 'r') {
+      Iso.text(ctx, a.bbox.x + a.bbox.w - 2, a.head.y + 2, 'HEY!', C.amber);
+      Iso.fx.ticks(ctx, a.bbox.x + a.bbox.w + 14, a.head.y + 4, 'right', C.amber);
+    }
+
+    // wave motion ticks beside the waving hand
+    if (p.wave && a.hand.l) {
+      Iso.fx.ticks(ctx, a.hand.l.x - 3, a.hand.l.y, 'left', C.amber);
+    }
+
+    // hand-held sign
+    if (p.sign && a.hand.l) drawSign(ctx, a.hand.l, p.sign, i);
+
+    // pleading: a tiny sweat drop for "polite but urgent"
+    if (p.sign === 2) Iso.fx.sweat(ctx, a.head.x + 14, a.head.y + 4);
+  },
+});
+</script>
+</body>
+</html>

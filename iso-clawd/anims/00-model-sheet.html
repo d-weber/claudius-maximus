@@ -1,0 +1,252 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Model sheet</title>
+<script src="../lib/iso.js"></script>
+<style>
+  html, body { margin: 0; background: #0F0E0D; color: #ECE9E4; font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  h2 { font-size: 14px; margin: 22px 0 8px; color: #F0A07E; font-weight: 600; border-bottom: 1px solid #3D3A36; padding-bottom: 4px; }
+  p.sub { color: #9C978E; margin: 0 0 8px; max-width: 900px; }
+  .grid { display: flex; flex-wrap: wrap; gap: 8px; }
+  .cell { background: #1A1918; border: 1px solid #3D3A36; border-radius: 4px; padding: 0 0 4px; }
+  .cell canvas { display: block; image-rendering: pixelated; }
+  .cell .l { color: #ECE9E4; padding: 3px 6px 0; }
+  .cell .c { color: #9C978E; padding: 0 6px; font-size: 11px; white-space: pre; }
+  .bar { display: flex; gap: 6px; align-items: center; margin: 8px 0; color: #9C978E; }
+  .bar button { background: #262523; color: #ECE9E4; border: 1px solid #3D3A36; border-radius: 6px; padding: 4px 9px; font: inherit; cursor: pointer; }
+  .bar button.on { border-color: #D97757; color: #F0A07E; }
+  .sw { display: inline-flex; align-items: center; gap: 6px; margin: 0 14px 6px 0; }
+  .sw i { display: inline-block; width: 18px; height: 18px; border: 1px solid #3D3A36; }
+  a { color: #9C978E; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Isometric Clawd — model sheet</h1>
+  <p class="sub">The reference every animation follows. Each cell shows the exact <code>Iso.drawClawd</code> / <code>Iso.prop.*</code> /
+  <code>Iso.fx.*</code> call under it. Animated cells cycle at 6 fps. <a href="../index.html">← gallery</a></p>
+  <div class="bar">zoom <button data-z="2">2x</button><button data-z="3">3x</button><button data-z="4">4x</button>
+    <span style="width:12px"></span><button id="pp">❚❚ pause</button></div>
+  <div id="root"></div>
+</div>
+<script>
+const { C, SPOT } = Iso;
+const root = document.getElementById('root');
+const cells = [];
+let zoom = +(new URLSearchParams(location.search).get('zoom') || 3);
+let frame = 0, playing = !new URLSearchParams(location.search).has('still');
+
+function section(title, sub) {
+  const h = document.createElement('h2'); h.textContent = title; root.appendChild(h);
+  if (sub) { const p = document.createElement('p'); p.className = 'sub'; p.innerHTML = sub; root.appendChild(p); }
+  const g = document.createElement('div'); g.className = 'grid'; root.appendChild(g); return g;
+}
+// cell(grid, label, code, draw(ctx, i), w, h)
+function cell(g, label, code, draw, w, h) {
+  w = w || 80; h = h || 80;
+  const d = document.createElement('div'); d.className = 'cell';
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const l = document.createElement('div'); l.className = 'l'; l.textContent = label;
+  const c = document.createElement('div'); c.className = 'c'; c.textContent = code || '';
+  d.append(cv, l, c); g.appendChild(d);
+  const ctx = cv.getContext('2d'); ctx.imageSmoothingEnabled = false;
+  cells.push({ cv, ctx, draw, w, h, d });
+}
+// small desk tile + Clawd centred in a 80x80 cell
+const FX = 40, FY = 66;
+function pad(ctx) { Iso.drawDesk(ctx, { x: FX, y: FY - 2, a: 18, b: 12, thick: 4, grain: false }); }
+function clawdCell(g, label, opts, code) {
+  cell(g, label, code, (ctx, i) => {
+    pad(ctx);
+    const o = typeof opts === 'function' ? opts(i) : opts;
+    Iso.drawClawd(ctx, Object.assign({ x: FX, y: FY - 2 }, o));
+  });
+}
+
+// ---------------------------------------------------------------- expressions
+let g = section('Eyes', 'eyes: {shape, gazeX -1..1, gazeY -2..2, l?, r?} — shapes are open | blink | closed | happy | wince | wide | wink. ' +
+  '<code>eyes</code> may also be a bare string. <code>shine:true</code> adds a catch-light to open eyes (wide has one by default).');
+for (const s of ['open', 'blink', 'closed', 'happy', 'wince', 'wide', 'wink'])
+  clawdCell(g, s, { eyes: s }, `eyes:'${s}'`);
+clawdCell(g, 'open + shine', { eyes: 'open', shine: true }, `shine:true`);
+clawdCell(g, 'gaze left', { eyes: { shape: 'open', gazeX: -1 } }, `gazeX:-1`);
+clawdCell(g, 'gaze right', { eyes: { shape: 'open', gazeX: 1 } }, `gazeX:1`);
+clawdCell(g, 'gaze up', { eyes: { shape: 'open', gazeY: -2 } }, `gazeY:-2`);
+clawdCell(g, 'gaze down', { eyes: { shape: 'open', gazeY: 2 } }, `gazeY:2`);
+clawdCell(g, 'per-eye', { eyes: { shape: 'open', l: 'wince', r: 'open' } }, `{l:'wince',r:'open'}`);
+clawdCell(g, 'idle blink (anim)', (i) => ({ eyes: Iso.seq([['open', 10], ['blink', 1], ['open', 3], ['blink', 1]], i) }), `seq open/blink`);
+
+g = section('Mouth & blush', "mouth: none | o | laugh | smile | wobbly | flat · blush: true");
+for (const m of ['o', 'laugh', 'smile', 'wobbly', 'flat'])
+  clawdCell(g, m, { mouth: m }, `mouth:'${m}'`);
+clawdCell(g, 'blush', { blush: true }, `blush:true`);
+clawdCell(g, 'giggle', { eyes: 'happy', mouth: 'laugh', blush: true, arms: { l: 'up', r: 'out' } }, `happy+laugh+blush`);
+clawdCell(g, 'surprise', { eyes: 'wide', mouth: 'o', arms: 'up' }, `wide+o, arms:'up'`);
+clawdCell(g, 'ouch', { eyes: 'wince', mouth: 'wobbly', arms: 'down' }, `wince+wobbly`);
+clawdCell(g, 'content', { eyes: 'happy', mouth: 'smile', blush: true }, `happy+smile`);
+
+// ---------------------------------------------------------------- arms
+g = section('Arms', "arms: 'pose' (both) or {l, r} — l/r are SCREEN left/right. Poses: out | high | up | waveA | waveB | down | forward (=hold) | typeA | typeB | none. " +
+  'drawClawd returns <code>hand.l / hand.r</code> screen points (arm tips) for held props.');
+for (const a of ['out', 'high', 'up', 'waveA', 'waveB', 'down', 'forward', 'typeA', 'typeB', 'none'])
+  clawdCell(g, a, { arms: a }, `arms:'${a}'`);
+clawdCell(g, 'wave (anim)', (i) => ({ arms: { l: 'out', r: Iso.cycle(['waveA', 'waveB'], i, 2) }, eyes: 'happy' }), `r: waveA/waveB`);
+clawdCell(g, 'typing (anim)', (i) => ({ arms: { l: Iso.cycle(['typeA', 'typeB'], i), r: Iso.cycle(['typeB', 'typeA'], i) }, eyes: { shape: 'open', gazeY: 2 } }), `typeA/typeB alternating`);
+cell(g, 'hand anchors', 'a = drawClawd(..); a.hand.l', (ctx, i) => {
+  pad(ctx);
+  const a = Iso.drawClawd(ctx, { x: FX, y: FY - 2, arms: { l: 'up', r: 'forward' } });
+  Iso.px(ctx, a.hand.l.x, a.hand.l.y, C.green); Iso.px(ctx, a.hand.r.x, a.hand.r.y, C.green);
+  Iso.px(ctx, a.head.x, a.head.y, C.blue); Iso.px(ctx, a.face.x, a.face.y, C.amber);
+});
+cell(g, 'holding magnifier', `prop.magnifier at hand.r`, (ctx, i) => {
+  pad(ctx);
+  const a = Iso.drawClawd(ctx, { x: FX - 4, y: FY - 2, arms: { l: 'out', r: 'high' }, eyes: { shape: 'wide', gazeX: 1 } });
+  Iso.prop.magnifier(ctx, a.hand.r.x + 3, a.hand.r.y - 4, { handle: 'dl' });
+});
+
+// ---------------------------------------------------------------- legs & body
+g = section('Legs & body', "legs: stand | stepA | stepB | tap | sit | dangle | dangleB · squash: px (+ = squash, − = stretch) · z: lift px (shadow stays) · shake: px x-offset · facing: 'left' | 'right'");
+for (const l of ['stand', 'stepA', 'stepB', 'tap', 'sit'])
+  clawdCell(g, l, { legs: l }, `legs:'${l}'`);
+clawdCell(g, 'march (anim)', (i) => ({ legs: Iso.cycle(['stepA', 'stepB'], i, 2), z: Iso.cycle([0, 1], i, 2), arms: { l: Iso.cycle(['high', 'out'], i, 2), r: Iso.cycle(['out', 'high'], i, 2) } }), `stepA/B + z bob`);
+cell(g, 'dangle (on edge)', `legs:'dangle'`, (ctx, i) => {
+  // block 30x14 units, 10px tall; Clawd sits on its front-left edge (face side), legs hang over it.
+  // front-left edge midpoint = centre + (-2*7, +7); Clawd centre sits D/2 = 3 units behind it: (+6, -3)
+  Iso.box(ctx, FX + 4, FY + 2, 0, 30, 14, 10, Iso.SHADE.wood);
+  Iso.drawClawd(ctx, { x: FX + 4 - 14 + 6, y: FY + 2 + 7 - 3, z: 10, legs: Iso.cycle(['dangle', 'dangleB'], i, 3), shadow: false, arms: 'down', eyes: 'happy' });
+}, 80, 80);
+clawdCell(g, 'squash 3', { squash: 3 }, `squash:3`);
+clawdCell(g, 'squash 6', { squash: 6, eyes: 'closed' }, `squash:6`);
+clawdCell(g, 'stretch -4', { squash: -4, eyes: 'wide', arms: 'up' }, `squash:-4`);
+clawdCell(g, 'lift 10', { z: 10, arms: 'up', eyes: 'happy' }, `z:10`);
+clawdCell(g, 'hop (anim)', (i) => {
+  const s = Iso.seq([[{ squash: 3 }, 2], [{ z: 6, squash: -3 }, 1], [{ z: 12, squash: -2 }, 2], [{ z: 6 }, 1], [{ squash: 4 }, 1], [{}, 5]], i);
+  return Object.assign({ arms: s.z ? 'up' : 'out', eyes: s.z ? 'happy' : 'open' }, s);
+}, `squash → z → land`);
+clawdCell(g, 'facing right', { facing: 'right' }, `facing:'right'`);
+clawdCell(g, 'right + wink', { facing: 'right', eyes: 'wink', blush: true, arms: { l: 'out', r: 'up' } }, `facing:'right'`);
+clawdCell(g, 'shake (anim)', (i) => ({ shake: Iso.cycle([-1, 1], i), eyes: 'wince', arms: 'down' }), `shake:±1`);
+
+// ---------------------------------------------------------------- tints & mini
+g = section('Tints & mini helpers', "tint: 'orange' (default) | 'grey' (offline) | 'violet' (subagent) | any Iso.SHADE name | {top,left,right} · size: 'full' | 'mini'");
+clawdCell(g, 'offline', { tint: 'grey', legs: 'sit', eyes: 'closed', arms: 'down' }, `tint:'grey', sit`);
+clawdCell(g, 'violet full', { tint: 'violet' }, `tint:'violet'`);
+cell(g, 'mini helpers', `size:'mini', tint:'violet'`, (ctx, i) => {
+  pad(ctx);
+  Iso.drawClawd(ctx, { x: FX - 14, y: FY - 6, size: 'mini', tint: 'violet', legs: Iso.cycle(['stepA', 'stepB'], i, 2), facing: 'right' });
+  Iso.drawClawd(ctx, { x: FX + 14, y: FY + 2, size: 'mini', tint: 'violet', eyes: Iso.cycle(['open', 'open', 'open', 'happy'], i, 3) });
+  Iso.drawClawd(ctx, { x: FX - 6, y: FY + 8, size: 'mini', tint: 'violet', arms: 'up', eyes: 'happy', z: Iso.cycle([0, 3], i, 2) });
+});
+for (const e of ['open', 'blink', 'closed', 'happy', 'wide'])
+  cell(g, 'mini ' + e, `eyes:'${e}'`, (ctx) => { pad(ctx); Iso.drawClawd(ctx, { x: FX, y: FY - 2, size: 'mini', tint: 'violet', eyes: e }); });
+cell(g, 'mini orange', `size:'mini'`, (ctx) => { pad(ctx); Iso.drawClawd(ctx, { x: FX, y: FY - 2, size: 'mini', arms: { l: 'out', r: 'up' } }); });
+cell(g, 'scale compare', `full vs mini`, (ctx, i) => {
+  pad(ctx);
+  Iso.drawClawd(ctx, { x: FX - 6, y: FY - 4 });
+  Iso.drawClawd(ctx, { x: FX + 20, y: FY + 4, size: 'mini', tint: 'violet', facing: 'right', eyes: { shape: 'open', gazeX: -1 } });
+});
+
+// ---------------------------------------------------------------- props
+g = section('Desk props', 'All props: <code>Iso.prop.NAME(ctx, x, y, opts)</code> with (x, y) = footprint centre ON the desk surface ' +
+  "(window panels: point under the window's bottom-centre). Facing props: facing = direction the screen/board faces: 'left' | 'right' | 'upLeft' | 'upRight'.");
+function propCell(label, code, fn, w, h) {
+  cell(g, label, code, (ctx, i) => { const X = (w || 80) / 2, Y = (h || 80) - 24; Iso.drawDesk(ctx, { x: X, y: Y, a: 20, b: 14, thick: 4, grain: false }); fn(ctx, i, X, Y); }, w, h);
+}
+for (const f of ['left', 'right', 'upLeft', 'upRight'])
+  propCell('laptop ' + f, `laptop {facing:'${f}'}`, (ctx, i, x, y) => Iso.prop.laptop(ctx, x, y, { facing: f, frame: i }));
+propCell('laptop search', `screen:'search'`, (ctx, i, x, y) => Iso.prop.laptop(ctx, x, y, { facing: 'right', screen: 'search', frame: i }));
+propCell('laptop plan', `screen:'plan'`, (ctx, i, x, y) => Iso.prop.laptop(ctx, x, y, { facing: 'left', screen: 'plan', frame: i }));
+for (const f of ['left', 'right', 'upRight'])
+  propCell('monitor ' + f, `monitor {facing:'${f}'}`, (ctx, i, x, y) => Iso.prop.monitor(ctx, x, y + 2, { facing: f, frame: i }));
+propCell('paper / doc', `paper`, (ctx, i, x, y) => Iso.prop.paper(ctx, x, y));
+propCell('book', `book {color:'blue'}`, (ctx, i, x, y) => { Iso.prop.book(ctx, x - 8, y, { color: 'blue' }); Iso.prop.book(ctx, x + 10, y + 2, { color: 'violet' }); });
+propCell('book open', `book {open:true}`, (ctx, i, x, y) => Iso.prop.book(ctx, x, y, { open: true }));
+propCell('notepad + pencil', `notepad, pencil {dir}`, (ctx, i, x, y) => { Iso.prop.notepad(ctx, x - 6, y); Iso.prop.pencil(ctx, x + 12, y + 2, { dir: 'y' }); });
+propCell('mug (anim)', `mug {frame}`, (ctx, i, x, y) => Iso.prop.mug(ctx, x, y, { frame: i }));
+propCell('magnifier', `magnifier (lens ctr)`, (ctx, i, x, y) => { Iso.prop.magnifier(ctx, x - 10, y - 10); Iso.prop.magnifier(ctx, x + 12, y - 10, { handle: 'dl' }); });
+propCell('sticky notes', `sticky {color, plane}`, (ctx, i, x, y) => {
+  Iso.prop.sticky(ctx, x - 10, y, { color: 'amber' }); Iso.prop.sticky(ctx, x - 2, y + 5, { color: 'green' });
+  Iso.prop.sticky(ctx, x + 12, y - 2, { color: 'blush', plane: 'L', z: 8 }); Iso.prop.sticky(ctx, x + 22, y - 6, { color: 'blue', plane: 'R', z: 8 });
+});
+propCell('terminal (anim)', `terminal {reveal, frame}`, (ctx, i, x, y) => Iso.prop.terminal(ctx, x, y, { z: 6, reveal: (i * 3) % 60, frame: i }));
+propCell('terminal R', `terminal {plane:'R'}`, (ctx, i, x, y) => Iso.prop.terminal(ctx, x, y, { plane: 'R', z: 6, frame: i }));
+propCell('browser (anim)', `browser {reveal, frame}`, (ctx, i, x, y) => Iso.prop.browser(ctx, x, y, { z: 6, plane: 'R', reveal: Math.floor(i / 3) % 7, frame: i }));
+propCell('globe (anim)', `globe {frame}`, (ctx, i, x, y) => Iso.prop.globe(ctx, x, y, { frame: i }));
+propCell('plan board', `planBoard {checked}`, (ctx, i, x, y) => Iso.prop.planBoard(ctx, x, y, { checked: Math.floor(i / 4) % 5 }));
+propCell('plan board R', `planBoard {facing:'right'}`, (ctx, i, x, y) => Iso.prop.planBoard(ctx, x, y, { facing: 'right', checked: 2 }));
+propCell('clipboard', `clipboard {checked}`, (ctx, i, x, y) => Iso.prop.clipboard(ctx, x, y, { checked: 2 }));
+propCell('lamp', `lamp {facing, on}`, (ctx, i, x, y) => { Iso.prop.lamp(ctx, x + 6, y - 2, { on: Iso.cycle([true, true, true, false], i, 3) }); });
+propCell('lamp R', `lamp {facing:'right'}`, (ctx, i, x, y) => { Iso.prop.lamp(ctx, x - 8, y - 2, { facing: 'right' }); });
+
+// ---------------------------------------------------------------- fx
+g = section('FX', 'Screen-space sprites, centred at (x, y): <code>Iso.fx.sparkle(ctx,x,y,size0..3,color)</code>, bang, question, zee(size1..3), sweat, heart(size1|2), check, cross, dots(n), poof(frame0..3), ticks(dir), puff(x,y,w,h,{kind,tail}) (top-left anchored), <code>Iso.text</code> 3x5 font.');
+cell(g, 'sparkle 0-3', 'fx.sparkle', (ctx, i) => { for (let s = 0; s < 4; s++) Iso.fx.sparkle(ctx, 10 + s * 17, 20, s, [C.amber, C.text, C.orangeLight, C.amber][s]); Iso.fx.sparkle(ctx, 38, 48, Iso.cycle([0, 1, 2, 3, 2, 1], i), C.amber); });
+cell(g, 'bang / question', 'fx.bang, fx.question', (ctx, i) => { Iso.fx.bang(ctx, 14, 20 + Iso.cycle([0, -1], i, 2)); Iso.fx.bang(ctx, 32, 20, { badge: false }); Iso.fx.question(ctx, 50, 20); Iso.fx.question(ctx, 66, 20, { badge: false }); Iso.fx.bang(ctx, 14, 50, { color: C.red }); });
+cell(g, 'zee 1-3', 'fx.zee', (ctx, i) => { Iso.fx.zee(ctx, 14, 50, 1); Iso.fx.zee(ctx, 28, 38, 2); Iso.fx.zee(ctx, 44, 24, 3); const k = i % 12; Iso.fx.zee(ctx, 56 + (k >> 2), 56 - k * 3, 1 + (k >> 2), k > 9 ? C.dim : C.muted); });
+cell(g, 'sweat / heart', 'fx.sweat, fx.heart', (ctx, i) => { Iso.fx.sweat(ctx, 14, 20 + (i % 4)); Iso.fx.heart(ctx, 34, 22, 1); Iso.fx.heart(ctx, 56, 22, 2); Iso.fx.heart(ctx, 34, 50, Iso.cycle([1, 2], i, 3), C.blush); });
+cell(g, 'check / cross / dots', 'fx.check, fx.cross, fx.dots', (ctx, i) => { Iso.fx.check(ctx, 16, 20); Iso.fx.cross(ctx, 40, 20); Iso.fx.dots(ctx, 38, 48, (i >> 1) % 4); });
+cell(g, 'poof 0-3', 'fx.poof(frame)', (ctx, i) => { for (let f = 0; f < 4; f++) Iso.fx.poof(ctx, 10 + f * 18, 22, f); Iso.fx.poof(ctx, 38, 50, i % 4, C.violetLight); });
+cell(g, 'ticks', "fx.ticks(dir)", (ctx) => { Iso.fx.ticks(ctx, 16, 30, 'left'); Iso.fx.ticks(ctx, 38, 34, 'up'); Iso.fx.ticks(ctx, 56, 30, 'right'); });
+cell(g, 'speech puff', 'fx.puff speech', (ctx) => { const a = Iso.fx.puff(ctx, 6, 8, 58, 16, { tail: 'left' }); Iso.text(ctx, a.x + 1, a.y + 1, 'DONE!', C.green); const b = Iso.fx.puff(ctx, 14, 38, 50, 14, { tail: 'right' }); Iso.fx.dots(ctx, b.x + b.w / 2 + 1, b.y + 4, 3); });
+cell(g, 'thought puff', 'fx.puff thought', (ctx) => { const a = Iso.fx.puff(ctx, 10, 10, 54, 20, { kind: 'thought', tail: 'left' }); Iso.fx.question(ctx, a.x + a.w / 2, a.y + 8, { badge: false }); });
+cell(g, 'text 3x5', 'Iso.text', (ctx) => { Iso.text(ctx, 4, 6, 'ABCDEFGHIJKLM'); Iso.text(ctx, 4, 14, 'NOPQRSTUVWXYZ'); Iso.text(ctx, 4, 22, '0123456789'); Iso.text(ctx, 4, 30, '!?.,:-+/<>_$#%', C.amber); Iso.text(ctx, 4, 40, '$ NPM TEST', C.green); Iso.text(ctx, 4, 48, '+3 OK 42%', C.violet); }, 80, 80);
+
+// ---------------------------------------------------------------- palette
+g = section('Palette', 'Iso.C.* (hex). Shade triples for boxes in Iso.SHADE (orange, grey, violet, wood, paper, metal, dark, blue, green, amber, red).');
+const pal = document.createElement('div');
+for (const [k, v] of Object.entries(C)) pal.innerHTML += `<span class="sw"><i style="background:${v}"></i>${k} <span style="color:#5E5A54">${v}</span></span>`;
+g.appendChild(pal);
+
+// ---------------------------------------------------------------- full scene + spots
+g = section('Default scene & coordinates', 'Logical stage 240×121 (shown 2x = 480×242). <code>Iso.drawDesk(ctx)</code> top-surface centre = (120, 74). ' +
+  'Coloured dots = <code>Iso.SPOT.*</code> (labelled). Clawd default feet = SPOT.clawd. Desk top surface is z = 0 for everything standing on it.');
+cell(g, 'default stage (240×121)', 'drawDesk(); drawClawd({});', (ctx, i) => {
+  Iso.drawDesk(ctx);
+  Iso.prop.monitor(ctx, SPOT.backRight.x, SPOT.backRight.y, { facing: 'left', frame: i });
+  Iso.prop.lamp(ctx, SPOT.backLeft.x, SPOT.backLeft.y, { facing: 'right' });
+  Iso.prop.mug(ctx, SPOT.right.x, SPOT.right.y, { frame: i });
+  Iso.prop.book(ctx, SPOT.left.x, SPOT.left.y, { color: 'violet' });
+  Iso.drawClawd(ctx, { eyes: Iso.seq([['open', 14], ['blink', 1]], i), arms: { l: 'out', r: Iso.seq([['out', 10], ['high', 5]], i) } });
+  Iso.prop.notepad(ctx, SPOT.front.x, SPOT.front.y);
+  Iso.prop.paper(ctx, SPOT.frontLeft.x, SPOT.frontLeft.y);
+  Iso.prop.sticky(ctx, SPOT.frontRight.x, SPOT.frontRight.y, { color: 'green' });
+}, 240, 121);
+cell(g, 'Iso.SPOT map', 'named spots', (ctx) => {
+  Iso.drawDesk(ctx);
+  const cols = [C.orange, C.amber, C.green, C.blue, C.violet, C.red, C.text, C.blush, C.blueLight, C.violetLight, C.muted];
+  let k = 0;
+  for (const [n, p] of Object.entries(SPOT)) {
+    const c = cols[k++ % cols.length];
+    Iso.rect(ctx, p.x - 1, p.y - 1, 3, 3, c);
+    Iso.text(ctx, p.x + 3, p.y - 2, n.replace('Left', 'L').replace('Right', 'R').replace('front', 'FR').replace('back', 'BK'), c);
+  }
+}, 240, 121);
+cell(g, 'helpers on the desk', 'mini violet helpers + Clawd', (ctx, i) => {
+  Iso.drawDesk(ctx);
+  Iso.drawClawd(ctx, { size: 'mini', tint: 'violet', x: 82, y: 60, facing: 'right', legs: Iso.cycle(['stepA', 'stepB'], i, 2) });
+  Iso.drawClawd(ctx, { size: 'mini', tint: 'violet', x: 168, y: 66, eyes: { shape: 'open', gazeX: -1 }, legs: Iso.cycle(['stepB', 'stepA'], i, 2) });
+  Iso.drawClawd(ctx, { arms: { l: 'up', r: 'out' }, eyes: 'happy' });
+  Iso.drawClawd(ctx, { size: 'mini', tint: 'violet', x: 92, y: 94, facing: 'right', arms: 'up', eyes: 'happy' });
+}, 240, 121);
+
+// ---------------------------------------------------------------- render loop
+function setZoom(z) {
+  zoom = z;
+  for (const c of cells) { c.cv.style.width = c.w * z + 'px'; c.cv.style.height = c.h * z + 'px'; c.d.style.width = c.w * z + 'px'; }
+  document.querySelectorAll('[data-z]').forEach((b) => b.classList.toggle('on', +b.dataset.z === z));
+}
+document.querySelectorAll('[data-z]').forEach((b) => (b.onclick = () => setZoom(+b.dataset.z)));
+const pp = document.getElementById('pp');
+pp.onclick = () => { playing = !playing; pp.textContent = playing ? '❚❚ pause' : '▶ play'; };
+function drawAll() {
+  for (const c of cells) { c.ctx.fillStyle = C.bg; c.ctx.fillRect(0, 0, c.w, c.h); c.draw(c.ctx, frame); }
+}
+setZoom(zoom);
+drawAll();
+setInterval(() => { if (playing) { frame++; drawAll(); } }, 1000 / 6);
+</script>
+</body>
+</html>

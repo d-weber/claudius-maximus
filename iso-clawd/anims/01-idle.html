@@ -1,0 +1,100 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>01 Idle</title>
+<script src="../lib/iso.js"></script>
+</head>
+<body>
+<script>
+const { C, SPOT } = Iso;
+
+// Mug sits on the desk beside Clawd, on his face side (he faces left / down-left).
+const MUG = { x: 82, y: 78 };
+
+// Beats. Each entry: [pose, holdFrames]. Total 40 frames = 4.0 s @ 10 fps (multiple of 4 so the mug steam loops too).
+// pose fields: g = gazeX, gy = gazeY, eye shape, lean (shake px toward mug), sq (squash override), mouth, legs, sniff (steam drift stage)
+const TL = [
+  [{ eye: 'open', g: 0 }, 7],                         // looking at you, breathing
+  [{ eye: 'blink', g: 0 }, 1],
+  [{ eye: 'open', g: 0 }, 2],
+  [{ eye: 'open', g: 1 }, 5],                         // glance away right
+  [{ eye: 'open', g: -1 }, 3],                        // ...back across: oh, the mug
+  [{ eye: 'open', g: -1, gy: 1, lean: -1 }, 1],       // lean in (anticipation)
+  [{ eye: 'open', g: -1, gy: 1, lean: -2, sniff: 1 }, 2],
+  [{ eye: 'closed', lean: -2, mouth: 'o', sq: 0, sniff: 2 }, 2],   // sniiiff
+  [{ eye: 'happy', lean: -2, mouth: 'smile', sq: 2 }, 1],          // contented squash
+  [{ eye: 'happy', lean: -1, mouth: 'smile', sq: 1 }, 2],
+  [{ eye: 'happy', lean: 0, mouth: 'smile', sq: 0 }, 3],
+  [{ eye: 'open', g: 0, mouth: 'smile', tap: true }, 6],          // humming: little foot taps
+  [{ eye: 'blink', g: 0 }, 1],                        // double blink
+  [{ eye: 'open', g: 0 }, 1],
+  [{ eye: 'blink', g: 0 }, 1],
+  [{ eye: 'open', g: 0 }, 2],
+];
+const FRAMES = Iso.seq.len(TL);
+
+// breathing: 1 px squash, 10-frame cycle (4 cycles per loop -> seamless)
+const BREATH = [[0, 5], [1, 5]];
+
+// tiny steam curl drifting from the mug toward Clawd's face while he sniffs
+function sniffSteam(ctx, stage, a) {
+  // stage 1: the wisp bends toward him; stage 2: it reaches his face (and he sniffs it in)
+  const top = { x: MUG.x, y: MUG.y - 12 };
+  const tgt = { x: a.eyes.l.x - 4, y: a.eyes.l.y + 6 };
+  const from = stage === 1 ? 0 : 3, to = stage === 1 ? 5 : 8;
+  for (let k = from; k < to; k++) {
+    const t = k / 8;
+    const x = Iso.lerp(top.x, tgt.x, t);
+    const y = Iso.lerp(top.y, tgt.y, t) - Math.round(Math.sin(t * Math.PI) * 6);
+    const c = k === to - 1 ? C.greyLight : C.muted;
+    Iso.rect(ctx, x, y + (k & 1), 2, 1, c);
+  }
+}
+
+Iso.player({
+  name: '01-idle',
+  fps: 10,
+  frames: FRAMES,
+  loop: true,
+  notes: 'IDLE loop, 40 frames @ 10 fps (4.0 s). Sessions open, nothing busy. Clawd breathes (1 px squash, 1 s cycle), ' +
+    'looks at you, glances away, then notices his coffee: leans in, a curl of steam drifts to his face, he shuts his eyes for a ' +
+    'sniff ("o"), and does a tiny contented squash with happy eyes. He hums along with two little foot taps, double-blinks and ' +
+    'settles back on the neutral stare, which is frame 0. Blush is on the whole time. Mug steam is a 4-frame cycle, so the seam is invisible.',
+  draw(ctx, i) {
+    Iso.drawDesk(ctx);
+    // mug beside Clawd (behind him in draw order)
+    Iso.prop.mug(ctx, MUG.x, MUG.y, { frame: i });
+
+    const p = Iso.seq(TL, i);
+    const breath = Iso.seq(BREATH, i);
+    const sq = p.sq !== undefined ? p.sq : breath;
+    const tapOn = p.tap && (i % 3 === 0);
+    const a = Iso.drawClawd(ctx, {
+      x: SPOT.clawd.x, y: SPOT.clawd.y,
+      eyes: { shape: p.eye, gazeX: p.g || 0, gazeY: p.gy || 0 },
+      mouth: p.mouth || 'none',
+      blush: true,
+      arms: 'out',
+      legs: tapOn ? 'tap' : 'stand',
+      squash: sq,
+      shake: p.lean || 0,
+    });
+
+    if (p.sniff) sniffSteam(ctx, p.sniff, a);
+    // payoff: a little heart floats up off the contented squash
+    if (i >= 23 && i <= 27) {
+      const k = i - 23;
+      Iso.fx.heart(ctx, a.head.x - 14 - (k >> 1), a.head.y - 3 - k * 2, 1, k < 4 ? C.blush : C.orangeDark);
+    }
+    // little music note pixels while he hums
+    if (p.tap) {
+      const k = Math.floor((i - 29) / 2);   // 0..2 over the 6 tap frames
+      const nx = a.head.x + 20 + k, ny = a.head.y - 2 - k * 2;
+      Iso.sprite(ctx, nx, ny, ['..##', '..#.#', '..#', '###', '###'], { '#': k > 1 ? C.muted : C.text });
+    }
+  },
+});
+</script>
+</body>
+</html>

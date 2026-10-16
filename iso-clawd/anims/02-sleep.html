@@ -1,0 +1,151 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>02 Sleep</title>
+<script src="../lib/iso.js"></script>
+</head>
+<body>
+<script>
+const { C, SPOT } = Iso;
+
+// Variant: 'sleep' (host connected, no sessions) or 'offline' (no host). ?variant=offline
+const Q = new URLSearchParams(location.search);
+const OFFLINE = Q.get('variant') === 'offline';
+const V = OFFLINE
+  ? { tint: 'grey', blush: false, z: C.dim, bubble: C.paperShade, bubbleFill: C.greyLight, bubbleHi: C.text,
+    desk: { pal: { top: C.woodShadow, left: C.woodRight, right: C.surface2, edge: C.woodLeft }, grain: false }, shadow: C.woodRight, lamp: false, steam: false, sticky: C.paperShade }
+  : { tint: 'orange', blush: true, z: C.muted, bubble: C.blueLight, bubbleFill: C.blue, bubbleHi: C.text,
+    desk: {}, shadow: C.woodShadow, lamp: true, steam: true, sticky: C.amber };
+
+// ---- breathing / snore timeline (36 frames = 3.6 s @ 10 fps) ----
+// phase per frame: inhale -> exhale (bubble inflates, head droops) -> POP (snap back, note flaps) -> settle
+const PHASE = [
+  ['in0', 3], ['in1', 8],                       // inhale: body stretches 1 px taller, bubble sucked in
+  ['ex0', 4], ['ex1', 5], ['ex2', 5], ['ex3', 4], // exhale: bubble grows 2..6, head droops
+  ['pop', 1], ['snap', 2], ['flap', 2],          // pop! body jolts, sticky note flips up
+  ['set', 2],                                   // settle back to neutral nap
+];
+const N = Iso.seq.len(PHASE); // 36
+
+const P = {
+  in0:  { squash: 0,  gazeY: 0, bubble: 0, mouth: 'none' },
+  in1:  { squash: -1, gazeY: 0, bubble: 0, mouth: 'none' },
+  ex0:  { squash: 0,  gazeY: 0, bubble: 2, mouth: 'o' },
+  ex1:  { squash: 1,  gazeY: 1, bubble: 4, mouth: 'o' },
+  ex2:  { squash: 1,  gazeY: 1, bubble: 6, mouth: 'o' },
+  ex3:  { squash: 2,  gazeY: 2, bubble: 8, mouth: 'o' },
+  pop:  { squash: 2,  gazeY: 2, bubble: -1, mouth: 'o', shake: 0 },
+  snap: { squash: -2, gazeY: -1, bubble: 0, mouth: 'flat', shake: 1, note: 'up' },
+  flap: { squash: 0,  gazeY: 0, bubble: 0, mouth: 'none', note: 'mid' },
+  set:  { squash: 1,  gazeY: 0, bubble: 0, mouth: 'none' },
+};
+
+// filled pixel disc with outline + highlight (radius r)
+function bubble(ctx, cx, cy, r, edge, hi, fill) {
+  const R2 = r * r + r * 0.8;
+  if (r >= 3) for (let y = -r + 1; y < r; y++) for (let x = -r + 1; x < r; x++)
+    if (x * x + y * y <= R2 && (x + y + 64) % 2 === 0 && (y + 64) % 2 === 0) Iso.px(ctx, cx + x, cy + y, fill);
+  for (let y = -r; y <= r; y++)
+    for (let x = -r; x <= r; x++) {
+      const d = x * x + y * y;
+      if (d <= r * r + r * 0.8) {
+        const inner = (Math.abs(x) + 1) ** 2 + y * y > r * r + r * 0.8 || x * x + (Math.abs(y) + 1) ** 2 > r * r + r * 0.8;
+        if (inner) Iso.px(ctx, cx + x, cy + y, edge);
+      }
+    }
+  if (r >= 2) Iso.px(ctx, cx - Math.max(1, r >> 1), cy - Math.max(1, r >> 1), hi);
+}
+// pop burst: 4 short ticks flying out
+function popBurst(ctx, cx, cy, c) {
+  // 8 two-pixel dashes radiating from a ring of radius ~8
+  const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]];
+  for (const [dx, dy] of dirs) for (const r of [8, 9]) Iso.px(ctx, cx + dx * (dx && dy ? r - 2 : r), cy + dy * (dx && dy ? r - 2 : r), c);
+  Iso.px(ctx, cx - 2, cy - 1, c); Iso.px(ctx, cx + 2, cy + 1, c); Iso.px(ctx, cx + 1, cy - 2, c); // droplets
+}
+
+// three z's drifting up on staggered phases; pure function of i (period = N)
+function zees(ctx, hx, hy, i) {
+  for (let k = 0; k < 3; k++) {
+    const p = (i + k * 12) % N;            // 0..35
+    const rise = p >> 1;                   // 0..17 px, 1 px every 2 frames
+    const x = hx + 10 + (rise >> 1) + ((p >> 3) % 2);   // drift up-right with a little wobble
+    const y = hy - 2 - rise;
+    const size = p < 10 ? 1 : p < 24 ? 2 : 3;
+    if (p > 32) continue;                  // fade out (gap) before wrap
+    Iso.fx.zee(ctx, x, y, size, p > 28 ? C.dim : V.z);
+  }
+}
+
+const player = Iso.player({
+  name: OFFLINE ? '02-sleep-offline' : '02-sleep',
+  fps: 10,
+  frames: N,
+  loop: true,
+  notes:
+    '<b>Sleep / offline nap</b> (loop, 36 f, 3.6 s @ 10 fps). Clawd naps sitting on the desk, eyes closed, ' +
+    'slow breathing squash (inhale stretches 1 px, exhale sinks 1-2 px). Z\'s drift up-right on staggered phases.\n' +
+    '<b>Gag:</b> a snore bubble inflates from his mouth while his head droops (eyes slide down), then POPS: ' +
+    'he jolts (stretch + shake, flat mouth), and the sticky note on his head flips up, flaps, and falls back flat.\n' +
+    '<b>Variants:</b> sleep = orange, blush, warm lamp on, steaming mug. offline (<code>?variant=offline</code>) = grey tint, ' +
+    'no blush, lamp off, darker desk, cold mug, faded sticky, dim z\'s and grey bubble. The export follows the current variant (file name 02-sleep-offline_*).',
+  draw(ctx, i) {
+    const ph = Iso.seq(PHASE, i);
+    const p = P[ph];
+
+    // 1) scene, back to front
+    Iso.drawDesk(ctx, V.desk);
+    Iso.prop.lamp(ctx, SPOT.left.x - 6, SPOT.left.y - 2, { facing: 'right', on: V.lamp });
+    Iso.prop.mug(ctx, SPOT.backRight.x + 6, SPOT.backRight.y, { frame: i >> 1, steam: V.steam });
+
+    // 2) Clawd, sitting nap
+    const a = Iso.drawClawd(ctx, {
+      x: SPOT.clawd.x, y: SPOT.clawd.y,
+      tint: V.tint,
+      legs: 'sit',
+      arms: { l: 'down', r: 'down' },
+      eyes: { shape: 'closed', gazeY: p.gazeY },
+      mouth: p.mouth,
+      blush: V.blush,
+      squash: p.squash,
+      shake: p.shake || 0,
+      shadow: V.shadow,
+    });
+
+    // sticky note on his head: flat, flips upright on the pop, half-way on the way back
+    const nx = a.top.x, ny = a.top.y + 1;
+    if (p.note === 'up') Iso.prop.sticky(ctx, nx - 1, ny, { color: V.sticky, plane: 'L', z: 4 });
+    else if (p.note === 'mid') Iso.prop.sticky(ctx, nx + 1, ny, { color: V.sticky, plane: 'top', z: 3 });
+    else Iso.prop.sticky(ctx, nx, ny, { color: V.sticky, plane: 'top' });
+
+    // 3) front props
+    Iso.prop.paper(ctx, SPOT.frontRight.x + 4, SPOT.frontRight.y - 2, { lines: 3 });
+
+    // 4) FX: snore bubble at the mouth (face looks down-left, so the bubble hangs left of the mouth)
+    const bx = a.mouth.x - 3, by = a.mouth.y + 2;
+    if (p.bubble > 0) bubble(ctx, bx - p.bubble, by + (p.bubble >> 2), p.bubble, V.bubble, V.bubbleHi, V.bubbleFill);
+    if (p.bubble < 0) popBurst(ctx, bx - 9, by + 2, V.bubble);
+    if (ph === 'snap') Iso.fx.ticks(ctx, a.head.x, a.head.y - 6, 'up', V.z);
+    zees(ctx, a.head.x, a.head.y, i);
+  },
+});
+
+// variant toggle (full player only): reloads with ?variant=..., keeping other params
+if (!Q.has('embed')) {
+  const ctl = document.querySelector('.iso-ctl');
+  if (ctl) {
+    const b = document.createElement('button');
+    b.textContent = OFFLINE ? 'variant: offline → sleep' : 'variant: sleep → offline';
+    b.title = 'switch tint / lamp (also changes the export)';
+    b.classList.add('on');
+    b.onclick = () => {
+      const q = new URLSearchParams(location.search);
+      if (OFFLINE) q.delete('variant'); else q.set('variant', 'offline');
+      location.search = q.toString();
+    };
+    ctl.appendChild(b);
+  }
+}
+</script>
+</body>
+</html>

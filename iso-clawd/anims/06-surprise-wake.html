@@ -1,0 +1,141 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Surprise Wake</title>
+<script src="../lib/iso.js"></script>
+</head>
+<body>
+<script>
+const { C, SPOT } = Iso;
+
+// One-shot, 10 fps. Each step: [state, holdFrames].
+// State keys: pose (clawd opts), z, sticky ('head'|'fly0..'|'desk'|null), fx flags.
+const NAP = { legs: 'sit', eyes: { shape: 'closed' }, arms: 'down', mouth: 'none' };
+const STEPS = [
+  // napping: z's drift, drool drip
+  [{ pose: NAP, z: 0, sticky: 'head', zz: true, drool: 1, screen: 'off' }, 2],
+  [{ pose: NAP, z: 0, sticky: 'head', zz: true, drool: 2, screen: 'off' }, 1],
+  // laptop pings: new session
+  [{ pose: NAP, z: 0, sticky: 'head', zz: true, drool: 2, screen: 'code', ping: true }, 2],
+  // eyes snap open (still seated), z's start to scatter
+  [{ pose: Object.assign({}, NAP, { eyes: { shape: 'wide' }, mouth: 'o' }), z: 0, sticky: 'head', scatter: 0, drool: 2, screen: 'code' }, 1],
+  // anticipation squash
+  [{ pose: Object.assign({}, NAP, { eyes: { shape: 'wide' }, mouth: 'o', squash: 3, arms: 'out' }), z: 0, sticky: 'head', scatter: 1, drool: 2, screen: 'code' }, 1],
+  // launch!
+  [{ pose: { legs: 'stand', eyes: { shape: 'wide' }, mouth: 'o', arms: 'up', squash: -4 }, z: 6, sticky: 'fly0', scatter: 2, bang: 1, screen: 'code' }, 1],
+  [{ pose: { legs: 'stand', eyes: { shape: 'wide' }, mouth: 'o', arms: 'up', squash: -3 }, z: 11, sticky: 'fly1', scatter: 3, bang: 2, screen: 'code' }, 1],
+  [{ pose: { legs: 'stand', eyes: { shape: 'wide' }, mouth: 'o', arms: 'up' }, z: 13, sticky: 'fly2', bang: 2, screen: 'code' }, 2],
+  [{ pose: { legs: 'stand', eyes: { shape: 'wide' }, mouth: 'o', arms: 'high' }, z: 7, sticky: 'fly3', bang: 2, screen: 'code' }, 1],
+  // land
+  [{ pose: { legs: 'stand', eyes: { shape: 'wince' }, mouth: 'flat', arms: 'out', squash: 5 }, z: 0, sticky: 'fly4', bang: 2, screen: 'code', dust: true }, 1],
+  [{ pose: { legs: 'stand', eyes: { shape: 'open' }, mouth: 'none', arms: 'out', squash: 2 }, z: 0, sticky: 'desk', screen: 'code', drool: 2 }, 1],
+  // sheepish: wipe the drool, pretend nothing happened
+  [{ pose: { legs: 'stand', eyes: { shape: 'happy' }, mouth: 'wobbly', arms: { l: 'out', r: 'none' }, blush: true }, z: 0, sticky: 'desk', screen: 'code', drool: 2, sweat: true, wipe: 1 }, 1],
+  [{ pose: { legs: 'stand', eyes: { shape: 'happy' }, mouth: 'wobbly', arms: { l: 'out', r: 'none' }, blush: true }, z: 0, sticky: 'desk', screen: 'code', sweat: true, wipe: 2 }, 1],
+  [{ pose: { legs: 'stand', eyes: { shape: 'happy' }, mouth: 'wobbly', arms: { l: 'out', r: 'none' }, blush: true }, z: 0, sticky: 'desk', screen: 'code', sweat: true, wipe: 3 }, 1],
+  // straighten up, glance at the screen as if ready all along
+  [{ pose: { legs: 'stand', eyes: { shape: 'open', gazeX: -1 }, mouth: 'flat', arms: 'out', squash: -2 }, z: 0, sticky: 'desk', screen: 'code' }, 2],
+  [{ pose: { legs: 'stand', eyes: { shape: 'blink' }, arms: 'out' }, z: 0, sticky: 'desk', screen: 'code' }, 1],
+  [{ pose: { legs: 'stand', eyes: { shape: 'open' }, arms: 'out' }, z: 0, sticky: 'desk', screen: 'code' }, 3],
+];
+const N = Iso.seq.len(STEPS);
+
+// Sticky-note flight path relative to its start on Clawd's head: [dx, dy, plane]. Tumbles via plane swaps.
+const FLY = {
+  fly0: [6, -12, 'top'], fly1: [16, -24, 'R'], fly2: [26, -30, 'L'], fly3: [34, -24, 'top'], fly4: [42, 22, 'R'],
+};
+const STICKY_DESK = { x: 164, y: 90 };
+
+// Big 5x5 sticky note (the lib one is 3x3, too small to read on his head). Flat, or upright while tumbling.
+function note(ctx, x, y, plane) {
+  if (plane === 'top') {
+    const r = Iso.box(ctx, x, y, 0, 5, 5, 0, { top: C.amber });
+    r.top.cell(1, 1, C.amberDark); r.top.cell(2, 1, C.amberDark); r.top.cell(1, 3, C.amberDark); r.top.cell(3, 2, C.amberDark);
+    return;
+  }
+  const p = Iso.plane(ctx, x, y + 5, 0, 5, 9, plane, C.amber);
+  p.rect(2, 2, 6, 1, C.amberDark); p.rect(2, 5, 4, 1, C.amberDark);
+}
+function drawSticky(ctx, s, head) {
+  if (!s) return;
+  if (s === 'head') { note(ctx, head.x, head.y, 'top'); return; }
+  if (s === 'desk') { note(ctx, STICKY_DESK.x, STICKY_DESK.y, 'top'); return; }
+  const f = FLY[s];
+  // fly path is relative to the seated head position (fixed), so it doesn't follow Clawd's jump
+  note(ctx, HEAD0.x + f[0], HEAD0.y + f[1], f[2]);
+}
+// Seated head-top anchor, computed once off-screen so draw() stays a pure function of i.
+const HEAD0 = (() => {
+  const c = document.createElement('canvas'); c.width = 240; c.height = 121;
+  return Iso.drawClawd(c.getContext('2d'), Object.assign({ x: SPOT.clawd.x, y: SPOT.clawd.y }, NAP)).top;
+})();
+
+Iso.player({
+  name: '06-surprise-wake',
+  fps: 10,
+  frames: N,
+  loop: false,
+  notes: 'One-shot, ' + N + ' frames @10 fps (~' + (N / 10).toFixed(1) + ' s). Clawd naps seated (eyes closed, drool drip, z\'s, ' +
+    'a sticky note stuck on his head). The laptop pings a new session: eyes snap wide, "o" mouth, z\'s scatter, ' +
+    'he squashes then rockets up arms-high with a "!" and the sticky note tumbles off his head onto the desk. ' +
+    'He lands, then the gag: a sheepish blushing wipe of the drool with a sweat drop, a quick glance at the screen ' +
+    'pretending he was working all along, and settles to the neutral pose.',
+  draw(ctx, i) {
+    const s = Iso.seq(STEPS, i);
+    Iso.drawDesk(ctx);
+    // laptop at the left spot, screen toward Clawd's side (facing right), behind/beside him
+    Iso.prop.laptop(ctx, SPOT.left.x - 8, SPOT.left.y - 2, { facing: 'right', screen: s.screen, frame: i, glow: s.screen !== 'off' });
+    if (s.ping) {
+      Iso.fx.ticks(ctx, SPOT.left.x - 8, SPOT.left.y - 24, 'up', C.amber);
+      Iso.fx.sparkle(ctx, SPOT.left.x + 2, SPOT.left.y - 20, Iso.cycle([1, 2], i), C.amber);
+    }
+
+    const opts = Object.assign({ x: SPOT.clawd.x, y: SPOT.clawd.y, z: s.z }, s.pose);
+    const a = Iso.drawClawd(ctx, opts);
+
+    // drool drip at the mouth corner
+    if (s.drool && a.facePainter) {
+      const fp = a.facePainter;
+      fp.rect(19, 19, 2, 2, C.blueLight);
+      fp.rect(19, 21, 2, s.drool === 2 ? 3 : 1, C.blueLight);
+      if (s.drool === 2) fp.rect(19, 24, 2, 1, C.blue);
+    }
+    // wipe: a smear of the arm over the mouth corner (little motion ticks)
+    // wipe: his (screen-right) hand comes up and swipes across the mouth corner, right to left
+    if (s.wipe && a.facePainter) {
+      const u = [0, 22, 17, 12][s.wipe];
+      a.facePainter.rect(u - 1, 17, 8, 7, C.orangeDark);
+      a.facePainter.rect(u, 18, 6, 4, C.orangeLight);
+      if (s.wipe > 1) Iso.fx.ticks(ctx, a.mouth.x + 14, a.mouth.y + 4, 'right', C.muted);
+    }
+
+    drawSticky(ctx, s.sticky, a.top);
+
+    // z's: lazy drift while napping
+    if (s.zz) {
+      const ph = i % 6;
+      const hx = a.head.x + 14, hy = a.head.y - 2;
+      Iso.fx.zee(ctx, hx + (ph >> 1), hy - ph, 1, C.muted);
+      Iso.fx.zee(ctx, hx + 6 + (ph >> 1), hy - 9 - ph, 2, C.muted);
+      Iso.fx.zee(ctx, hx + 12 + (ph >> 1), hy - 19 - ph, 3, C.dim);
+    }
+    // z's scatter outward when startled
+    if (s.scatter != null) {
+      const k = s.scatter, hx = HEAD0.x + 14, hy = HEAD0.y - 2;
+      const col = k >= 2 ? C.dim : C.muted;
+      Iso.fx.zee(ctx, hx + 6 + k * 6, hy - 2 + k * 2, 1, col);
+      Iso.fx.zee(ctx, hx + 10 + k * 7, hy - 12 - k * 4, 2, col);
+      if (k < 3) Iso.fx.zee(ctx, hx - 30 - k * 8, hy - 16 - k * 3, k < 2 ? 3 : 2, col);
+    }
+    if (s.bang) Iso.fx.bang(ctx, a.head.x - 14, a.head.y - (s.bang === 1 ? 6 : 10), { badge: true });
+    if (s.sweat) Iso.fx.sweat(ctx, a.head.x - 22, a.head.y + 1);
+    if (s.dust) {
+      Iso.fx.ticks(ctx, a.feet.x - 26, a.feet.y - 2, 'left', C.muted);
+      Iso.fx.ticks(ctx, a.feet.x + 26, a.feet.y - 2, 'right', C.muted);
+    }
+  },
+});
+</script>
+</body>
+</html>

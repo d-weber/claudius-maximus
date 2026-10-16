@@ -1,0 +1,131 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Isometric Clawd</title>
+<style>
+  :root { --bg: #0F0E0D; --stage: #1A1918; --surface: #262523; --border: #3D3A36; --text: #ECE9E4; --muted: #9C978E; --dim: #5E5A54; --orange: #D97757; --orangeL: #F0A07E; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 ui-monospace, Menlo, Consolas, monospace; }
+  .wrap { max-width: 1540px; margin: 0 auto; padding: 18px 16px 40px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 16px; max-width: 900px; }
+  .bar { display: flex; gap: 6px; align-items: center; margin: 0 0 14px; color: var(--muted); flex-wrap: wrap; }
+  .bar button { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font: inherit; cursor: pointer; }
+  .bar button.on { border-color: var(--orange); color: var(--orangeL); }
+  .grid { display: grid; align-items: start; grid-template-columns: repeat(auto-fill, var(--cw, 482px)); gap: 14px; justify-content: start; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .frame { position: relative; background: var(--stage); width: var(--fw, 480px); height: var(--fh, 242px); overflow: hidden; }
+  .frame iframe { position: absolute; left: 0; top: 0; width: 480px; height: 242px; border: 0; transform-origin: 0 0; }
+  .ph { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--dim); background: var(--stage); }
+  .ph b { color: var(--muted); font-weight: 500; }
+  .meta { padding: 8px 10px 10px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .meta .n { color: var(--dim); }
+  .meta a { color: var(--text); text-decoration: none; font-weight: 600; }
+  .meta a:hover { color: var(--orangeL); }
+  .meta .d { color: var(--muted); flex-basis: 100%; }
+  .meta .info { color: var(--dim); margin-left: auto; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Isometric Clawd — animation prototypes</h1>
+  <p class="sub">Review gallery. Each card embeds <code>anims/*.html?embed=1</code> at device size (480×242); click a stage to pause it, click a title to open the full player
+  (frame stepping, speed, zoom, spritesheet export). Start with the <a href="anims/00-model-sheet.html" style="color:var(--orangeL)">model sheet</a>.</p>
+  <div class="bar">card size
+    <button data-s="0.75">0.75x</button><button data-s="1">1x device</button><button data-s="1.5">1.5x</button><button data-s="2">2x</button>
+  </div>
+  <div class="grid" id="grid"></div>
+</div>
+<script>
+// file:// can't list directories: keep this list in sync with anims/*.html.
+const ANIMS = [
+  { file: '01-idle.html', title: 'Idle', desc: 'Neutral loop: breathing, blinks, glances around the desk.' },
+  { file: '02-sleep.html', title: 'Sleep / offline', desc: 'Grey, sitting, eyes closed, slow breathing, drifting z’s.' },
+  { file: '03-waiting.html', title: 'Needs you', desc: 'Amber “!” badge, wide eyes, waving and hopping for attention.' },
+  { file: '04-happy-done.html', title: 'Done! celebration', desc: 'Task finished: happy hops, arms up, sparkles.' },
+  { file: '05-wince-error.html', title: 'Error wince', desc: 'Something failed: > < wince, shake, recover.' },
+  { file: '06-surprise-wake.html', title: 'Surprise / wake-up', desc: 'From sleep to awake: jolt, wide eyes, back to neutral.' },
+  { file: '07-giggle-tap.html', title: 'Giggle (tapped)', desc: 'Touched by the human: squash, giggle, blush.' },
+  { file: '08-wink.html', title: 'Wink', desc: 'A cheeky wink with a little wave.' },
+  { file: '09-hop-todo.html', title: 'Hop (todo done)', desc: 'A todo item checked off: one small hop.' },
+  { file: '10-reading-doc.html', title: 'Reading a doc', desc: 'Read tool: scanning a document.' },
+  { file: '11-writing-code.html', title: 'Writing code', desc: 'Edit/Write tools: typing away at the laptop.' },
+  { file: '12-creating-plan.html', title: 'Creating a plan', desc: 'Plan mode: building a checklist on the board.' },
+  { file: '13-reviewing-code.html', title: 'Reviewing code', desc: 'Inspecting code with a magnifier.' },
+  { file: '13-reviewing-code-full.html', title: 'Reviewing code — full screen', desc: '480×480 full-screen version: 160×160 logical at 3x, bigger Clawd', h: 480 },
+  { file: '14-running-command.html', title: 'Running a command', desc: 'Bash: terminal output scrolling, waiting on the result.' },
+  { file: '15-web-search.html', title: 'Web search', desc: 'WebSearch/WebFetch: globe, browser, results loading.' },
+  { file: '16-thinking.html', title: 'Thinking', desc: 'Pondering: gaze up, thought puff.' },
+  { file: '17-delegating.html', title: 'Delegating to subagents', desc: 'Spawning violet mini helpers and handing out work.' },
+];
+const SHEET = { file: '00-model-sheet.html', title: 'Model sheet', desc: 'Reference: every expression, pose, prop and FX (opens in full page).' };
+
+const grid = document.getElementById('grid');
+const cards = new Map(); // href -> {ph, info}
+let scale = +(new URLSearchParams(location.search).get('s') || 1);
+
+function card(a, i, embed) {
+  const c = document.createElement('div');
+  c.className = 'card';
+  const href = 'anims/' + a.file;
+  const f = document.createElement('div');
+  f.className = 'frame';
+  if (a.h) { // non-default stage height (device px), e.g. 480 for full-screen pages
+    f.style.height = `calc(${a.h}px * var(--s, 1))`;
+    f.dataset.h = a.h;
+  }
+  const ph = document.createElement('div');
+  ph.className = 'ph';
+  ph.innerHTML = embed ? `<b>${a.title}</b><span>not built yet · anims/${a.file}</span>` : `<b>${a.title}</b><span>open the full page →</span>`;
+  if (embed) {
+    const ifr = document.createElement('iframe');
+    ifr.src = href + '?embed=1';
+    ifr.loading = 'lazy';
+    ifr.title = a.title;
+    f.appendChild(ifr);
+  }
+  f.appendChild(ph);
+  const m = document.createElement('div');
+  m.className = 'meta';
+  m.innerHTML = `<span class="n">${String(i).padStart(2, '0')}</span><a href="${href}"></a><span class="info"></span><span class="d"></span>`;
+  m.querySelector('a').textContent = a.title;
+  m.querySelector('.d').textContent = a.desc;
+  c.append(f, m);
+  grid.appendChild(c);
+  cards.set(a.file, { ph, info: m.querySelector('.info'), frame: f });
+}
+card(SHEET, 0, false);
+ANIMS.forEach((a, i) => card(a, i + 1, true));
+
+// Embedded players post {iso:'ready', ...} when they load; anything silent stays a placeholder.
+window.addEventListener('message', (e) => {
+  const d = e.data;
+  if (!d || d.iso !== 'ready' || !d.href) return;
+  const file = decodeURIComponent(d.href.split('?')[0].split('/').pop());
+  const c = cards.get(file);
+  if (!c) return;
+  c.ph.style.display = 'none';
+  c.info.textContent = `${d.frames}f · ${d.fps}fps · ${d.loop ? 'loop' : 'one-shot'}`;
+});
+
+function setScale(s) {
+  scale = s;
+  grid.style.setProperty('--cw', Math.round(480 * s + 2) + 'px');
+  grid.style.setProperty('--fw', Math.round(480 * s) + 'px');
+  grid.style.setProperty('--fh', Math.round(242 * s) + 'px');
+  grid.style.setProperty('--s', s);
+  document.querySelectorAll('[data-s]').forEach((b) => b.classList.toggle('on', +b.dataset.s === s));
+  requestAnimationFrame(fit);
+}
+function fit() {
+  for (const { frame } of cards.values()) {
+    const ifr = frame.querySelector('iframe');
+    if (ifr) { ifr.style.transform = `scale(${scale})`; if (frame.dataset.h) ifr.style.height = frame.dataset.h + 'px'; }
+  }
+}
+document.querySelectorAll('[data-s]').forEach((b) => (b.onclick = () => setScale(+b.dataset.s)));
+window.addEventListener('resize', fit);
+setScale(scale);
+</script>
+</body>
+</html>

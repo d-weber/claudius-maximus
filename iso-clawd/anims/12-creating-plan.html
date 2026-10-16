@@ -1,0 +1,235 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Creating a Plan</title>
+<script src="../lib/iso.js"></script>
+</head>
+<body>
+<script>
+const { C, SPOT } = Iso;
+
+// ---------------------------------------------------------------- board (custom easel whiteboard)
+// Whiteboard on the left of the desk, its writing face turned down-right (toward Clawd and us).
+const BOARD = { x: 80, y: 70, len: 24, h: 36, z: 8 };
+
+function drawEasel(ctx) {
+  const { x, y, len, h, z } = BOARD;
+  // back leg (behind board), then the two front legs
+  Iso.box(ctx, x - 4, y - 2, 0, 1, 1, z + 20, Iso.SHADE.wood);
+  const r = Iso.box(ctx, x, y, z, 1, len, h, { top: C.woodEdge, left: C.woodLeft, right: C.paper });
+  Iso.box(ctx, x + 18, y - 9, 0, 1, 1, z, Iso.SHADE.wood);
+  Iso.box(ctx, x - 18, y + 9, 0, 1, 1, z, Iso.SHADE.wood);
+  // marker tray along the bottom
+  Iso.box(ctx, x + 2, y + 1, z - 2, 1, len - 2, 2, { top: C.woodTop, left: C.woodLeft, right: C.woodRight });
+  return r.right;
+}
+
+const STICK = [
+  { u: 2, v: 13, c: C.amber, s: C.amberDark },
+  { u: 21, v: 13, c: C.blueLight, s: C.blue },
+  { u: 34, v: 24, c: C.green, s: C.greenDark },
+];
+function sticky(p, k, fresh) {
+  const s = STICK[k];
+  p.rect(s.u, s.v, 12, 9, s.c);
+  p.rect(s.u + 2, s.v + 2, 8, 1, s.s);
+  p.rect(s.u + 2, s.v + 4, 5, 1, s.s);
+  p.rect(s.u + 2, s.v + 6, 6, 1, s.s);
+  if (fresh) { p.rect(s.u + 9, s.v + 6, 3, 3, C.paperShade); p.px(s.u + 9, s.v + 6, s.s); } // corner still curling
+  else p.rect(s.u, s.v + 8, 12, 1, s.s);
+}
+// arrow 1 -> 2 (horizontal), n = pixels revealed
+const A12 = [[14, 17], [15, 17], [16, 17], [17, 17], [18, 17], [19, 17], [18, 16], [18, 18], [17, 16], [17, 18], [16, 15], [16, 19]];
+// the doomed arrow: wanders off sticky 2 and scribbles off the board edge
+const AWRONG = [[33, 17], [32, 17], [32, 16], [33, 15], [34, 14], [35, 14], [36, 15], [37, 17], [36, 19], [35, 20], [34, 19], [33, 17], [34, 15], [35, 13], [37, 11], [38, 10], [39, 9], [40, 8], [41, 7], [42, 6], [43, 5], [44, 4], [45, 3], [46, 2], [47, 1]];
+// arrow 2 -> 3 (down then right)
+const A23 = [[27, 22], [27, 23], [27, 24], [27, 25], [27, 26], [27, 27], [27, 28], [28, 28], [29, 28], [30, 28], [31, 28], [32, 28], [31, 27], [31, 29], [30, 26], [30, 30], [33, 28]];
+
+function drawBoard(ctx, st, i) {
+  const p = drawEasel(ctx);
+  if (st.flip != null) {
+    // page flip: a fresh sheet swings down over the old one (2 frames)
+    if (st.flip === 0) { drawContent(p, st.prev, i); p.rect(0, 0, p.cols, 16, C.paperShade); p.rect(0, 16, p.cols, 1, C.muted); }
+    else { p.rect(0, 0, p.cols, 1, C.woodEdge); p.rect(0, 32, p.cols, 3, C.paperShade); p.rect(0, 35, p.cols, 1, C.muted); }
+    if (st.flip === 1) drawHeader(p);
+    return p;
+  }
+  drawContent(p, st, i);
+  return p;
+}
+function drawHeader(p) {
+  p.rect(0, 0, p.cols, 1, C.woodEdge);
+  // title lettered ON the board (sheared with it), own 3x5 glyphs
+  const G = { P: ['##.', '#.#', '##.', '#..', '#..'], L: ['#..', '#..', '#..', '#..', '###'],
+              A: ['.#.', '#.#', '###', '#.#', '#.#'], N: ['#.#', '###', '###', '#.#', '#.#'] };
+  let u = 3;
+  for (const ch of 'PLAN') {
+    G[ch].forEach((row, v) => { for (let c = 0; c < 3; c++) if (row[c] === '#') p.px(u + c, 3 + v, C.ink); });
+    u += 4;
+  }
+  p.rect(3, 9, 16, 1, C.orange);  // underline
+}
+function drawContent(p, st, i) {
+  drawHeader(p);
+  if (st.s >= 1) sticky(p, 0, st.fresh === 0);
+  if (st.s >= 2) sticky(p, 1, st.fresh === 1);
+  for (let k = 0; k < Math.min(st.a12 || 0, A12.length); k++) p.px(A12[k][0], A12[k][1], C.ink);
+  // wrong arrow: drawn, then rubbed out from the tip back (eraser smudge)
+  const w = st.wrong || 0, e = st.erase || 0;
+  for (let k = 0; k < Math.min(w, AWRONG.length); k++) {
+    const gone = AWRONG.length - k <= e * 5;
+    p.px(AWRONG[k][0], AWRONG[k][1], gone ? C.paperShade : C.red);
+  }
+  if (e > 0 && e < 6) for (let k = 0; k < 5; k++) p.px(33 + ((k * 5 + e * 3) % 13), 3 + k * 3, C.paperShade);
+  if (st.s >= 3) sticky(p, 2, st.fresh === 2);
+  for (let k = 0; k < Math.min(st.a23 || 0, A23.length); k++) p.px(A23[k][0], A23[k][1], C.ink);
+  if (st.check) { const c = [[37, 28], [38, 29], [39, 30], [40, 29], [41, 28], [42, 27], [43, 26], [44, 25]]; const s3 = STICK[2]; p.rect(s3.u + 1, s3.v + 1, 10, 6, s3.c); for (const q of c) { p.px(q[0], q[1], C.text); p.px(q[0], q[1] + 1, C.greenDark); } }
+}
+
+// lightbulb FX (amber, with base and rays)
+function bulb(ctx, x, y, big) {
+  Iso.sprite(ctx, x - 4, y - 6, [
+    '...aaa...',
+    '.aaaaaaa.',
+    '.awwaaaa.',
+    'aawaaaaaa',
+    'aaaaaaaaa',
+    '.aaaaaaa.',
+    '..aaaaa..',
+    '...ddd...',
+    '...ggg...',
+    '...ddd...',
+  ], { a: C.amber, w: C.text, d: C.grey, g: C.greyLight });
+  if (big) {
+    Iso.rect(ctx, x, y - 11, 1, 3, C.amber);
+    Iso.rect(ctx, x - 10, y - 2, 3, 1, C.amber); Iso.rect(ctx, x + 8, y - 2, 3, 1, C.amber);
+    Iso.px(ctx, x - 7, y - 9, C.amber); Iso.px(ctx, x - 6, y - 8, C.amber);
+    Iso.px(ctx, x + 7, y - 9, C.amber); Iso.px(ctx, x + 6, y - 8, C.amber);
+  }
+}
+// marker in hand
+function marker(ctx, h, tip) {
+  if (!h) return;
+  Iso.rect(ctx, h.x - 2, h.y - 1, 3, 2, C.text);
+  Iso.rect(ctx, h.x - 3, h.y - 1, 1, 2, tip || C.ink);
+}
+function stickyInHand(ctx, h, col) {
+  if (!h) return;
+  Iso.rect(ctx, h.x - 4, h.y - 4, 5, 5, col);
+}
+
+// ---------------------------------------------------------------- timeline
+// Each step: [hold, {pose..., pos:[dx,dy], board:{...}, fx}]
+const HOME = { x: 130, y: 80 };
+const look = { shape: 'open', gazeX: -1 };
+const B0 = { s: 0 };
+const STEPS = [
+  // eye up the empty board, sticky ready in hand
+  [2, { eyes: look, arms: { l: 'out', r: 'out' }, board: B0, hold: 'sticky0' }],
+  [1, { eyes: { shape: 'blink', gazeX: -1 }, arms: { l: 'out', r: 'out' }, board: B0, hold: 'sticky0' }],
+  // slap sticky 1: wind-up, SLAP (squash), settle
+  [2, { eyes: look, arms: { l: 'out', r: 'out' }, board: B0, squash: -3, z: 1, hold: 'sticky0' }],
+  [2, { eyes: { shape: 'closed' }, arms: { l: 'high', r: 'out' }, board: { s: 1, fresh: 0 }, squash: 3, fx: 'ticks0' }],
+  [1, { eyes: look, arms: { l: 'out', r: 'out' }, board: { s: 1 }, hold: 'sticky1' }],
+  // slap sticky 2
+  [1, { eyes: look, arms: { l: 'out', r: 'out' }, board: { s: 1 }, squash: -3, z: 1, hold: 'sticky1' }],
+  [2, { eyes: { shape: 'closed' }, arms: { l: 'high', r: 'out' }, board: { s: 2, fresh: 1 }, squash: 3, fx: 'ticks1' }],
+  // draw arrow 1 -> 2 (marker squeaks along)
+  [1, { eyes: { shape: 'open', gazeX: -1, gazeY: 1 }, arms: { l: 'high', r: 'out' }, board: { s: 2, a12: 4 }, hold: 'marker' }],
+  [1, { eyes: { shape: 'open', gazeX: -1, gazeY: 1 }, arms: { l: 'out', r: 'out' }, board: { s: 2, a12: 8 }, hold: 'marker' }],
+  [1, { eyes: { shape: 'open', gazeX: -1, gazeY: 1 }, arms: { l: 'high', r: 'out' }, board: { s: 2, a12: 12 }, hold: 'marker' }],
+  // the next arrow goes... wrong
+  [1, { eyes: { shape: 'open', gazeX: -1 }, arms: { l: 'out', r: 'out' }, board: { s: 2, a12: 12, wrong: 7 }, hold: 'marker' }],
+  [1, { eyes: { shape: 'open', gazeX: -1, gazeY: -1 }, arms: { l: 'high', r: 'out' }, board: { s: 2, a12: 12, wrong: 14 }, hold: 'marker' }],
+  [1, { eyes: { shape: 'open', gazeX: -1, gazeY: -2 }, arms: { l: 'up', r: 'out' }, board: { s: 2, a12: 12, wrong: 24 }, hold: 'marker' }],
+  [3, { eyes: { shape: 'wide', gazeX: -1 }, mouth: 'wobbly', arms: { l: 'up', r: 'out' }, board: { s: 2, a12: 12, wrong: 24 }, hold: 'marker', fx: 'sweat' }],
+  // erase it, furiously
+  [1, { eyes: { shape: 'wince' }, arms: { l: 'waveA', r: 'out' }, board: { s: 2, a12: 12, wrong: 24, erase: 1 }, shake: -1, fx: 'dust0' }],
+  [1, { eyes: { shape: 'wince' }, arms: { l: 'waveB', r: 'out' }, board: { s: 2, a12: 12, wrong: 24, erase: 2 }, shake: 1, fx: 'dust1' }],
+  [1, { eyes: { shape: 'wince' }, arms: { l: 'waveA', r: 'out' }, board: { s: 2, a12: 12, wrong: 24, erase: 4 }, shake: -1, fx: 'dust2' }],
+  [1, { eyes: { shape: 'wince' }, arms: { l: 'waveB', r: 'out' }, board: { s: 2, a12: 12, wrong: 24, erase: 6 }, shake: 1, fx: 'dust3' }],
+  // step back, head-scratch, thinking dots
+  [1, { eyes: look, arms: { l: 'out', r: 'out' }, legs: 'stepA', pos: [4, 2], board: { s: 2, a12: 12 } }],
+  [1, { eyes: look, arms: { l: 'out', r: 'out' }, legs: 'stepB', pos: [8, 4], board: { s: 2, a12: 12 } }],
+  [2, { eyes: { shape: 'open', gazeX: -1, gazeY: -1 }, mouth: 'flat', arms: { l: 'up', r: 'out' }, pos: [8, 4], board: { s: 2, a12: 12 }, fx: 'think1', scratch: 1 }],
+  [2, { eyes: { shape: 'open', gazeX: -1, gazeY: -2 }, mouth: 'flat', arms: { l: 'high', r: 'out' }, pos: [8, 4], board: { s: 2, a12: 12 }, fx: 'think2' }],
+  [1, { eyes: { shape: 'blink' }, mouth: 'flat', arms: { l: 'up', r: 'out' }, pos: [8, 4], board: { s: 2, a12: 12 }, fx: 'think3', scratch: 1 }],
+  [1, { eyes: { shape: 'open', gazeX: -1, gazeY: -2 }, mouth: 'flat', arms: { l: 'high', r: 'out' }, pos: [8, 4], board: { s: 2, a12: 12 }, fx: 'think3' }],
+  // AHA!
+  [1, { eyes: { shape: 'wide', gazeY: -1 }, mouth: 'o', arms: { l: 'out', r: 'out' }, pos: [8, 4], squash: 3, board: { s: 2, a12: 12 }, fx: 'bulb0' }],
+  [2, { eyes: { shape: 'wide', gazeY: -1 }, mouth: 'o', arms: { l: 'out', r: 'up' }, pos: [8, 4], z: 5, squash: -3, board: { s: 2, a12: 12 }, fx: 'bulb1' }],
+  [1, { eyes: { shape: 'happy' }, mouth: 'smile', arms: { l: 'out', r: 'up' }, pos: [8, 4], squash: 2, board: { s: 2, a12: 12 }, fx: 'bulb1' }],
+  // hustle back in: one more sticky + a properly routed arrow
+  [1, { eyes: look, arms: { l: 'out', r: 'out' }, legs: 'stepA', pos: [4, 2], board: { s: 2, a12: 12 }, hold: 'sticky2' }],
+  [1, { eyes: look, arms: { l: 'out', r: 'out' }, squash: -3, z: 1, board: { s: 2, a12: 12 }, hold: 'sticky2' }],
+  [2, { eyes: { shape: 'closed' }, arms: { l: 'high', r: 'out' }, squash: 3, board: { s: 3, a12: 12, fresh: 2 }, fx: 'ticks2' }],
+  [1, { eyes: { shape: 'open', gazeX: -1, gazeY: 1 }, arms: { l: 'out', r: 'out' }, board: { s: 3, a12: 12, a23: 6 }, hold: 'marker' }],
+  [1, { eyes: { shape: 'open', gazeX: -1, gazeY: 1 }, arms: { l: 'high', r: 'out' }, board: { s: 3, a12: 12, a23: 12 }, hold: 'marker' }],
+  [1, { eyes: { shape: 'open', gazeX: -1, gazeY: 1 }, arms: { l: 'out', r: 'out' }, board: { s: 3, a12: 12, a23: 17, check: 1 }, hold: 'marker' }],
+  // proud general
+  [3, { eyes: { shape: 'happy' }, mouth: 'smile', blush: true, arms: { l: 'out', r: 'high' }, board: { s: 3, a12: 12, a23: 17, check: 1 }, fx: 'proud' }],
+  // flip to a fresh page (this is how the loop resets to the empty board)
+  [1, { eyes: look, arms: { l: 'high', r: 'out' }, board: { flip: 0, prev: { s: 3, a12: 12, a23: 17, check: 1 } } }],
+  [1, { eyes: look, arms: { l: 'out', r: 'out' }, board: { flip: 1 } }],
+];
+const TL = STEPS.map((s, k) => [k, s[0]]);
+const FRAMES = Iso.seq.len(TL);
+
+const STICK_HAND = { sticky0: 0, sticky1: 1, sticky2: 2 };
+
+Iso.player({
+  name: '12-creating-plan',
+  fps: 12,
+  frames: FRAMES,
+  loop: true,
+  notes: 'Plan mode / TodoWrite. Clawd, general at the war map, slaps two sticky notes on his easel board and ' +
+    'links them with an arrow. The next arrow wanders off the edge in red; wide eyes, sweat drop, furious erasing. ' +
+    'He steps back, chin-scratch with thought dots, then the <b>aha!</b> lightbulb hop; he hustles in, adds one more ' +
+    'sticky, routes the arrow properly, ticks it, beams, and flips to a fresh page (which is how the loop resets).',
+  draw(ctx, i) {
+    const st = STEPS[Iso.seq(TL, i)][1];
+    Iso.drawDesk(ctx);
+    // back props: mug at the back right, a couple of spare stickies on the desk
+    Iso.prop.mug(ctx, 180, 82, { frame: i });
+    Iso.prop.sticky(ctx, 98, 92, { color: 'blush' });
+    Iso.prop.sticky(ctx, 105, 95, { color: 'violet' });
+
+    const p = drawBoard(ctx, st.board, i);
+
+    const dx = st.pos ? st.pos[0] : 0, dy = st.pos ? st.pos[1] : 0;
+    const a = Iso.drawClawd(ctx, {
+      x: HOME.x + dx, y: HOME.y + dy, z: st.z || 0,
+      eyes: st.eyes, mouth: st.mouth || 'none', blush: !!st.blush,
+      arms: st.arms, legs: st.legs || 'stand', squash: st.squash || 0, shake: st.shake || 0,
+    });
+
+    // held things
+    if (st.hold === 'marker') marker(ctx, a.hand.l, C.ink);
+    else if (st.hold in STICK_HAND) stickyInHand(ctx, a.hand.l, STICK[STICK_HAND[st.hold]].c);
+    if (st.scratch && a.hand.l) { Iso.px(ctx, a.hand.l.x - 3, a.hand.l.y - 2, C.text); Iso.px(ctx, a.hand.l.x - 4, a.hand.l.y, C.text); Iso.px(ctx, a.hand.l.x + 3, a.hand.l.y - 3, C.text); }
+
+    // FX
+    const fx = st.fx || '';
+    if (fx.startsWith('ticks')) {
+      const s = STICK[+fx[5]]; const q = p.at(s.u + 3, s.v + 2);
+      Iso.fx.ticks(ctx, q.x + 7, q.y - 1, 'right', C.text);
+    }
+    if (fx === 'sweat') Iso.fx.sweat(ctx, a.head.x + 14, a.head.y + 4);
+    if (fx.startsWith('dust')) {
+      const q = p.at(40, 10);
+      Iso.fx.poof(ctx, q.x, q.y, +fx[4], C.paperShade);
+    }
+    if (fx.startsWith('think')) Iso.fx.dots(ctx, a.head.x - 2, a.head.y - 7, +fx[5], C.text);
+    if (fx.startsWith('bulb')) {
+      bulb(ctx, a.head.x + 2, a.head.y - 9, fx === 'bulb1');
+    }
+    if (fx === 'proud') {
+      Iso.fx.sparkle(ctx, a.head.x + 18, a.head.y - 2, Iso.cycle([1, 2, 3, 2], i), C.amber);
+      Iso.fx.sparkle(ctx, 60, 36, Iso.cycle([3, 2, 1, 2], i), C.text);
+    }
+  },
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Template</title>
+<!-- Copy this file to anims/NN-name.html. Only lib/iso.js is shared; keep everything else in this file. -->
+<script src="../lib/iso.js"></script>
+</head>
+<body>
+<script>
+const { C, SPOT } = Iso;
+
+// Pose table: one entry per distinct pose, then a timeline of [pose, holdFrames].
+const POSE = {
+  rest:  { eyes: { shape: 'open' }, arms: 'out' },
+  blink: { eyes: { shape: 'blink' }, arms: 'out' },
+  look:  { eyes: { shape: 'open', gazeX: 1 }, arms: { l: 'out', r: 'high' } },
+};
+const TIMELINE = [['rest', 8], ['blink', 1], ['rest', 6], ['look', 6], ['rest', 3]];
+
+Iso.player({
+  name: 'Template',
+  fps: 10,
+  frames: Iso.seq.len(TIMELINE),   // 24 frames
+  loop: true,
+  notes: 'Minimal example: desk, a mug behind, Clawd with a pose timeline, a sparkle FX.',
+  draw(ctx, i, t) {
+    // 1) scene, back to front
+    Iso.drawDesk(ctx);
+    Iso.prop.mug(ctx, SPOT.backRight.x, SPOT.backRight.y, { frame: i });
+
+    // 2) Clawd (feet at SPOT.clawd by default)
+    const pose = POSE[Iso.seq(TIMELINE, i)];
+    const a = Iso.drawClawd(ctx, Object.assign({ x: SPOT.clawd.x, y: SPOT.clawd.y }, pose));
+
+    // 3) props in front of Clawd, then FX on top (anchored on Clawd's returned points)
+    Iso.prop.paper(ctx, SPOT.frontLeft.x, SPOT.frontLeft.y);
+    if (Iso.seq(TIMELINE, i) === 'look') Iso.fx.sparkle(ctx, a.head.x + 22, a.head.y - 4, Iso.cycle([1, 2, 3, 2], i), C.amber);
+  },
+});
+</script>
+</body>
+</html>
