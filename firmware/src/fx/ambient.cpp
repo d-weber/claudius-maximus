@@ -1,5 +1,6 @@
 // Ambient behaviour: auto-dim, screensaver / night clock, wake on touch or agent activity.
 // See ambient.h for the state machine. Everything runs from ambient_tick() (throttled to 10 Hz) + event hooks.
+#include "../core/link.h"
 #include "ambient.h"
 #include <Arduino.h>
 #include <lvgl.h>
@@ -48,7 +49,7 @@ static void logf(const char *fmt, ...) {
   va_start(ap, fmt);
   vsnprintf(b, sizeof b, fmt, ap);
   va_end(ap);
-  Serial.printf("{\"t\":\"log\",\"msg\":\"ambient: %s\"}\n", b);
+  Link.printf("{\"t\":\"log\",\"msg\":\"ambient: %s\"}\n", b);
 }
 
 static bool is_night() {

@@ -164,7 +164,7 @@ rotated at 1 MB × 3.
 | Plan limits unknown | They need a claude.ai Pro/Max login and the statusLine wrapper, and appear after the first reply in a session. |
 | "another companion daemon is already running" | The LaunchAgent is running; stop it before running in the foreground. |
 | Focus does nothing in VS Code | macOS: give Accessibility permission to the daemon's Python, or to osascript, in System Settings → Privacy & Security. Linux outside KDE: install `xdotool` (X11) or `kdotool`. |
-| Shifted or flickering lines on the panel | Rebuild with `-DHAL_BOUNCE_PX=19200` in `firmware/platformio.ini` (restores bounce buffers, slower). |
+| Image jumps sideways for a frame, or shifted lines | Run `tools/dev.py perf --screen agents --cycle`: `lcd_n10` / `vs_n10` count scan-out stalls and late vsync interrupts per window (both should be 0). Anything that masks interrupts on the LVGL core for tens of µs, or starves PSRAM, shows up there. `-DHAL_BOUNCE_PX=19200` selects the bounce-buffer scan-out for experiments. |
 | Logs | `tail -f ~/Library/Logs/claudius-maximus.log` (macOS) / `~/.local/state/claudius-maximus/claudius-maximus.log` (Linux), or run in the foreground with `-v`. |
 
 ## Development

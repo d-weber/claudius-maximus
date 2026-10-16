@@ -6,6 +6,62 @@
 #include "perf.h"
 #include "../ui/ui.h"
 
+#include <driver/usb_serial_jtag.h>
+#include <stdarg.h>
+
+LinkSerial Link;
+static volatile bool usj_ready = false;
+
+static void usj_install_task(void *arg) {
+  usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+  cfg.rx_buffer_size = 32 * 1024;   // a full state line can be ~10 KB; the host may burst several
+  cfg.tx_buffer_size = 8 * 1024;
+  if (usb_serial_jtag_driver_install(&cfg) == ESP_OK) usj_ready = true;
+  xTaskNotifyGive((TaskHandle_t)arg);
+  vTaskDelete(nullptr);
+}
+
+void link_serial_init() {
+  // core 0: the driver allocates its interrupt on the calling core
+  xTaskCreatePinnedToCore(usj_install_task, "usj_init", 3072, xTaskGetCurrentTaskHandle(), 5, nullptr, 0);
+  ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+}
+
+size_t LinkSerial::write(const void *buf, size_t n, uint32_t timeout_ms) {
+  if (!usj_ready || n == 0) return 0;
+  int w = usb_serial_jtag_write_bytes(buf, n, pdMS_TO_TICKS(timeout_ms));
+  return w < 0 ? 0 : (size_t)w;
+}
+
+size_t LinkSerial::printf(const char *fmt, ...) {
+  char stackbuf[256];
+  va_list ap;
+  va_start(ap, fmt);
+  va_list ap2;
+  va_copy(ap2, ap);
+  int n = vsnprintf(stackbuf, sizeof(stackbuf), fmt, ap);
+  va_end(ap);
+  if (n < 0) { va_end(ap2); return 0; }
+  if ((size_t)n < sizeof(stackbuf)) { va_end(ap2); return write(stackbuf, (size_t)n); }
+  char *big = (char *)malloc((size_t)n + 1);
+  if (!big) { va_end(ap2); return 0; }
+  vsnprintf(big, (size_t)n + 1, fmt, ap2);
+  va_end(ap2);
+  size_t w = write(big, (size_t)n);
+  free(big);
+  return w;
+}
+
+size_t LinkSerial::read(uint8_t *buf, size_t n) {
+  if (!usj_ready || n == 0) return 0;
+  int r = usb_serial_jtag_read_bytes(buf, n, 0);
+  return r < 0 ? 0 : (size_t)r;
+}
+
+void LinkSerial::flush(uint32_t timeout_ms) {
+  if (usj_ready) usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(timeout_ms));
+}
+
 #define FW_VERSION "0.2.0"
 static char *buf;
 static size_t len = 0;
@@ -21,14 +77,14 @@ struct LinkStat { uint32_t n, bytes, parse_us, parse_max, apply_us, apply_max; }
 static LinkStat lstat[LS__N];
 
 static void link_report() {
-  Serial.print("{\"t\":\"linkperf\"");
+  Link.print("{\"t\":\"linkperf\"");
   for (int i = 0; i < LS__N; i++) {
     const LinkStat &st = lstat[i];
-    Serial.printf(",\"%s\":{\"n\":%u,\"bytes\":%u,\"parse_avg_ms\":%.2f,\"parse_max_ms\":%.1f,\"apply_avg_ms\":%.2f,\"apply_max_ms\":%.1f}",
+    Link.printf(",\"%s\":{\"n\":%u,\"bytes\":%u,\"parse_avg_ms\":%.2f,\"parse_max_ms\":%.1f,\"apply_avg_ms\":%.2f,\"apply_max_ms\":%.1f}",
                   LS_NAME[i], st.n, st.bytes, st.n ? st.parse_us / 1000.0 / st.n : 0.0, st.parse_max / 1000.0,
                   st.n ? st.apply_us / 1000.0 / st.n : 0.0, st.apply_max / 1000.0);
   }
-  Serial.print("}\n");
+  Link.print("}\n");
   memset(lstat, 0, sizeof(lstat));
 }
 
@@ -42,7 +98,7 @@ static SpiRamAllocator alloc;
 // caps: "part" = understands partial states ({"t":"state","part":1,...}); "screen" = reports the visible screen.
 static void send_hello() {
   const char *scr = ui_current();
-  Serial.printf("{\"t\":\"hello\",\"fw\":\"%s\",\"w\":480,\"h\":480,\"caps\":[\"part\",\"screen\"],\"screen\":\"%s\"}\n",
+  Link.printf("{\"t\":\"hello\",\"fw\":\"%s\",\"w\":480,\"h\":480,\"caps\":[\"part\",\"screen\"],\"screen\":\"%s\"}\n",
                 FW_VERSION, scr ? scr : "");
   strlcpy(sent_screen, scr ? scr : "", sizeof(sent_screen));
 }
@@ -92,19 +148,16 @@ static void report_screen() {
   const char *scr = ui_current();
   if (!scr || !strcmp(scr, sent_screen)) return;
   strlcpy(sent_screen, scr, sizeof(sent_screen));
-  Serial.printf("{\"t\":\"screen\",\"id\":\"%s\"}\n", scr);
+  Link.printf("{\"t\":\"screen\",\"id\":\"%s\"}\n", scr);
 }
 
 void link_poll() {
   report_screen();
   int budget = 64 * 1024;  // bytes per loop iteration, keep UI responsive
   while (budget > 0) {
-    int avail = Serial.available();
-    if (avail <= 0) break;
     size_t room = CAP - 1 - len;
     if (room == 0) { overflow = true; len = 0; room = CAP - 1; }   // runaway line: discard
-    size_t want = (size_t)avail < room ? (size_t)avail : room;
-    size_t got = Serial.read((uint8_t *)buf + len, want);
+    size_t got = Link.read((uint8_t *)buf + len, room);
     if (got == 0) break;
     budget -= (int)got;
     size_t scan = len, end = len + got, start = 0;
@@ -127,7 +180,7 @@ void link_poll() {
 
 void link_send(JsonDocument &doc) {
   serializeJson(doc, Serial);
-  Serial.print('\n');
+  Link.print('\n');
 }
 
 void link_action(const char *action, const char *sid) {

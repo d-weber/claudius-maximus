@@ -50,6 +50,30 @@ the venv. Verified on Debian 13 / KDE Plasma 6 Wayland: flash, daemon as a servi
 Also fixed: a transcript found by a rescan was not read until the next 2 s rest cadence (headless sessions
 appeared late; `test_dead_pid_and_headless` was failing).
 
+## Touch + panel fixes — 2026-10-16 (first real use by hand on the panel)
+Reported: the image jumped sideways for a frame now and then, and swipes mostly registered as taps on cards.
+1. **Touch**: SensorLib's `getPoint()` ignores the GT911 "buffer ready" bit and clears the status register on every
+   100 Hz poll, so a poll landing before the next scan read 0 touches: a 1-poll release mid-swipe = release + new
+   press = click. `hal.cpp` now reads the status register itself and holds the state while no new scan is ready
+   (the GT911 flags only scans with data: every scan under a finger, one empty scan on lift, nothing when idle).
+   A press needs 2 fresh scans, a release is the first empty scan, 4 silent periods release as a backstop.
+   perf: `touch_ic`, `touch_rate_ms`, `touch_errors`, `touch_scan_hz`, `touch_glitches`.
+2. **Sideways jumps**: measured with a new scan-out probe (vsync / frame-complete callbacks of the RGB driver,
+   perf: `lcd_n10`, `vs_n10`, `lcd_log`). Not PSRAM bandwidth (synthetic flash/PSRAM streams from core 0 and
+   even a build that never writes the framebuffer all showed the same stalls) and not rendering (orbit with no
+   host stream: zero). Cause: Arduino's HWCDC USB-serial ISR pushes each byte of a 64-byte packet through a
+   FreeRTOS queue, 60-90 us with interrupts masked on core 1, which delays the vsync ISR where the driver
+   restarts the DMA every frame (`CONFIG_LCD_RGB_RESTART_IN_VSYNC`); a late restart shifts that frame. Fix: the
+   host link uses the IDF `usb_serial_jtag` driver (one ring-buffer push per packet), installed from core 0 so
+   its ISR never runs on the LVGL core (`core/link.cpp`, `Link` object; `ARDUINO_USB_CDC_ON_BOOT=0`). Both probe
+   histograms read 0 under the demo stream with page cycling. Bonus: +34 KB internal heap.
+   Rejected on the way: bounce buffers (worse: with the core-0 flush competing for PSRAM the copy ISR falls
+   behind and the frame desyncs vertically); GDMA memcpy into the framebuffer (9 ms per band vs 0.9 ms CPU).
+3. Also: LVGL now uses its own TLSF pool in PSRAM (`LV_MEM_CUSTOM 0`, 2 MB) instead of the IDF heap, whose
+   spinlock masks interrupts on every call (not the cause above, but removes that class of latency).
+Residual: a frame whose DMA does not finish before the restart (`lcd_underruns`, logged as `999`) still shows up
+0-5 times per 30 s in some runs and 0 in others, with the CPU side unaffected; cause unknown, watch by eye.
+
 ## Daily use
 The LaunchAgent (macOS) / systemd user service (Linux) starts at login and feeds the device. Check: `cd host && .venv/bin/python -m companion status`.
 Dev: `tools/dev.py flash|shot|perf` (see docs/TEAM.md, docs/PERF.md). Uninstall: `tools/uninstall.sh`.

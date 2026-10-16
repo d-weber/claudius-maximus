@@ -1,6 +1,7 @@
 // Settings tile: display (brightness, dim, timeouts), alerts, night mode, about.
 // Vertical scroll inside the tile; every control is >= 48 px tall. Changes apply live and are
 // persisted with a debounced settings_save_later().
+#include "../core/link.h"
 #include "screens.h"
 #include "../ui/theme.h"
 #include "../core/settings.h"
@@ -411,9 +412,9 @@ static void on_event(JsonObjectConst ev) {
     Settings &s = settings();
     uint8_t pwm = 0xEE;
     bool pwm_ok = WS_CH32_IO::readRegister(Wire, WS_CH32_IO::REG_PWM, &pwm);
-    Serial.printf("{\"t\":\"log\",\"msg\":\"ch32 pwm reg read ok=%d val=%u (expect %u)\"}\n", pwm_ok, pwm,
+    Link.printf("{\"t\":\"log\",\"msg\":\"ch32 pwm reg read ok=%d val=%u (expect %u)\"}\n", pwm_ok, pwm,
                   (unsigned)((100 - hal_get_brightness()) * 255 / 100));
-    Serial.printf("{\"t\":\"log\",\"msg\":\"settings bri=%u dim=%u dim_after=%u saver=%u wait=%d done=%d err=%d sub=%d "
+    Link.printf("{\"t\":\"log\",\"msg\":\"settings bri=%u dim=%u dim_after=%u saver=%u wait=%d done=%d err=%d sub=%d "
                   "night=%d %u-%u hw_bl=%u heap=%u largest=%u psram=%u\"}\n",
                   s.brightness, s.dim_brightness, s.dim_after_s, s.saver_after_s, s.alert_waiting, s.alert_done,
                   s.alert_errors, s.alert_subagents, s.night_mode, s.night_start_h, s.night_end_h, hal_get_brightness(),

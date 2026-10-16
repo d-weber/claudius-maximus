@@ -18,6 +18,7 @@
 // ring per frame, restoring from a pristine copy, and only 16 sector rects around the changed ring are redrawn.
 // Paused when the tile is hidden, when the detail overlay is open, or when the ambient night clock covers the screen.
 // Frame stats are logged every 10 s while visible: {"t":"log","msg":"orbit: ..."}.
+#include "../core/link.h"
 #include "screens.h"
 #include <math.h>
 #include "../ui/theme.h"
@@ -766,7 +767,7 @@ static void frame_cb(lv_timer_t *) {
         if (n < 380) b[n++] = ';';
       }
       b[n] = 0;
-      Serial.printf("{\"t\":\"log\",\"msg\":\"dz %d: %s\"}\n", dz_n, b);
+      Link.printf("{\"t\":\"log\",\"msg\":\"dz %d: %s\"}\n", dz_n, b);
     }
   }
 
@@ -835,7 +836,7 @@ static void frame_cb(lv_timer_t *) {
   pf_ticks++;
   if (now - pf_t0 >= 5000) {
     if (pf_t0 && pf_frames)
-      Serial.printf("{\"t\":\"log\",\"msg\":\"orbit[%x]: %.1f fps, render avg %u ms max %u ms, %u px/frame, "
+      Link.printf("{\"t\":\"log\",\"msg\":\"orbit[%x]: %.1f fps, render avg %u ms max %u ms, %u px/frame, "
                     "calc %u us (clawd %u pl %u fx %u) rings %u merges %u full %u period %u\"}\n", (unsigned)dbg_flags,
                     pf_frames * 1000.f / (now - pf_t0), (unsigned)(pf_render / pf_frames), (unsigned)pf_rmax,
                     (unsigned)(pf_px / pf_frames), (unsigned)(pf_ticks ? pf_calc_us / pf_ticks : 0),

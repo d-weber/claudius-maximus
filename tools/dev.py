@@ -12,7 +12,7 @@ it takes an exclusive lock (.devlock). Builds use a per-developer build dir so t
       --alert KIND              trigger alerts_demo(KIND) before the shot
       --seconds N               seconds of demo data to stream before the shot (default 4)
       --nodemo                  don't stream demo data
-  perf [--screen ID] [--seconds N] [--nodemo] [--detail]
+  perf [--screen ID] [--seconds N] [--nodemo] [--detail] [--cycle]
                                 measure fps / frame time / cpu% / heap on a screen (locked)
   demo [--seconds N]            stream demo data to the device (locked)
   send JSON                     send one raw JSON line (locked)
@@ -240,7 +240,19 @@ def cmd_perf(a) -> int:
             link.send({"t": "cmd", "open": "detail", "sid": demo.sessions[0]["id"]})
         time.sleep(0.5)
         read_perf(link)  # discard warm-up window, start fresh
-        if a.nodemo:
+        if a.cycle:
+            # page changes every 1.2 s (tileview slide animations = heaviest redraws), demo data streaming
+            order = ["home", "agents", "feed", "usage", "system", "orbit", "settings"]
+            t_end = time.time() + a.seconds
+            i = order.index(a.screen) if a.screen in order else 0
+            while time.time() < t_end:
+                i = (i + 1) % len(order)
+                link.send({"t": "cmd", "nav": order[i]})
+                if a.nodemo:
+                    time.sleep(1.2)
+                else:
+                    stream_demo(link, 1.2, demo)
+        elif a.nodemo:
             time.sleep(a.seconds)
         else:
             stream_demo(link, a.seconds, demo)
@@ -302,6 +314,7 @@ def main() -> int:
     pf.add_argument("--seconds", type=float, default=10)
     pf.add_argument("--nodemo", action="store_true")
     pf.add_argument("--compact", action="store_true")
+    pf.add_argument("--cycle", action="store_true", help="change page every 1.2 s during the window")
     pf.set_defaults(f=cmd_perf)
     d = sub.add_parser("demo")
     d.add_argument("--seconds", type=float, default=20)

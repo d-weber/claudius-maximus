@@ -9,8 +9,7 @@
 #include "core/perf.h"
 
 void setup() {
-  Serial.setRxBufferSize(32 * 1024);
-  Serial.begin(115200);
+  link_serial_init();
   model_init();
   hal_init();
   settings_load();
