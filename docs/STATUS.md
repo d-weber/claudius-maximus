@@ -34,13 +34,12 @@ sleep, -O2. Details, rejected experiments and the stability soak in docs/PERF.md
 To verify by eye/finger (not possible remotely): panel image has no shifted/flickering lines; touch works.
 
 ## Not finished / next steps
-1. perf-core render pipeline: done (see table above). docs/patches/perf-core-dualcore-WIP.patch is superseded
-   (its ISR-on-core-0 approach breaks USB screenshots) and can be deleted.
+1. perf-core render pipeline: done (see table above); the superseded dual-core WIP patch was removed.
 2. **perf-bench** was stopped before its final run; tools/bench.py exists (untested by the lead).
 3. Remaining spikes (loop max 110–230 ms) come from alert card/toast slide-ins and full card redraws on status change.
 4. Not yet verified on hardware by touch: tapping cards/planets, scrolling, swipe-to-close detail, settings sliders.
 5. Suggestion pending: host system.py could round cores to 2% / mem to 0.1 GB to skip more redraws.
-6. `iso-clawd/` in the repo root was not created by this team — left untracked.
+6. `iso-clawd/`: work-in-progress isometric Clawd animation prototypes (browser only, not firmware).
 
 ## Daily use
 The LaunchAgent daemon starts at login and feeds the device. Check: `cd host && .venv/bin/python -m companion status`.

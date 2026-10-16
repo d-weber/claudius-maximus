@@ -5,7 +5,7 @@ All numbers are rounded ints unless noted; strings are ASCII. Any key may be mis
 default). Typical payload ~1.2 KB.
 
     "system": {
-      "host": "Damiens MacBook Air",  # computer name (ASCII)
+      "host": "My MacBook Air",  # computer name (ASCII)
       "ncpu": 8,
       "cpu": 23,                      # total CPU %, 0-100
       "cores": [12, 40, 3, ...],      # per-core %, in kernel CPU order
