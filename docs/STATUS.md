@@ -41,6 +41,15 @@ To verify by eye/finger (not possible remotely): panel image has no shifted/flic
 5. Suggestion pending: host system.py could round cores to 2% / mem to 0.1 GB to skip more redraws.
 6. `iso-clawd/`: work-in-progress isometric Clawd animation prototypes (browser only, not firmware).
 
+## Linux support — 2026-10-16
+Host side runs on Linux as well as macOS: `companion/hostos.py` picks log/service paths per OS, `tools/install.sh`
+installs a systemd user unit (`host/systemd/`) instead of a LaunchAgent, `providers/system.py` uses psutil + PSI
++ sysfs where macOS used sysctl/Mach, `runtime_focus.py` has a Linux backend (KWin D-Bus / kdotool / xdotool /
+wmctrl). Optional udev rule in `tools/udev/` (ModemManager ignore + port access). `tools/dev.py` finds `pio` in
+the venv. Verified on Debian 13 / KDE Plasma 6 Wayland: flash, daemon as a service, hooks, focus, screenshots.
+Also fixed: a transcript found by a rescan was not read until the next 2 s rest cadence (headless sessions
+appeared late; `test_dead_pid_and_headless` was failing).
+
 ## Daily use
-The LaunchAgent daemon starts at login and feeds the device. Check: `cd host && .venv/bin/python -m companion status`.
+The LaunchAgent (macOS) / systemd user service (Linux) starts at login and feeds the device. Check: `cd host && .venv/bin/python -m companion status`.
 Dev: `tools/dev.py flash|shot|perf` (see docs/TEAM.md, docs/PERF.md). Uninstall: `tools/uninstall.sh`.

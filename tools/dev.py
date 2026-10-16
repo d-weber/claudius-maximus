@@ -116,9 +116,15 @@ def last_flash() -> dict:
         return {}
 
 
+def pio_bin() -> str:
+    """`pio` next to the running interpreter (host/.venv/bin/pio when installed there), else from PATH."""
+    cand = Path(sys.executable).parent / "pio"
+    return str(cand) if cand.exists() else "pio"
+
+
 def pio(*args: str) -> int:
     env = dict(os.environ, PLATFORMIO_BUILD_DIR=str(build_dir()))
-    return subprocess.call(["pio", "run", *args], cwd=FW, env=env)
+    return subprocess.call([pio_bin(), "run", *args], cwd=FW, env=env)
 
 
 def cmd_build(_a) -> int:

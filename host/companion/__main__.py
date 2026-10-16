@@ -7,7 +7,9 @@ import os
 import sys
 import time
 
-DEFAULT_LOG = os.path.expanduser("~/Library/Logs/claudius-maximus.log")
+from .hostos import log_path, service_installed, service_name
+
+DEFAULT_LOG = log_path()
 
 
 def setup_logging(verbose: bool, log_file: str | None):
@@ -73,18 +75,17 @@ def cmd_status(as_json: bool) -> int:
             sl = json.load(f)
     except (OSError, ValueError):
         pass
-    plist = os.path.expanduser("~/Library/LaunchAgents/com.claudius-maximus.daemon.plist")
     report = {
         "daemon_running": running, "daemon": st, "device_port": find_port(),
         "hooks_installed": hooks_installed, "statusline_installed": statusline_installed,
-        "launch_agent": os.path.exists(plist), "statusline_cache": sl, "root": str(ROOT),
+        "launch_agent": service_installed(), "service": service_name(), "statusline_cache": sl, "root": str(ROOT),
     }
     if as_json:
         print(json.dumps(report, indent=1))
         return 0 if running else 1
     yes = lambda b: "yes" if b else "no"  # noqa: E731
     print(f"daemon         : {'running (pid %s, up %s)' % (st.get('pid'), _ago(st.get('started')).replace(' ago', '')) if running else 'not running'}")
-    print(f"launch agent   : {yes(report['launch_agent'])}")
+    print(f"{service_name():15}: {yes(report['launch_agent'])}")
     print(f"device port    : {report['device_port'] or 'not found'}")
     if running:
         if st.get("connected"):
