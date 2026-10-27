@@ -93,6 +93,7 @@ Iso.player({
 
     const opts = Object.assign({ x: SPOT.clawd.x, y: SPOT.clawd.y, z: s.z }, s.pose);
     const a = Iso.drawClawd(ctx, opts);
+    Iso.prop.mug(ctx, SPOT.mug.x, SPOT.mug.y, { frame: i });   // the mug spot is in front of him
 
     // drool drip at the mouth corner
     if (s.drool && a.facePainter) {

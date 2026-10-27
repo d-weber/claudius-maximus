@@ -74,6 +74,32 @@ Reported: the image jumped sideways for a frame now and then, and swipes mostly 
 Residual: a frame whose DMA does not finish before the restart (`lcd_underruns`, logged as `999`) still shows up
 0-5 times per 30 s in some runs and 0 in others, with the CPU side unaffected; cause unknown, watch by eye.
 
+## Isometric home — 2026-10-16
+The home screen is the isometric desk (iso-clawd/ ported to C++: `firmware/src/screens/iso/`), full width at 3x
+(logical columns 40..199 of the 240 x 121 stage), the counters under it; the 2D face and the activity card are gone.
+`home_face.cpp` is the director: mood -> loop animation (sleep / idle / waiting / per tool: reading, writing,
+command, web, thinking, delegating, plan), reactions -> one-shots (hop, surprise, wink, giggle, happy, wince),
+mini helpers for subagents, the speech bubble as before. Rendering: logical canvas in PSRAM, diffed per frame,
+only the changed rows upscaled into a PSRAM image drawn by the face object (home demo: ~27 % CPU at 15 fps,
+no scan-out stalls). Settings > Clawd > "Mirror the desk" flips the scene (`home_mirror`).
+QA: `tools/iso_qa.py NN-name --frames a,b,c` forces the animation/frame on the device (`{"t":"cmd","anim":..}`),
+renders the JS page headless and diffs the logical pixels (01-idle: 0 differing pixels on 5 frames).
+iso_qa holds the ambient dimming / night screensaver off while it drives the panel (`dev_ambient` event) and
+prints the diff bounding box per frame, so a face-only mismatch is easy to tell from a layout one.
+Dev: `tools/dev.py show mock.png` displays a PNG on the panel (`{"t":"cmd","img":N}` + raw RGB565).
+Pacing: each loop carries a calm segment (anim.h `calmFrom/calmTo`); the director plays a full pass, then rests in
+the segment for a random 4-12 s (70 %) before the next pass, so gags come at irregular, longer intervals.
+perf reports `home: {anim, frame, mode, noblink}`. 17-delegating has no segment (periodic choreography).
+Blinks while resting are rolled per calm pass (~1 per 3.5 s) instead of once per 1 s loop (`iso::blinkSuppressed`).
+The mug has one home, `SPOT.mug` (150, 90) front-right, in all 17 animations (JS and C++); idle's sniff gag leans
+right, delegating's rookie veers off the lane into it, reviewing's magnifier and web-search's globe moved aside.
+Mouths: redrawn as sheared sprites that follow the face plane (like the eyes and blush), slightly bigger, with a
+narrow tall "o" so the shear does not smear it; changed in lib/iso.js first, then iso.cpp (QA: 0 diffs on 22 frames).
+Adversarial review (fresh agent): no blockers; fixed `link_send()` still writing to the UART (Focus action never
+reached the host since the USB driver switch), torn JSON lines on a slow host (now terminated so the host resyncs on
+one bad line), QA/show tools always releasing the device, QA mirror as a non-persisted override, dead code from the 2D
+face. Not done: a 9 px overlap of the counters row over the (empty) bottom rows of the scene.
+
 ## Daily use
 The LaunchAgent (macOS) / systemd user service (Linux) starts at login and feeds the device. Check: `cd host && .venv/bin/python -m companion status`.
 Dev: `tools/dev.py flash|shot|perf` (see docs/TEAM.md, docs/PERF.md). Uninstall: `tools/uninstall.sh`.

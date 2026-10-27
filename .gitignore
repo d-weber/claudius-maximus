@@ -6,3 +6,4 @@ backup/*.bin
 *.png
 !docs/**/*.png
 .devwant.*
+mocks/

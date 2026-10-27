@@ -1,0 +1,53 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Room sheet</title>
+<script src="../lib/iso.js"></script>
+<script src="../lib/room.js"></script>
+<script src="../lib/room/layout.js"></script>
+<script src="../lib/room/light.js"></script>
+<script src="../lib/room/walls.js"></script>
+<script src="../lib/room/window.js"></script>
+<script src="../lib/room/shelf.js"></script>
+<script src="../lib/room/desk.js"></script>
+<script src="../lib/room/lamp.js"></script>
+<script src="../lib/room/monitor.js"></script>
+<script src="../lib/room/clawd.js"></script>
+<script src="../lib/room/chair.js"></script>
+</head>
+<body>
+<script>
+// Reference: the square office with the desk set, Clawd at rest, through the five lights (160x160 logical at 3x).
+// ?light=morning|day|sunset|dusk|night  ?t=HH  ?room=office|brick|bare  ?chrome=1
+const { C } = Iso;
+const P = Room.params();
+const SQ = P.q.has('sq') ? parseInt(P.q.get('sq'), 10) : Room.SEAT_SQUASH;   // the seated body is taller than the stock sprite
+const RP = Room.P;
+
+Room.player({
+  name: '00-room-sheet',
+  fps: 10,
+  frames: 40,
+  loop: true,
+  notes: 'Static room reference, framed like mocks/r_final. Lights: <code>?light=morning|day|sunset|dusk|night</code> (default: by the ' +
+    'clock, <code>?t=HH</code>). Rooms: <code>?room=office|brick|bare</code>. <code>?chrome=1</code> shows where the LVGL bar and counter strip sit.',
+  draw(ctx, i) {
+    const L = Room.draw(ctx, P.room, P.light);
+    Room.chair(ctx);
+    // Clawd sits on his chair behind the desk (drawn after him)
+    const o = { x: RP.clawd.x, y: RP.clawd.y, facing: 'left', legs: (i >> 3) & 1 ? 'dangleB' : 'dangle', z: Room.SEAT_Z, eyes: { shape: i % 40 === 17 ? 'blink' : 'open' }, mouth: 'smile', blush: true, squash: SQ + ((i >> 2) & 1 ? 0 : 1) };
+    const a = Room.clawd(ctx, o);
+    Room.deskBack(ctx, L, { monitor: 'code', frame: i >> 2 });
+    // the helper at the desk's right end: dozing at dusk/night, awake otherwise
+    const ho = { x: RP.helperR.x, y: RP.helperR.y, size: 'mini', tint: 'violet', facing: 'left', shadow: C.woodShadow };
+    if (L.screen && L.screen.str > 0.5) {
+      const h = Room.clawd(ctx, Object.assign(ho, { eyes: 'closed', legs: 'sit' }));
+      Iso.fx.zee(ctx, h.head.x + 6, h.head.y - 4 - ((i >> 2) & 3), 1, C.violetLight);
+    } else Room.clawd(ctx, Object.assign(ho, { eyes: 'open', legs: (i >> 2) & 1 ? 'stand' : 'tap' }));
+    Room.deskFront(ctx, i, { mug: false });
+  },
+});
+</script>
+</body>
+</html>

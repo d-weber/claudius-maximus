@@ -15,7 +15,7 @@ const MON = { x: 76, y: 56 };            // monitor, screen faces down-right (to
 const CL = { x: 128, y: 77 };            // Clawd's feet (nudged right to free the printout spot)
 const PAPER = { x: 100, y: 79 };         // printed diff, flat on the desk, front-left of Clawd
 const STAMP_REST = { x: 122, y: 98 };    // the LGTM stamp waits here
-const MAG_REST = { x: 164, y: 90 };      // where the magnifier lands when he tosses it over his shoulder
+const MAG_REST = { x: 170, y: 86 };      // where the magnifier lands when he tosses it over his shoulder
 const STAMP_H = 16;                      // base 4 + handle 8 + knob 4
 
 // ---------------------------------------------------------------- timeline (10 fps, 40 frames)
@@ -135,6 +135,7 @@ Iso.player({
   draw(ctx, i) {
     const ph = phaseAt(i), k = i - startOf(ph);
     Iso.drawDesk(ctx);
+    Iso.prop.mug(ctx, Iso.SPOT.mug.x, Iso.SPOT.mug.y, { frame: i });
 
     // ---- monitor
     const scanning = ph === 'scanA' || ph === 'scanB';

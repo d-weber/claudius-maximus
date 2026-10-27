@@ -64,7 +64,7 @@ Iso.player({
     'wink, smile, blush, and a <b>"ting!"</b> star glint off his open eye. He blows the imaginary smoke off the finger, blinks and settles.',
   draw(ctx, i) {
     Iso.drawDesk(ctx);
-    Iso.prop.mug(ctx, SPOT.left.x - 8, SPOT.left.y - 6, { frame: i });
+    Iso.prop.mug(ctx, SPOT.mug.x, SPOT.mug.y, { frame: i });
 
     const name = Iso.seq(TL, i);
     const p = POSE[name];

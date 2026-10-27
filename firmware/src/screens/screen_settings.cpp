@@ -349,6 +349,10 @@ static void create(lv_obj_t *p) {
   saver_bm = seg_row(g, "Screensaver after", SAVER_MAP, nearest(SAVER_AFTER, s.saver_after_s));
   lv_obj_add_event_cb(saver_bm, seg_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+  // CLAWD
+  g = section("CLAWD");
+  switch_row(g, "Mirror the desk", "Flip the home scene left / right", &s.home_mirror);
+
   // ALERTS
   g = section("ALERTS");
   sw_wait = switch_row(g, "Needs you", "Card + glowing edges", &s.alert_waiting);

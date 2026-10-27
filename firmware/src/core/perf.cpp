@@ -3,6 +3,7 @@
 #include <esp_heap_caps.h>
 #include "../ui/ui.h"
 #include "hal.h"
+#include "../screens/home_face.h"
 
 static const char *NAMES[PERF__N] = {"link", "tick", "lvgl", "flush", "parse"};
 volatile uint8_t perf_phase;
@@ -96,6 +97,9 @@ void perf_report() {
   o += ",\"vs_late_max\":" + String(lmax) + ",\"vs_n10\":" + String(v10) + ",\"vs_n30\":" + String(v30)
        + ",\"lcd_log\":" + String(al);
   frames0 = frames; under0 = under;
+  char hs[160];
+  home_face_status(hs, sizeof hs);
+  o += ",\"home\":" + String(hs);
 #if LV_MEM_CUSTOM == 0
   lv_mem_monitor_t mm;
   lv_mem_monitor(&mm);

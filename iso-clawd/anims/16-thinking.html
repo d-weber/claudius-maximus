@@ -129,7 +129,6 @@ Iso.player({
   draw(ctx, i) {
     const f = FR[i % N];
     Iso.drawDesk(ctx);
-    Iso.prop.mug(ctx, SPOT.backLeft.x - 4, SPOT.backLeft.y + 2, { frame: i, steam: true });
     Iso.prop.notepad(ctx, SPOT.right.x + 8, SPOT.right.y - 2, { lines: 3 });
 
     const chin = !!f.chin;
@@ -138,6 +137,7 @@ Iso.player({
       x: f.pos.x, y: f.pos.y, z: f.bob || 0, facing: f.facing, eyes: f.eyes, arms, legs: f.legs,
       squash: f.squash || 0, mouth: f.mouth || 'none',
     });
+    Iso.prop.mug(ctx, SPOT.mug.x, SPOT.mug.y, { frame: i, steam: true });   // the mug spot is in front of him
     if (chin) chinHand(ctx, a.facePainter, f.facing);
 
     Iso.prop.pencil(ctx, SPOT.frontLeft.x - 6, SPOT.frontLeft.y + 4, { dir: 'x' });

@@ -1,3 +1,4 @@
 # Claudius Maximus host daemon (install into host/.venv: host/.venv/bin/pip install -r host/requirements.txt)
 pyserial>=3.5
 psutil>=5.9   # host system metrics (providers/system.py)
+pillow>=10     # dev only: tools/dev.py show (PNG mock-ups on the device)

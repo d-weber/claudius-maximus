@@ -96,7 +96,7 @@ const player = Iso.player({
     // 1) scene, back to front
     Iso.drawDesk(ctx, V.desk);
     Iso.prop.lamp(ctx, SPOT.left.x - 6, SPOT.left.y - 2, { facing: 'right', on: V.lamp });
-    Iso.prop.mug(ctx, SPOT.backRight.x + 6, SPOT.backRight.y, { frame: i >> 1, steam: V.steam });
+    Iso.prop.mug(ctx, SPOT.mug.x, SPOT.mug.y, { frame: i >> 1, steam: V.steam });
 
     // 2) Clawd, sitting nap
     const a = Iso.drawClawd(ctx, {
@@ -119,7 +119,7 @@ const player = Iso.player({
     else Iso.prop.sticky(ctx, nx, ny, { color: V.sticky, plane: 'top' });
 
     // 3) front props
-    Iso.prop.paper(ctx, SPOT.frontRight.x + 4, SPOT.frontRight.y - 2, { lines: 3 });
+    Iso.prop.paper(ctx, SPOT.frontLeft.x - 4, SPOT.frontLeft.y, { lines: 3 });
 
     // 4) FX: snore bubble at the mouth (face looks down-left, so the bubble hangs left of the mouth)
     const bx = a.mouth.x - 3, by = a.mouth.y + 2;

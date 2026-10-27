@@ -17,6 +17,8 @@ it takes an exclusive lock (.devlock). Builds use a per-developer build dir so t
   demo [--seconds N]            stream demo data to the device (locked)
   send JSON                     send one raw JSON line (locked)
   monitor [--seconds N]         print device output (locked)
+  show IMG.png [...] [--seconds N] [--interval S] [--keep]
+                                show PNG mock-ups full screen on the device (locked; needs pillow)
 
 Exit code != 0 on failure. Don't hold the device more than ~60 s at a time.
 """
@@ -282,6 +284,49 @@ def cmd_send(a) -> int:
     return 0
 
 
+def png_to_rgb565(path: Path) -> bytes:
+    """480x480 RGB565 little-endian (LVGL native, LV_COLOR_16_SWAP 0); other sizes are centred on the bg colour."""
+    from PIL import Image
+    im = Image.open(path).convert("RGB")
+    if im.size != (480, 480):
+        bg = Image.new("RGB", (480, 480), (0x1A, 0x19, 0x18))
+        im.thumbnail((480, 480))
+        bg.paste(im, ((480 - im.width) // 2, (480 - im.height) // 2))
+        im = bg
+    return im.tobytes("raw", "BGR;16")   # Pillow's name for RGB565 little-endian
+
+
+def cmd_show(a) -> int:
+    """Show PNG mock-ups full screen on the device (slideshow when several), then clear."""
+    frames = [png_to_rgb565(Path(p)) for p in a.images]
+    with device_lock("show"):
+        link = open_link()
+        try:
+            show_loop(a, frames, link)
+        finally:
+            if not a.keep:
+                link.send({"t": "cmd", "img": 0})
+            link.close()
+    return 0
+
+
+def show_loop(a, frames, link) -> None:
+    if True:
+        t_end = time.time() + a.seconds
+        i = 0
+        while True:
+            link.send({"t": "cmd", "img": len(frames[i % len(frames)])})
+            link.ser.write(frames[i % len(frames)])
+            link.ser.flush()
+            i += 1
+            if time.time() >= t_end:
+                break
+            time.sleep(a.interval if len(frames) > 1 else min(1.0, max(0.0, t_end - time.time())))
+            if len(frames) == 1 and time.time() < t_end:
+                time.sleep(max(0.0, t_end - time.time()))
+                break
+
+
 def cmd_monitor(a) -> int:
     with device_lock("monitor"):
         link = open_link()
@@ -316,6 +361,12 @@ def main() -> int:
     pf.add_argument("--compact", action="store_true")
     pf.add_argument("--cycle", action="store_true", help="change page every 1.2 s during the window")
     pf.set_defaults(f=cmd_perf)
+    sh = sub.add_parser("show")
+    sh.add_argument("images", nargs="+", help="PNG files (480x480; others are centred)")
+    sh.add_argument("--seconds", type=float, default=20)
+    sh.add_argument("--interval", type=float, default=0.5, help="slideshow period when several images")
+    sh.add_argument("--keep", action="store_true", help="leave the last picture on screen")
+    sh.set_defaults(f=cmd_show)
     d = sub.add_parser("demo")
     d.add_argument("--seconds", type=float, default=20)
     d.set_defaults(f=cmd_demo)

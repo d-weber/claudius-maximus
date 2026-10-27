@@ -80,7 +80,7 @@ Iso.player({
     Iso.drawDesk(ctx);
     // amber-headed notepad on the desk: the pending question
     Iso.prop.notepad(ctx, SPOT.backRight.x + 8, SPOT.backRight.y + 2, { lines: 2 });
-    Iso.prop.mug(ctx, 66, 72, { frame: i, steam: true });
+    Iso.prop.mug(ctx, SPOT.mug.x, SPOT.mug.y, { frame: i, steam: true });
 
     const a = Iso.drawClawd(ctx, {
       x: SPOT.clawd.x, y: SPOT.clawd.y, z: p.z || 0,

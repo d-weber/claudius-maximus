@@ -143,7 +143,7 @@ Iso.player({
     const pressed = ph === 'slam' || ph === 'recoil';
     button(ctx, pressed);
     const a = Iso.drawClawd(ctx, pose(i, ph));
-    Iso.prop.mug(ctx, SPOT.frontLeft.x - 4, SPOT.frontLeft.y, { frame: i });
+    Iso.prop.mug(ctx, SPOT.mug.x, SPOT.mug.y, { frame: i });
 
     // FX
     if (ph === 'windHi') {

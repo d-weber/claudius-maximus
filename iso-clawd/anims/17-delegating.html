@@ -17,10 +17,11 @@ const BOSS = { x: 138, y: 62 };                 // Clawd, the foreman (back-righ
 const S = { x: 62, y: 68 };                     // spawn point (left wing)
 const lane = (t) => ({ x: S.x + 2 * t, y: S.y + t });   // long down-right lane across the front, minis face right
 const END_T = 24;                               // normal hand-off spot
-const BONK_T = 29;                              // where the rookie hits the mug
-const RECOIL_T = 25;                            // where it lands on its bottom
 const TRAY = { x: 138, y: 80 };                 // outbox, behind the lane (no-look toss over the head)
-const MUG = lane(33);                           // mug on the lane's continuation
+const MUG = Iso.SPOT.mug;                       // the mug on its spot (front-right); the rookie veers off the lane into it
+const BONK = { x: MUG.x - 9, y: MUG.y + 1 };    // where the rookie hits the mug (in front of the tray)
+const RECOIL = { x: MUG.x - 29, y: MUG.y + 1 }; // where it lands on its bottom (bounced back toward the lane)
+const SPRINT = [lane(6), lane(13), { x: 106, y: 85 }, { x: 124, y: 88 }];   // sprint: down the lane, then straight at the mug
 
 // tiny sheet of paper carried over the head / flying
 const PAPER = ['..pppppp', '.pkkkkpp', 'pkkkpps.', 'pppppss.'];
@@ -32,8 +33,8 @@ const drawPaper = (ctx, x, y) => Iso.sprite(ctx, x - 4, y - 2, PAPER, { p: C.pap
 const ARC = [{ u: 0.25, h: 8 }, { u: 0.6, h: 9 }, { u: 0.9, h: 4 }];   // toss arc samples (u along, h up)
 
 const TOSS = [0, 1, 2, 3, 4, 4, 5, 6, 7, 8];     // toss phase keys with holds (10 frames)
-function tossState(t, j, extra) {      // no-look toss over the head into the outbox, hop, poof
-  const k = TOSS[j], p = lane(t);
+function tossState(p, j, extra) {      // no-look toss over the head into the outbox, hop, poof (from point p)
+  const k = TOSS[j];
   if (k == null) return null;
   const st = Object.assign({ x: p.x, y: p.y, facing: 'right', legs: 'stand', paper: null, from: p }, extra);
   if (k === 0) return Object.assign(st, { squash: 2, arms: 'up', eyes: { shape: 'open', gazeY: -1 }, paper: { dy: 2 } });
@@ -62,26 +63,26 @@ function normalMini(f) {
     return { x: p.x, y: p.y, facing: 'right', legs: n % 2 ? 'stepA' : 'stepB', arms: 'up',
              eyes: { shape: 'open', gazeX: 1 }, paper: { dy: n % 2 ? -1 : 0 } };
   }
-  return tossState(END_T, f - WALK0 - WALK_N, {});
+  return tossState(lane(END_T), f - WALK0 - WALK_N, {});
 }
 
 function gagMini(f) {                 // the eager rookie: sprints past the hand-off and bonks the mug
   if (f < WALK0) return spawnState(f, true);
-  if (f < 8) {                        // sprint t = 6, 13, 20, 26
-    const t = [6, 13, 20, 26][f - 4], p = lane(t);
+  if (f < 8) {                        // sprint along SPRINT
+    const p = SPRINT[f - 4];
     return { x: p.x, y: p.y, facing: 'right', legs: f % 2 ? 'stepA' : 'stepB', arms: 'up', squash: -3,
              eyes: { shape: 'open', gazeX: 1, gazeY: 1 }, paper: { dx: -2, dy: -1 }, ticks: true };
   }
-  const B = lane(BONK_T), R = lane(RECOIL_T);
+  const B = BONK, R = RECOIL;
   const st = { x: R.x, y: R.y, facing: 'right', legs: 'stand' };
   if (f === 8) return Object.assign(st, { x: B.x, y: B.y, squash: 3, shake: 1, eyes: 'wince', mouth: 'o', arms: 'up', paper: { dy: -8 }, bonk: true });
-  if (f === 9) return Object.assign(st, { x: lane(RECOIL_T + 2).x, y: lane(RECOIL_T + 2).y, z: 5, squash: -3, eyes: 'wince', mouth: 'o', arms: 'high', paper: { dy: -14 }, bonk: true });
+  if (f === 9) return Object.assign(st, { x: R.x + 8, y: R.y, z: 5, squash: -3, eyes: 'wince', mouth: 'o', arms: 'high', paper: { dy: -14 }, bonk: true });
   if (f === 10) return Object.assign(st, { legs: 'sit', eyes: 'wince', mouth: 'o', arms: 'up', paper: { dy: -10 } });
   if (f <= 12) return Object.assign(st, { legs: 'sit', eyes: 'closed', arms: 'out', paper: { dy: f === 11 ? -4 : 0 }, stars: true });
   if (f === 13) return Object.assign(st, { legs: 'sit', eyes: { shape: 'open', gazeX: -1, gazeY: -2 }, arms: 'out', paper: {}, question: true });
   if (f === 14) return Object.assign(st, { squash: -3, eyes: { shape: 'wide', gazeX: -1, gazeY: -2 }, arms: 'up', paper: {}, sweat: true });
   if (f <= 17) return Object.assign(st, { eyes: 'happy', arms: { l: 'out', r: 'high' }, paper: {}, salute: true, blush: f >= 16 });
-  return tossState(RECOIL_T, f - 18, { sweat: true });   // sheepish toss from where it stands
+  return tossState(RECOIL, f - 18, { sweat: true });   // sheepish toss from where it stands
 }
 
 function minisAt(i) {

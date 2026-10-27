@@ -168,9 +168,10 @@
       // unsheared sprite anchored at texel (u, v): handy for symbols that must read upright
       sprite(u, v, rowsArr, map, flipX) { return Iso.sprite(ctx, X0 + u, yAt(u) + v, rowsArr, map, flipX); },
       // sheared sprite: each sprite column follows the slope
-      spriteSheared(u, v, rowsArr, map) {
+      // flipX mirrors the bitmap (with a mirrored slope this gives the mirror image of the glyph).
+      spriteSheared(u, v, rowsArr, map, flipX) {
         for (let j = 0; j < rowsArr.length; j++) for (let i = 0; i < rowsArr[j].length; i++) {
-          const col = map[rowsArr[j][i]];
+          const w = rowsArr[j].length, col = map[rowsArr[j][flipX ? w - 1 - i : i]];
           if (col) rect(ctx, X0 + u + i, yAt(u + i) + v + j, 1, 1, col);
         }
       },
@@ -285,27 +286,68 @@
   // Size specs. FW = face width (units, 2px each), D = depth (units), H = body height px.
   const SPEC = {
     full: { FW: 16, D: 6, H: 28, legH: 6, legW: 2, legD: 2, legX: [1, 4, 10, 13],
-            eyeW: 6, eyeH: 12, eyeL: -12, eyeR: 6, eyeV: 5, armL: 4, armD: 2 },
+            eyeW: 6, eyeH: 9, eyeL: -10, eyeR: 4, eyeV: 8, armL: 4, armD: 2 },
     mini: { FW: 8, D: 3, H: 12, legH: 3, legW: 1, legD: 1, legX: [1, 2, 5, 6],
-            eyeW: 2, eyeH: 5, eyeL: -6, eyeR: 4, eyeV: 3, armL: 2, armD: 1 },
+            eyeW: 2, eyeH: 4, eyeL: -6, eyeR: 4, eyeV: 3, armL: 2, armD: 1 },
   };
+  SPEC.tall = Object.assign({}, SPEC.full, { H: 34 });   // seated Clawd of the room pages: as wide as 'full', 34 px tall (measured on the reference)
   Iso.CLAWD_SPEC = SPEC;
 
-  const EYE_SPR = {
-    happy: ['...####...', '..######..', '.###..###.', '###....###', '##......##'],
-    winceL: ['##.....', '####...', '..####.', '....###', '..####.', '####...', '##.....'],
-    winceR: ['.....##', '...####', '.####..', '###....', '.####..', '...####', '.....##'],
-    miniHappy: ['.##.', '#..#'],
+  // Face glyphs. Everything on the face is SHEARED (each sprite column follows the face slope), so the
+  // features lie on the face plane. Design in face texel space and align to even columns: the 2:1 slope
+  // steps every 2 columns, so keep stroke segments 2 columns wide and start every sprite on an even
+  // column (eye glyphs: width 2, 6 or 10 around the eye; mouths: width a multiple of 4 around cx),
+  // else the steps leave lone pixels and uneven arms. Glyphs were drawn as they should LOOK on a
+  // left-facing Clawd and converted to texels (row shift = column >> 1); facing right mirrors them.
+  // Entry: {spr, dv, sprR?, dvR?}. spr is centred on an anchor column uc (sprite column w >> 1 lands
+  // on uc), dv rows below the anchor row. sprR/dvR = variant for the screen-right eye (e.g. '<').
+  // Colours: '#' eye colour, 'r' tongue C.red, 'w' catch-light C.text (eye colour when shine is off),
+  // 'b' blush. Eye anchor: uc = eye left column + (eyeW >> 1), row = eye top (ev + gaze).
+  const EYE_BODY = ['..####', '##ww##', '##ww##', '######', '######', '######', '######', '######', '####..'];
+  const EYE_WIDE = EYE_BODY.slice(0, 3).concat(['######', '######', '######'], EYE_BODY.slice(3));
+  const EYES = {
+    full: {
+      open:   { spr: EYE_BODY, dv: 0, shine: false },
+      wide:   { spr: EYE_WIDE, dv: -2, shine: true },
+      blink:  { spr: ['######', '######'], dv: 5 },
+      closed: { spr: ['........##', '........##', '......##..', '########..', '######....'], dv: 1 },
+      happy:  { spr: ['......##..', '....######', '..########', '..##......', '##........', '##........', '##........'], dv: 1 },
+      wince:  { spr: ['##....', '####..', '..####', '....##', '..##..', '..##..', '##....', '##....'], dv: 1,
+                sprR: ['....##', '....##', '..##..', '..##..', '##....', '####..', '..####', '....##'], dvR: -1 },
+    },
+    mini: {
+      open:   { spr: ['##', '##', '##', '##'], dv: 0 },
+      wide:   { spr: ['##', '##', '##', '##', '##'], dv: -1 },
+      blink:  { spr: ['##'], dv: 2 },
+      closed: { spr: ['....##', '####..'], dv: 1 },
+      happy:  { spr: ['..##..', '....##', '##....'], dv: 0 },
+      wince:  { spr: ['######'], dv: 1 },
+    },
   };
-  const MOUTH_SPR = {
-    o: ['.##.', '####', '####', '.##.'],
-    o_small: ['##', '##'],
-    laugh: ['######', '######', '.####.', '..##..'],
-    smile: ['#......#', '##....##', '.######.'],
-    wobbly: ['.##...##..', '##.###.##.', '.....#..##'],
-    flat: ['####'],
+  // Mouths: anchor uc = face centre column cx, row = mv (2 rows under the eyes, clamped above the legs).
+  const MOUTHS = {
+    full: {
+      o:       { spr: ['..####..', '########', '########', '########', '..####..'], dv: -1 },
+      o_small: { spr: ['####', '####', '####', '####'], dv: 0 },
+      laugh:   { spr: ['############', '############', '####rrrr####', '..##rrrrrr..', '....rrrr....'], dv: -1 },
+      // compact variants used at squash >= 4 (the big ones would touch the eyes)
+      laugh_sq: { spr: ['########', '########', '####rr##', '..rrrr..', '..####..'], dv: 0 },
+      o_sq:    { spr: ['####', '####', '####', '####'], dv: 0 },
+      smile:   { spr: ['#......#', '#......#', '.#....#.', '.#####..'], dv: -1 },        // thin U on the face plane
+      wobbly:  { spr: ['..........#.', '.........#.#', '..#.....#...', '.#.##.......', '#....###....'], dv: 0 }, // tilted ~ wave
+      flat:    { spr: ['########'], dv: 0 },
+    },
+    mini: {
+      o:       { spr: ['####', '####'], dv: 0 },
+      o_small: { spr: ['####'], dv: 0 },
+      laugh:   { spr: ['####', 'rrrr'], dv: 0 },
+      smile:   { spr: ['...#', '###.'], dv: 0 },
+      wobbly:  { spr: ['####'], dv: 0 },
+      flat:    { spr: ['####'], dv: 0 },
+    },
   };
-  const MOUTH_FILL = { laugh: ['......', '..##..', '......', '......'] }; // tongue pixels
+  // Blush: a soft cheek patch along the slope, centred du columns either side of cx, one row under the eyes.
+  const BLUSH = { full: { spr: ['bbbbbb', 'bbbbbb'], du: 11 }, mini: { spr: ['bb'], du: 7 } };
 
   function resolveTint(t) {
     if (!t) return SH.orange;
@@ -361,7 +403,7 @@
   // See README for every option.
   Iso.drawClawd = function (ctx, o) {
     o = o || {};
-    const S = SPEC[o.size === 'mini' ? 'mini' : 'full'];
+    const S = SPEC[o.size] || SPEC.full;
     const mini = S === SPEC.mini;
     const pal = resolveTint(o.tint);
     const facing = o.facing === 'right' ? 'right' : 'left';
@@ -446,49 +488,30 @@
       if (eyes.shape === 'wink') return side < 0 ? 'open' : 'happy';
       return eyes.shape;
     };
-    function eye(side) {
-      const e = eyeAt(side), sh = shapeFor(side), W = S.eyeW, Hh = S.eyeH;
-      if (mini) {
-        switch (sh) {
-          case 'blink': F.rect(e.u, e.v + Hh - 2, W, 1, ec); break;
-          case 'closed': case 'wince': F.rect(e.u - 1, e.v + 3, W + 2, 1, ec); break;
-          case 'happy': F.sprite(e.u - 1, e.v + 2, EYE_SPR.miniHappy, { '#': ec }); break;
-          case 'wide': F.rect(e.u, e.v - 1, W, Hh + 1, ec); break;
-          default: F.rect(e.u, e.v, W, Hh, ec);
-        }
-        return;
-      }
-      switch (sh) {
-        case 'blink': F.rect(e.u, e.v + (Hh >> 1), W, 2, ec); break;
-        case 'closed': F.rect(e.u - 1, e.v + (Hh >> 1), W + 2, 2, ec); break;
-        case 'happy': F.sprite(e.u - 2, e.v + ((Hh - 4) >> 1), EYE_SPR.happy, { '#': ec }); break;
-        case 'wince': F.sprite(side < 0 ? e.u : e.u - 1, e.v + ((Hh - 6) >> 1), side < 0 ? EYE_SPR.winceL : EYE_SPR.winceR, { '#': ec }); break;
-        case 'wide':
-          F.rect(e.u, e.v - 2, W, Hh + 3, ec);
-          if (o.shine !== false) { F.px(e.u + 1, e.v - 1, C.text); F.px(e.u + 1, e.v, C.text); }
-          break;
-        case 'open': default:
-          F.rect(e.u, e.v, W, Hh, ec);
-          if (o.shine) F.px(e.u + 1, e.v + 1, C.text);
-      }
+    const FS = mini ? 'mini' : 'full';
+    const bc = o.blushColor || SH.red.top; // C.blush is too close to the top-face highlight
+    // draw one face glyph centred on column uc, row v (mirrored when facing right)
+    function glyph(spr, dv, uc, v, shine) {
+      const map = { '#': ec, r: C.red, w: shine ? C.text : ec, b: bc };
+      F.spriteSheared(uc - (spr[0].length >> 1), v + (dv || 0), spr, map, flip);
     }
-    eye(-1); eye(+1);
+    for (const side of [-1, 1]) {
+      const g = EYES[FS][shapeFor(side)] || EYES[FS].open, e = eyeAt(side);
+      // facing right mirrors the face, so the screen-right eye takes the left-eye variant and vice versa
+      const useR = g.sprR && (side > 0) !== flip;
+      glyph(useR ? g.sprR : g.spr, useR ? g.dvR : g.dv, e.u + (S.eyeW >> 1), e.v, o.shine == null ? g.shine : !!o.shine);
+    }
     if (o.blush) {
-      const bc = o.blushColor || C.blush;
-      if (mini) { F.rect(cx + S.eyeL - 2, ev + S.eyeH, 2, 1, bc); F.rect(cx + S.eyeR + S.eyeW, ev + S.eyeH, 2, 1, bc); }
-      else { F.rect(cx + S.eyeL - 3, ev + S.eyeH + 1, 4, 2, bc); F.rect(cx + S.eyeR + S.eyeW - 1, ev + S.eyeH + 1, 4, 2, bc); }
+      const B = BLUSH[FS], bv = ev + S.eyeH + 1;
+      glyph(B.spr, 0, cx - B.du, bv, false);
+      glyph(B.spr, 0, cx + B.du, bv, false);
     }
-    let mouthPt = null;
-    if (mouth !== 'none' && !mini) {
-      const spr = MOUTH_SPR[mouth] || MOUTH_SPR.o;
-      const mw = spr[0].length, mv = ev + S.eyeH + 1;
-      const mu = cx - (mw >> 1);
-      F.sprite(mu, mv, spr, { '#': ec });
-      if (MOUTH_FILL[mouth]) F.sprite(mu, mv, MOUTH_FILL[mouth], { '#': C.red });
-      mouthPt = F.at(mu + (mw >> 1), mv);
-    } else if (mouth !== 'none' && mini) {
-      F.rect(cx - 1, ev + S.eyeH + 1, 2, mouth === 'o' || mouth === 'laugh' ? 2 : 1, ec);
-    }
+    // the mouth follows the gaze (whole face looks one way); unknown names (and 'none') draw nothing.
+    // Squashed (>= 4), use the compact '<name>_sq' variant when there is one.
+    const mg = (squash >= 4 && MOUTHS[FS][mouth + '_sq']) || MOUTHS[FS][mouth];
+    const mBase = ev + S.eyeH + (mini ? 1 : 2) + gy;
+    const mv = mg ? Math.min(mBase, H - mg.spr.length - 2) : mBase;
+    if (mg) glyph(mg.spr, mg.dv, cx + gx, mv, false);
 
     if (backG.front) drawArm(backG);
     drawArm(frontG);
@@ -502,7 +525,7 @@
       top: head,                                                         // centre of the top face
       face: F.at(cx, Math.floor(H / 2)),
       eyes: { l: F.at(eyeAt(-1).u + (S.eyeW >> 1), eyeAt(-1).v), r: F.at(eyeAt(1).u + (S.eyeW >> 1), eyeAt(1).v) },
-      mouth: mouthPt || F.at(cx, ev + S.eyeH + 1),
+      mouth: F.at(cx + gx, mv),
       feet: { x, y },
       bbox: { x: body.x - 2 * S.armL - 2, y: body.y - 2, w: body.w + 4 * S.armL + 4, h: body.h + S.legH + 4 },
       facePainter: F,
@@ -530,6 +553,7 @@
       frontLeft: { x: 100, y: 88 },  // in front-left  -> draw AFTER Clawd
       frontRight: { x: 148, y: 92 }, // in front-right -> draw AFTER Clawd
       front: { x: 128, y: 100 },     // front corner area -> draw AFTER Clawd
+      mug: { x: 150, y: 90 },        // THE mug spot, front-right: every animation keeps the mug here
     });
   }
   computeSpots();

@@ -13,7 +13,7 @@ const { C, SPOT } = Iso;
 const CL = { x: 128, y: 72 };        // Clawd feet (sitting, nudged back-right to make room)
 const BK = { x: 102, y: 85 };         // open book, front-left of Clawd (he faces down-left onto it)
 const LAMP = { x: 70, y: 74 };       // reading lamp, back-left
-const MUG = { x: 170, y: 82 };       // cocoa, right of Clawd
+const MUG = SPOT.mug;                // cocoa, on the mug spot
 
 // ---------------------------------------------------------------- helpers (page-local)
 // Integer scanline fill of a convex polygon [{x,y}...].

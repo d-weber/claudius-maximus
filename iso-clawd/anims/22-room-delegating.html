@@ -1,0 +1,192 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>22 Room delegating</title>
+<script src="../lib/iso.js"></script>
+<script src="../lib/room.js"></script>
+<script src="../lib/room/layout.js"></script>
+<script src="../lib/room/light.js"></script>
+<script src="../lib/room/walls.js"></script>
+<script src="../lib/room/window.js"></script>
+<script src="../lib/room/shelf.js"></script>
+<script src="../lib/room/desk.js"></script>
+<script src="../lib/room/lamp.js"></script>
+<script src="../lib/room/monitor.js"></script>
+<script src="../lib/room/clawd.js"></script>
+<script src="../lib/room/chair.js"></script>
+</head>
+<body>
+<script>
+// DELEGATING in the square office (Task/Agent). 72-frame loop @ 12 fps (6 s), N helpers (?n=1..4, default 3) staggered
+// by 72/N frames. The boss turns to the left (facing left) and conducts. Each helper poofs in on the desk's front band
+// between the keyboard and the button, scurries along the desk front (low, under the boss's face), jumps for the paper
+// the boss flips to it, lands with the paper on its head, trots on past the mug to the desk's right end and poofs out. Three personalities so the lane never looks
+// like a conveyor: the eager one (salutes, jumps early, catches it with a sparkle), the dreamer (stares at the window,
+// the paper lands over its eyes, it walks blind into the mug and sees stars), the steady one (clean catch, a hop).
+const { C } = Iso;
+const P = Room.params();
+const RP = Room.P;
+const LOOP = 72;
+const N = Math.max(1, Math.min(4, parseInt(P.q.get('n'), 10) || 3));
+const STEP = LOOP / N;
+const BOSS = { x: RP.clawd.x, y: RP.clawd.y };
+const W = Room.w2s;
+// lane on the desk top (Room.w2s z = 0 lands on the desk top, layout.js), along its FRONT band, low on screen (feet at
+// logical y 128..132, just above the counter strip at 134): the 14 px helpers (plus paper and jumps) stay well under the
+// seated boss's face, right of the monitor panel (it ends at screen x ~57; spawn body starts at x ~58), and are drawn
+// interleaved by screen y with the keyboard / button / mug (see draw). Screen points: SPAWN (69, 128) between the
+// keyboard and the button, CATCH (85, 130) in front of the button, MID past the front of the mug, EXIT (117, 132) by
+// Room.P.helperR on the desk's right end.
+const SPAWN = W(16, 15), CATCH = W(21, 12), MID = [W(25, 8), W(28, 6)], EXIT = W(30, 5);
+const BONK_AT = W(20, 9);                            // (89, 126): just behind-left of the mug (Room.P.mug): the dreamer walks into it
+
+const PAPER = ['..pppppp', '.pkkkkpp', 'pkkkpps.', 'pppppss.'];
+const drawPaper = (ctx, x, y) => Iso.sprite(ctx, x - 4, y - 2, PAPER, { p: C.paper, k: C.paperShade, s: C.muted });
+const lerpP = (a, b, t) => ({ x: Iso.lerp(a.x, b.x, t), y: Iso.lerp(a.y, b.y, t) });
+
+// ---- per-helper timeline (local frame f, 0..LOOP-1), kind = 0 eager, 1 dreamer, 2 steady
+function helperAt(f, kind) {
+  const st = { facing: 'right', legs: 'stand', arms: 'out', eyes: 'open' };
+  if (f === 0) return { poofOnly: 1, x: SPAWN.x, y: SPAWN.y };
+  if (f <= 2) return Object.assign(st, SPAWN, { squash: f === 1 ? 3 : 0, eyes: 'wide', poof: f + 1, arms: kind === 0 ? { l: 'out', r: 'high' } : 'out' });
+  if (f <= 4) return Object.assign(st, SPAWN, kind === 0 ? { arms: { l: 'out', r: 'high' }, eyes: 'happy' } : kind === 1 ? { eyes: { shape: 'open', gazeX: 1, gazeY: -2 } } : { eyes: 'open' });
+  // 5..12 scurry to the catch spot (the dreamer dawdles, eyes on the window)
+  if (f <= 12) {
+    const n = f - 5, p = lerpP(SPAWN, CATCH, (n + 1) / 8);
+    return Object.assign(st, p, { legs: n % 2 ? 'stepA' : 'stepB', eyes: kind === 1 && n < 5 ? { shape: 'open', gazeX: 1, gazeY: -2 } : { shape: 'open', gazeX: 1 }, squash: kind === 0 ? -2 : 0 });
+  }
+  // 13..19 the catch. The boss flips the paper on frame 14; it flies 14..17. Eager jumps at 14, steady at 16, the dreamer looks away.
+  if (f <= 19) {
+    const k = f - 13;
+    if (kind === 0) {
+      const z = [0, 6, 10, 8, 3, 0, 0][k];
+      return Object.assign(st, CATCH, { z, arms: k < 5 ? 'high' : 'out', eyes: k < 4 ? { shape: 'wide', gazeX: 1, gazeY: -2 } : 'happy', squash: k === 5 ? 3 : k === 6 ? 1 : 0, paper: k >= 3 ? { dy: k === 3 ? -2 : 0 } : null, sparkle: k === 3 });
+    }
+    if (kind === 2) {
+      const z = [0, 0, 0, 4, 6, 2, 0][k];
+      return Object.assign(st, CATCH, { z, arms: k >= 2 && k < 6 ? 'up' : 'out', eyes: k < 5 ? { shape: 'open', gazeX: 1, gazeY: -1 } : 'happy', squash: k === 6 ? 2 : 0, paper: k >= 4 ? {} : null });
+    }
+    return Object.assign(st, CATCH, { eyes: k < 4 ? { shape: 'open', gazeX: 1, gazeY: -2 } : k < 5 ? 'wide' : { shape: 'open', gazeX: -1 }, arms: k >= 5 ? 'up' : 'out',
+      paper: k >= 4 ? { dy: 4, cover: true } : null, bang: k === 5, squash: k === 4 ? 2 : 0 });
+  }
+  // 20..39 carry to the right along MID (the dreamer walks blind into the mug first)
+  if (f <= 39) {
+    const n = f - 20;
+    if (kind === 1 && n < 8) {
+      if (n < 3) return Object.assign(st, lerpP(CATCH, BONK_AT, (n + 1) / 3.5), { legs: n % 2 ? 'stepA' : 'stepB', arms: 'forward', paper: { dy: 4, cover: true } });
+      if (n === 3) return Object.assign(st, BONK_AT, { squash: 3, shake: 2, eyes: 'wince', paper: { dy: -2 }, bonk: true, arms: 'up' });
+      if (n <= 5) return Object.assign(st, lerpP(BONK_AT, CATCH, 0.3), { eyes: 'wince', shake: n === 4 ? -2 : 2, paper: { dy: 1 }, arms: 'up', stars: true });
+      return Object.assign(st, lerpP(BONK_AT, CATCH, 0.3), { eyes: n === 6 ? 'closed' : { shape: 'open', gazeX: 1 }, paper: { dy: -1 }, arms: 'out', sweat: n === 7 });
+    }
+    const seg = kind === 1 ? Math.max(0, n - 8) : n, total = kind === 1 ? 12 : 20;
+    const t = Math.min(1, seg / total);
+    const pts = [CATCH, ...MID, EXIT];
+    const sIdx = Math.min(pts.length - 2, Math.floor(t * (pts.length - 1)));
+    const lt = t * (pts.length - 1) - sIdx;
+    const p = lerpP(pts[sIdx], pts[sIdx + 1], lt);
+    return Object.assign(st, p, { legs: n % 2 ? 'stepA' : 'stepB', arms: 'up', eyes: { shape: 'open', gazeX: 1 }, paper: { dy: n % 2 ? -1 : 0 },
+      squash: kind === 0 ? -2 : 0, ticks: kind === 0 && n % 3 === 0 });
+  }
+  // 40..47 at the right end: hop (eager: double hop), poof
+  if (f <= 47) {
+    const k = f - 40;
+    if (k < 4) {
+      const z = kind === 0 ? [4, 7, 2, 5][k] : [0, 4, 6, 2][k];
+      return Object.assign(st, EXIT, { z, eyes: 'happy', arms: 'high', paper: { dy: -1 }, squash: z === 0 ? 2 : 0 });
+    }
+    if (k === 4) return Object.assign(st, EXIT, { squash: 3, eyes: 'happy', arms: 'out', paper: {}, poof: 0 });
+    if (k === 5) return { poofOnly: 2, x: EXIT.x, y: EXIT.y };
+    return { poofOnly: 3, x: EXIT.x, y: EXIT.y };
+  }
+  return null;
+}
+
+function helpersAt(i) {
+  const out = [];
+  for (let k = 0; k < N; k++) {
+    const f = (((i - k * STEP) % LOOP) + LOOP) % LOOP;
+    const st = helperAt(f, k % 3);
+    if (st) out.push(Object.assign(st, { k, f, kind: k % 3 }));
+  }
+  return out;
+}
+
+// ---- the boss: conducts, flips a paper at each helper's frame 14, reacts to the dreamer's bonk
+function bossPose(i, helpers) {
+  const base = { x: BOSS.x, y: BOSS.y, facing: 'left', eyes: { shape: 'open', gazeX: -1, gazeY: 2 }, legs: Iso.cycle(['stand', 'stand', 'tap'], i, 2),
+                 arms: { l: Iso.cycle(['waveA', 'waveB'], i, 3), r: 'out' } };
+  for (const h of helpers) {
+    const d = h.f;
+    if (d === LOOP - 3 || d === LOOP - 2) return Object.assign(base, { arms: { l: 'up', r: 'up' }, squash: -3, eyes: { shape: 'open', gazeX: -1, gazeY: -1 } });
+    if (d === LOOP - 1) return Object.assign(base, { arms: { l: 'forward', r: 'high' }, squash: 2, mouth: 'o', go: true });
+    if (d === 0) return Object.assign(base, { arms: { l: 'forward', r: 'out' }, mouth: 'o' });
+    if (d === 12 || d === 13) return Object.assign(base, { arms: { l: 'high', r: 'out' }, paperInHand: true, eyes: { shape: 'open', gazeX: -1, gazeY: 1 } });
+    if (d === 14) return Object.assign(base, { arms: { l: 'forward', r: 'out' }, squash: 1, mouth: 'o', flip: true });
+    if (h.kind === 1 && d >= 23 && d <= 26) return Object.assign(base, { eyes: { shape: 'wide', gazeX: 1, gazeY: 2 }, mouth: 'o', arms: { l: 'up', r: 'up' }, bang: d === 23 });
+    if (h.kind === 1 && d >= 27 && d <= 29) return Object.assign(base, { eyes: 'happy', mouth: 'smile', blush: true });
+    if (d === 18 || d === 19) return Object.assign(base, { eyes: 'happy', mouth: 'smile' });
+  }
+  if (i === 35) return Object.assign(base, { eyes: 'blink' });
+  return base;
+}
+
+function drawHelper(ctx, m) {
+  if (m.poofOnly != null) { Iso.fx.poof(ctx, m.x, m.y - 8, m.poofOnly, C.violetLight); return; }
+  const a = Room.clawd(ctx, { x: m.x, y: m.y, z: m.z || 0, size: 'mini', tint: 'violet', facing: m.facing, legs: m.legs, arms: m.arms, eyes: m.eyes,
+    mouth: m.mouth || 'none', squash: m.squash || 0, shake: m.shake || 0, blush: !!m.blush });
+  if (m.paper) drawPaper(ctx, a.head.x + (m.paper.dx || 0), a.head.y + (m.paper.dy || 0));
+  if (m.ticks) Iso.fx.ticks(ctx, a.bbox.x - 1, a.face.y - 2, 'left', C.violetLight);
+  if (m.sparkle) Iso.fx.sparkle(ctx, a.head.x + 6, a.head.y - 6, 2, C.amber);
+  if (m.bang) Iso.fx.bang(ctx, a.head.x + 8, a.head.y - 10, { badge: false, color: C.amber });
+  if (m.bonk) Iso.fx.sparkle(ctx, a.bbox.x + a.bbox.w, a.face.y - 4, 3, C.amber);
+  if (m.stars) { const o = m.f % 2 ? [[-7, -3], [6, -6]] : [[-4, -7], [7, -2]]; o.forEach(([dx, dy]) => Iso.fx.sparkle(ctx, a.head.x + dx, a.head.y + dy, 1, C.amber)); }
+  if (m.sweat) Iso.fx.sweat(ctx, a.head.x - 7, a.head.y + 1);
+  if (m.poof != null) Iso.fx.poof(ctx, m.x - 10, m.y - 6, m.poof, C.violetLight);
+}
+
+function flyingPaper(ctx, h, from) {
+  const k = h.f - 14;
+  if (k < 0 || k > 3 || !from) return;
+  const u = (k + 1) / 4.5, arc = [6, 9, 7, 3][k];
+  drawPaper(ctx, Iso.lerp(from.x, CATCH.x, u), Iso.lerp(from.y, CATCH.y - 14, u) - arc);
+}
+
+Room.player({
+  name: '22-room-delegating',
+  fps: 12,
+  frames: LOOP,
+  loop: true,
+  notes: 'DELEGATING, 72 frames @ 12 fps (6 s), <code>?n=1..4</code> helpers (default 3), one spawning every 72/n frames. The boss turns to ' +
+    'the left and conducts a wind-up and "go!" before each spawn. Helpers poof in on the desk\'s front band by the keyboard, scurry along the front (under the boss\'s face), and the boss ' +
+    'flips a paper to each: the eager one jumps early and catches it with a sparkle, the steady one makes a clean catch and a hop, the dreamer is ' +
+    'looking at the window so the paper lands over its eyes, it walks blind into the mug, sees stars and shakes it off (Clawd goes wide-eyed, then smiles). ' +
+    'They trot on past the boss to the desk\'s right end, hop and poof out.',
+  draw(ctx, i) {
+    const L = Room.draw(ctx, P.room, P.light);
+    const helpers = helpersAt(i);
+    const bonk = helpers.find((h) => h.bonk);
+    const bp = bossPose(i, helpers);
+    Room.chair(ctx);
+    bp.legs = (i >> 2) & 1 ? 'dangleB' : 'dangle'; bp.z = Room.SEAT_Z; bp.squash = Room.SEAT_SQUASH + (bp.squash || 0);   // the boss sits on his chair
+    const b = Room.clawd(ctx, bp);
+    Room.deskBack(ctx, L, { monitor: 'plan', frame: i >> 3 });
+    if (bp.paperInHand && b.hand.l) drawPaper(ctx, b.hand.l.x - 2, b.hand.l.y - 3);
+    // the desk front set (Room.deskFront's button, mug) and the helpers share the front band: draw by screen y
+    // (the keyboard is behind the monitor now, drawn by deskBack)
+    const items = [
+      { y: RP.button.y, draw: () => { Room.shadow(ctx, RP.button.x + 1, RP.button.y + 2, 8, 3, 0.4); Room.part.button(ctx, RP.button.x, RP.button.y, false); } },
+      { y: RP.mug.y, draw: () => { Room.shadow(ctx, RP.mug.x + 1, RP.mug.y + 2, 6, 2, 0.35); Iso.prop.mug(ctx, RP.mug.x, RP.mug.y, { frame: i }); } },
+      ...helpers.map((h) => ({ y: h.y + 0.5, draw: () => drawHelper(ctx, h) })),
+    ];
+    items.sort((p, q) => p.y - q.y).forEach((it) => it.draw());
+    if (bonk) Iso.fx.ticks(ctx, RP.mug.x + 8, RP.mug.y - 10, 'right', C.paper);
+    helpers.forEach((h) => flyingPaper(ctx, h, b.hand.l || { x: b.face.x - 10, y: b.face.y }));
+    if (bp.bang) Iso.fx.bang(ctx, b.head.x - 4, b.head.y - 8);
+    if (bp.go && b.hand.l) Iso.fx.sparkle(ctx, b.hand.l.x - 6, b.hand.l.y - 2, 2, C.violetLight);
+    if (bp.flip && b.hand.l) Iso.fx.ticks(ctx, b.hand.l.x - 4, b.hand.l.y, 'left', C.paper);
+  },
+});
+</script>
+</body>
+</html>
