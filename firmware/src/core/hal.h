@@ -1,5 +1,5 @@
 #pragma once
-// Hardware abstraction: LCD (ST7701 RGB 480x480), GT911 touch, backlight via CH32V003 expander.
+// Hardware abstraction: LCD (ST7701 RGB 480x480), GT911 touch, backlight. Board pin map: board.h.
 #include <Arduino.h>
 
 void hal_init();                       // power/reset panel, init touch + display + LVGL drivers

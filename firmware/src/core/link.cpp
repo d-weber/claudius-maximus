@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include "model.h"
 #include "hal.h"
+#include "board.h"
 #include "perf.h"
 #include "../ui/ui.h"
 
@@ -151,8 +152,8 @@ static SpiRamAllocator alloc;
 // caps: "part" = understands partial states ({"t":"state","part":1,...}); "screen" = reports the visible screen.
 static void send_hello() {
   const char *scr = ui_current();
-  Link.printf("{\"t\":\"hello\",\"fw\":\"%s\",\"w\":480,\"h\":480,\"caps\":[\"part\",\"screen\"],\"screen\":\"%s\"}\n",
-                FW_VERSION, scr ? scr : "");
+  Link.printf("{\"t\":\"hello\",\"fw\":\"%s\",\"board\":\"%s\",\"w\":480,\"h\":480,\"caps\":[\"part\",\"screen\"],\"screen\":\"%s\"}\n",
+                FW_VERSION, BOARD_NAME, scr ? scr : "");
   strlcpy(sent_screen, scr ? scr : "", sizeof(sent_screen));
 }
 

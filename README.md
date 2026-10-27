@@ -54,11 +54,18 @@ Your `~/.claude` data is only read, never modified, and only ever sent to the de
 
 ## Hardware
 
-- [Waveshare ESP32-S3-Touch-LCD-4](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-4), **V4** board revision
-  (ESP32-S3R8, 8 MB PSRAM, 16 MB flash, ST7701 480×480 RGB panel, GT911 touch, CH32V003 IO expander).
-- A USB-C data cable to your Mac or Linux machine.
+One of these Waveshare 4" boards (both: ESP32-S3R8, 8 MB PSRAM, 16 MB flash, ST7701 480×480 RGB panel, GT911 touch):
 
-Only the screen and touch panel are used; the board's buzzer, SD card, RTC, IMU, RS485 and CAN are left alone.
+- [ESP32-S3-Touch-LCD-4B](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-4B) (TCA9554 IO expander, AXP2101 PMIC):
+  the default build. Plug the cable into the **USB-OTG** port, not the "USB TO UART" one: the host link uses the
+  ESP32-S3's native USB.
+- [ESP32-S3-Touch-LCD-4](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-4), **V4** board revision (CH32V003 IO
+  expander): build with `pio run -e companion_v4` (`PLATFORMIO_DEFAULT_ENVS=companion_v4 tools/dev.py flash`).
+
+Plus a USB-C data cable to your Mac or Linux machine.
+
+Only the screen and touch panel are used; the boards' buzzer, speaker, microphones, SD card, RTC, IMU, battery
+charger, RS485 and CAN are left alone. The pin maps live in `firmware/src/core/board.h`.
 
 ## Setup
 
