@@ -529,15 +529,16 @@ void drawClawd(Canvas &c, const ClawdPose &p) {
   Idx B, S, Hh;
   tintCols(p.tint, B, S, Hh);
   int x = p.x, y = p.y;
-  if (p.shadow) c.darken(x + 3, x + 14, y + 11);
-  // legs: 4 stubs; walk phases lift alternate pairs
+  if (p.shadow) c.darken(x + 3, x + 14, y + 12);
+  // legs: two pairs of stubby 2 px feet (like the mascot's four little feet); walk phases lift alternate pairs
   for (int i = 0; i < 4; i++) {
-    int lx = x + 4 + i * 3;
+    static const int8_t LX[4] = {3, 6, 10, 13};
+    int lx = x + LX[i];
     int up = 0;
     if (p.legPhase == 1 && (i % 2 == 0)) up = 1;
     if (p.legPhase == 3 && (i % 2 == 1)) up = 1;
-    c.r(lx, y + 9, lx, y + 10 - up, S); c.p(lx, y + 11 - up, OUT);
-    c.p(lx + 1, y + 9, OUT);
+    c.r(lx, y + 9, lx + 1, y + 10 - up, S);
+    c.r(lx, y + 11 - up, lx + 1, y + 11 - up, OUT);
   }
   // arms
   bool lu = p.arms == ARMS_UP || p.arms == ARMS_UP_L || p.arms == ARMS_WAVE_A || p.arms == ARMS_WAVE_B;
@@ -640,7 +641,7 @@ void drawClawdInBed(Canvas &c, int shift, bool eyesOpen, Tint tint) {
 void drawMini(Canvas &c, int x, int y, View v, int legPhase, Tint tint, bool blink) {
   Idx B, S, Hh;
   tintCols(tint, B, S, Hh);
-  c.darken(x + 2, x + 9, y + 8);
+  c.darken(x + 2, x + 9, y + 9);
   c.r(x + 2, y, x + 9, y, OUT); c.r(x + 2, y + 6, x + 9, y + 6, OUT);
   c.r(x + 1, y + 1, x + 1, y + 5, OUT); c.r(x + 10, y + 1, x + 10, y + 5, OUT);
   c.r(x + 2, y + 1, x + 9, y + 5, B); c.r(x + 2, y + 1, x + 8, y + 1, Hh);
@@ -648,10 +649,10 @@ void drawMini(Canvas &c, int x, int y, View v, int legPhase, Tint tint, bool bli
   int up = legPhase % 2;
   c.r(x - 1, y + 2 - up, x, y + 3 - up, OUT); c.r(x + 11, y + 1 + up, x + 12, y + 2 + up, OUT);
   c.p(x, y + 3 - up, B); c.p(x + 11, y + 2 + up, S);
-  for (int i = 0; i < 4; i++) {
-    int lx = x + 3 + i * 2;
-    int lift = (legPhase == 1 && i % 2 == 0) || (legPhase == 3 && i % 2 == 1) ? 1 : 0;
-    c.p(lx, y + 7 - lift, S); c.p(lx, y + 8 - lift, OUT);
+  for (int i = 0; i < 2; i++) {
+    int lx = x + 2 + i * 5;
+    int lift = (legPhase == 1 && i == 0) || (legPhase == 3 && i == 1) ? 1 : 0;
+    c.r(lx, y + 7 - lift, lx + 1, y + 7 - lift, S); c.r(lx, y + 8 - lift, lx + 1, y + 8 - lift, OUT);
   }
   if (v == FRONT) {
     if (blink) { c.p(x + 3, y + 3, OUT); c.p(x + 7, y + 3, OUT); }

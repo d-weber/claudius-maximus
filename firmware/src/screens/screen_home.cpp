@@ -1,6 +1,6 @@
 // HOME — Clawd's Studio (home_face.cpp: the top-down pixel-art room, 480 x 424) plus a HUD band:
 //   room:  Clawd at the station of whatever the agents are doing, the room living on the real clock
-//   HUD:   clock + date | working / need you / idle / helpers (tap -> agents) | 5h budget
+//   HUD:   clock + date | the 5-hour and weekly plan limits (tap -> usage)
 #include "screens.h"
 #include "../ui/theme.h"
 #include "../core/model.h"
@@ -9,15 +9,13 @@
 
 static const int ROOM_H = 424, HUD_Y = 424, HUD_H = 56;
 
-static lv_obj_t *hud, *lbl_clock, *lbl_date, *budget_box, *budget_bar, *budget_pct;
-static lv_obj_t *stats_row, *stat_num[4], *stat_cap[4];
+static lv_obj_t *hud, *lbl_clock, *lbl_date, *limits_box;
+static lv_obj_t *lim_bar[2], *lim_cap[2];   // 0 = 5h, 1 = weekly
 static lv_timer_t *tmr;
 static bool visible = false, host_prev = false, greeted = false;
 static uint32_t last_glance = 0, last_slow = 0;
 static int tap_n = 0;
 
-static const lv_color_t STAT_COL[4] = {C_BUSY, C_WAITING, C_IDLE, C_SUBAGENT};
-static const char *const STAT_CAP[4] = {"working", "need you", "idle", "helpers"};
 
 static const char *const QUIPS[] = {
     "Ship it!",
@@ -134,6 +132,10 @@ static void refresh(JsonObjectConst s) {
     todo_total += x["todos"]["total"] | 0;
   }
   if (help == 0) help = s["totals"]["subagents_active"] | 0;
+  // one Clawd for the first active (busy or waiting) session, a mini helper for every other active session and
+  // every active subagent; idle sessions do not count
+  int active = busy + wait;
+  int minis = (active > 1 ? active - 1 : 0) + help;
 
   // Clawd
   char cat = 0;
@@ -146,32 +148,27 @@ static void refresh(JsonObjectConst s) {
   float energy = busy ? 0.35f + 0.22f * (busy - 1) + 0.06f * help : 0.1f;
   if (energy > 1) energy = 1;
   home_face_set_plan(todo_done, todo_total);
-  home_face_set_mood(m, energy, host ? help : 0, cat);
+  home_face_set_mood(m, energy, host ? minis : 0, cat);
 
-  // stats
-  if (host) {
-    set_hidden(stats_row, false);
-    int v[4] = {busy, wait, idle, help};
-    for (int i = 0; i < 4; i++) {
-      set_txt_fmt(stat_num[i], "%d", v[i]);
-      set_text_col(stat_num[i], v[i] ? STAT_COL[i] : C_DIM);
-      set_text_col(stat_cap[i], v[i] ? C_MUTED : C_DIM);
+  // plan limits
+  static const char *const KEYS[2] = {"five_hour", "seven_day"};
+  bool any = false;
+  for (int i = 0; i < 2; i++) {
+    int pct = s["usage"][KEYS[i]]["pct"] | -1;
+    bool known = host && pct >= 0;
+    if (known) {
+      any = true;
+      int v = pct > 100 ? 100 : pct;
+      if (lv_bar_get_value(lim_bar[i]) != v) lv_bar_set_value(lim_bar[i], v, LV_ANIM_OFF);
+      lv_color_t bc = pct >= 85 ? C_ERROR : (pct >= 60 ? C_WAITING : C_IDLE);
+      set_bg_col(lim_bar[i], bc, LV_PART_INDICATOR);
+      set_text_col(lim_cap[i], C_MUTED);
+    } else {
+      if (lv_bar_get_value(lim_bar[i]) != 0) lv_bar_set_value(lim_bar[i], 0, LV_ANIM_OFF);
+      set_text_col(lim_cap[i], C_DIM);
     }
-  } else {
-    set_hidden(stats_row, true);
   }
-
-  // budget
-  int pct = s["usage"]["five_hour"]["pct"] | -1;
-  if (host && pct >= 0) {
-    set_hidden(budget_box, false);
-    if (lv_bar_get_value(budget_bar) != (pct > 100 ? 100 : pct)) lv_bar_set_value(budget_bar, pct > 100 ? 100 : pct, LV_ANIM_OFF);
-    lv_color_t bc = pct >= 85 ? C_ERROR : (pct >= 60 ? C_WAITING : C_IDLE);
-    set_bg_col(budget_bar, bc, LV_PART_INDICATOR);
-    set_txt_fmt(budget_pct, "%d%%", pct);
-  } else {
-    set_hidden(budget_box, true);
-  }
+  set_hidden(limits_box, !host || !any);
 }
 
 static void update_clock() {
@@ -248,7 +245,7 @@ static void face_tapped() {
   tap_n++;
 }
 
-static void stats_clicked(lv_event_t *) { ui_nav("agents"); }
+static void limits_clicked(lv_event_t *) { ui_nav("usage"); }
 
 static void on_timer(lv_timer_t *) {
   home_face_tick(visible);
@@ -288,50 +285,30 @@ static void create(lv_obj_t *p) {
   lbl_date = mk_label(hud, F_SMALL, C_MUTED);
   lv_obj_set_pos(lbl_date, 13, 29);
 
-  // stats row
-  stats_row = lv_obj_create(hud);
-  style_plain(stats_row);
-  lv_obj_set_size(stats_row, 268, 44);   // keep the bottom 12 px clear: the tileview's page dots live there
-  lv_obj_set_pos(stats_row, 100, 0);
-  lv_obj_set_flex_flow(stats_row, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(stats_row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_add_flag(stats_row, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(stats_row, stats_clicked, LV_EVENT_CLICKED, nullptr);
-  for (int i = 0; i < 4; i++) {
-    lv_obj_t *c = lv_obj_create(stats_row);
-    style_plain(c);
-    lv_obj_set_size(c, 66, 44);
-    lv_obj_clear_flag(c, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_flag(c, LV_OBJ_FLAG_EVENT_BUBBLE);
-    stat_num[i] = mk_label(c, F_BODY, C_DIM);
-    lv_label_set_text(stat_num[i], "0");
-    lv_obj_align(stat_num[i], LV_ALIGN_TOP_MID, 0, 4);
-    stat_cap[i] = mk_label(c, F_SMALL, C_DIM);
-    lv_label_set_text(stat_cap[i], STAT_CAP[i]);
-    lv_obj_align(stat_cap[i], LV_ALIGN_TOP_MID, 0, 25);
+  // plan limits: two rows (5H, 7D) at the bottom right, tap -> usage. The tileview's page dots sit bottom-centre.
+  limits_box = lv_obj_create(hud);
+  style_plain(limits_box);
+  lv_obj_set_size(limits_box, 132, 56);
+  lv_obj_set_pos(limits_box, 340, 0);
+  lv_obj_add_flag(limits_box, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(limits_box, limits_clicked, LV_EVENT_CLICKED, nullptr);
+  static const char *const CAP[2] = {"5H", "7D"};
+  for (int i = 0; i < 2; i++) {
+    int y = 8 + i * 22;
+    lim_cap[i] = mk_label(limits_box, F_SMALL, C_MUTED);
+    lv_label_set_text(lim_cap[i], CAP[i]);
+    lv_obj_set_pos(lim_cap[i], 0, y);
+    lim_bar[i] = lv_bar_create(limits_box);
+    lv_obj_set_size(lim_bar[i], 102, 6);
+    lv_obj_set_pos(lim_bar[i], 30, y + 5);
+    lv_bar_set_range(lim_bar[i], 0, 100);
+    lv_obj_set_style_bg_color(lim_bar[i], lv_color_hex(0x3A3546), 0);
+    lv_obj_set_style_bg_opa(lim_bar[i], LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(lim_bar[i], 4, 0);
+    lv_obj_set_style_radius(lim_bar[i], 4, LV_PART_INDICATOR);
+    lv_obj_clear_flag(lim_bar[i], LV_OBJ_FLAG_CLICKABLE);
   }
-  lv_obj_add_flag(stats_row, LV_OBJ_FLAG_HIDDEN);
-
-  // budget
-  budget_box = lv_obj_create(hud);
-  style_plain(budget_box);
-  lv_obj_set_size(budget_box, 100, 44);
-  lv_obj_set_pos(budget_box, 370, 0);
-  lv_obj_clear_flag(budget_box, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_t *l5 = mk_label(budget_box, F_SMALL, C_MUTED);
-  lv_label_set_text(l5, "5h");
-  lv_obj_set_pos(l5, 0, 6);
-  budget_pct = mk_label(budget_box, F_SMALL, C_TEXT);
-  lv_obj_align(budget_pct, LV_ALIGN_TOP_RIGHT, 0, 6);
-  budget_bar = lv_bar_create(budget_box);
-  lv_obj_set_size(budget_bar, 100, 8);
-  lv_obj_set_pos(budget_bar, 0, 30);
-  lv_bar_set_range(budget_bar, 0, 100);
-  lv_obj_set_style_bg_color(budget_bar, lv_color_hex(0x3A3546), 0);
-  lv_obj_set_style_bg_opa(budget_bar, LV_OPA_COVER, 0);
-  lv_obj_set_style_radius(budget_bar, 4, 0);
-  lv_obj_set_style_radius(budget_bar, 4, LV_PART_INDICATOR);
-  lv_obj_add_flag(budget_box, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(limits_box, LV_OBJ_FLAG_HIDDEN);
 
   tmr = lv_timer_create(on_timer, 36, nullptr);   // keeps running while hidden: the room lives on, drawing is skipped
 }
