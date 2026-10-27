@@ -118,8 +118,43 @@ class SpecTest(unittest.TestCase):
         self.assertEqual(self._run_entry(["x", "-psn_0_1234"])[1], ["x", "app"])
 
     def test_entry_passes_cli_through(self):
-        self.assertEqual(self._run_entry(["x", "hook"])[1], ["x", "hook"])
         self.assertEqual(self._run_entry(["x", "status", "--json"])[1], ["x", "status", "--json"])
+
+    def _run_entry_hook(self, argv, hook_side_effect=None):
+        """hook / statusline: straight to companion.hookclient, then os._exit(0) whatever happens."""
+        entry = load("entry")
+        from companion import hookclient
+
+        class Exited(BaseException):
+            pass
+
+        calls = []
+
+        def fake(*a):
+            calls.append(a)
+            if hook_side_effect:
+                raise hook_side_effect
+
+        def fake_exit(code):
+            calls.append(("exit", code))
+            raise Exited
+
+        boom = mock.MagicMock(side_effect=AssertionError("companion.__main__ must not be imported"))
+        with mock.patch.object(sys, "argv", list(argv)), mock.patch.object(hookclient, "run_hook", fake), \
+                mock.patch.object(hookclient, "run_statusline", fake), \
+                mock.patch.object(entry.os, "_exit", fake_exit), \
+                mock.patch.dict(sys.modules, {"companion.__main__": mock.MagicMock(main=boom)}), \
+                mock.patch.object(sys, "stdin", None):
+            with self.assertRaises(Exited):
+                entry.run()
+            self.assertIsNone(sys.stdin)   # not replaced by os.devnull: hookclient falls back to GetStdHandle
+        boom.assert_not_called()
+        return calls
+
+    def test_entry_hook_fast_path(self):
+        self.assertEqual(self._run_entry_hook(["x", "hook", "Stop"]), [(["Stop"],), ("exit", 0)])
+        self.assertEqual(self._run_entry_hook(["x", "statusline"]), [(), ("exit", 0)])
+        self.assertEqual(self._run_entry_hook(["x", "hook"], RuntimeError("boom")), [([],), ("exit", 0)])
 
 
 class IconsTest(unittest.TestCase):
@@ -189,6 +224,12 @@ class TemplatesTest(unittest.TestCase):
         self.assertIn('ValueName: "ClaudiusMaximus"', iss)
         self.assertIn('Parameters: "hooks uninstall"', iss)
         self.assertIn("CloseApplications=", iss)
+        # Inno < 6.3 doesn't know x64compatible: chosen by compiler version
+        self.assertIn("#if Ver >= EncodeVer(6, 3, 0)", iss)
+        self.assertIn("ArchitecturesInstallIn64BitMode={#ArchAllowed}", iss)
+        # the Run value is removed at uninstall even when autostart was enabled from the tray, not the task
+        self.assertRegex(iss, r'ValueType: none; ValueName: "ClaudiusMaximus"; \\\n\s*Flags: uninsdeletevalue\n')
+        self.assertIn('RunOnceId: "HooksUninstall"', iss)
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text()
         self.assertIn("/DAppVersion=", release)
         self.assertIn("packaging/check_version.py", release)
@@ -198,6 +239,76 @@ class TemplatesTest(unittest.TestCase):
             self.skipTest("no exec bit on Windows")
         for p in (PKG / "linux" / "make_appimage.sh", PKG / "macos" / "make_dmg.sh"):
             self.assertTrue(os.access(p, os.X_OK), p)
+
+
+class WorkflowTest(unittest.TestCase):
+    """.github/workflows: parse, job graph, artifact names consistent between jobs, runner labels."""
+
+    def load(self, name):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        return yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text())
+
+    @staticmethod
+    def steps(job):
+        return [st for st in job.get("steps", []) if isinstance(st, dict)]
+
+    def test_release_graph_and_artifacts(self):
+        wf = self.load("release.yml")
+        on = wf.get("on", wf.get(True))            # YAML 1.1 reads a bare `on:` as True
+        self.assertEqual(on["push"]["tags"], ["v*"])
+        jobs = wf["jobs"]
+        self.assertEqual(jobs["app"]["needs"], "firmware")
+        self.assertEqual(sorted(jobs["release"]["needs"]), ["app", "firmware"])
+        self.assertIn("refs/tags/v", jobs["release"]["if"])
+        self.assertEqual(jobs["release"]["permissions"]["contents"], "write")
+
+        def uploads(job):
+            return [st["with"]["name"] for st in self.steps(job) if str(st.get("uses", "")).startswith(
+                "actions/upload-artifact")]
+
+        def downloads(job):
+            return [st["with"] for st in self.steps(job) if str(st.get("uses", "")).startswith(
+                "actions/download-artifact")]
+        fw_up = uploads(jobs["firmware"])
+        self.assertIn("firmware-bundle", fw_up)
+        [dl] = downloads(jobs["app"])
+        self.assertEqual(dl["name"], "firmware-bundle")
+        # the spec bundles companion/firmware/** and fw_bundle.py writes there by default
+        self.assertEqual(dl["path"], "host/companion/firmware")
+        fw_bundle = (ROOT / "tools" / "fw_bundle.py").read_text()
+        self.assertIn('default=ROOT / "host" / "companion" / "firmware"', fw_bundle)
+        self.assertIn('collect_data_files("companion.firmware"', (PKG / "claudius-maximus.spec").read_text())
+        app_up = uploads(jobs["app"])
+        self.assertEqual(app_up, ["release-${{ matrix.os }}-${{ matrix.arch }}"])
+        [rel] = downloads(jobs["release"])
+        pattern = rel["pattern"].rstrip("*")
+        self.assertTrue(rel.get("merge-multiple"))
+        for name in ["release-firmware-zips", "release-windows-x64", "release-macos-arm64", "release-linux-x64"]:
+            self.assertTrue(name.startswith(pattern), name)
+        self.assertFalse("firmware-bundle".startswith(pattern), "raw bundle must not be attached twice")
+        self.assertIn("release-firmware-zips", fw_up)
+
+    def test_runner_labels(self):
+        rel = self.load("release.yml")
+        runners = [m["runner"] for m in rel["jobs"]["app"]["strategy"]["matrix"]["include"]]
+        self.assertNotIn("macos-13", runners)          # retired by GitHub
+        self.assertIn("macos-15-intel", runners)       # x64
+        self.assertIn("macos-14", runners)             # arm64
+        names = {(m["os"], m["arch"]) for m in rel["jobs"]["app"]["strategy"]["matrix"]["include"]}
+        self.assertEqual(names, {("windows", "x64"), ("macos", "arm64"), ("macos", "x64"), ("linux", "x64")})
+
+    def test_ci_smoke_shells(self):
+        ci = self.load("ci.yml")
+        host = ci["jobs"]["host"]
+        self.assertEqual(host["defaults"]["run"]["shell"], "bash")   # the smoke test's case/esac is bash
+        self.assertIn("windows-latest", host["strategy"]["matrix"]["os"])
+        rel = self.load("release.yml")
+        for st in self.steps(rel["jobs"]["app"]):
+            if "ISCC" in str(st.get("run", "")):
+                self.assertEqual(st.get("shell"), "pwsh")
 
 
 if __name__ == "__main__":

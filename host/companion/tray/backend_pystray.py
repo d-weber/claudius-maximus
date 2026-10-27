@@ -1,17 +1,30 @@
 """Windows / macOS tray: pystray (0.19) with Pillow images.
 
-pystray only has a title string for the hover text, so the tooltip is the title plus the first status line
-(Windows truncates tooltips at 127 characters). Menus are rebuilt from MenuItem lists: pystray.MenuItem with
-`checked` as a callable for check items, a nested pystray.Menu for submenus, pystray.Menu.SEPARATOR for
-separators, `enabled=False` for status lines.
+pystray only has a title string for the hover text, so the tooltip is the title plus the first status line.
+Menus are rebuilt from MenuItem lists: pystray.MenuItem with `checked` as a callable for check items, a nested
+pystray.Menu for submenus, pystray.Menu.SEPARATOR for separators, `enabled=False` for status lines.
 
-macOS: AppKit must be touched from the main thread only, and pystray's darwin backend updates the NSStatusItem
-directly when .icon/.title/.menu are assigned. Updates from the refresh thread are therefore marshalled with
-PyObjCTools.AppHelper.callAfter when it is available. The colour icon is used (it reads on light and dark menu
-bars thanks to the orange body); render_tray_icon_mono exists if a template image is wanted later.
+Threading (set_* are called from the app's refresh thread):
+* macOS: AppKit must only be touched from the main thread, and pystray's darwin backend updates the
+  NSStatusItem directly when .icon/.title/.menu are assigned. Updates are marshalled with
+  PyObjCTools.AppHelper.callAfter. Menu updates use callLater instead: its performSelector:afterDelay: only
+  fires in the default run loop mode, i.e. never while the menu is open (event tracking mode). That matters:
+  pystray maps a click to callbacks[tag] of the *current* menu, so swapping the menu under an open one would
+  run the wrong item (e.g. "Flash firmware" shifting under "Quit"). Notifications (pystray runs osascript)
+  stay off the main thread. stop() goes through callAfter too.
+* Windows: pystray's win32 backend rebuilds the HMENU in the calling thread and DestroyMenu()s the old one,
+  even while TrackPopupMenuEx shows it on the UI thread. Updates are therefore posted to pystray's own
+  window (a private WM_USER message registered in its _message_handlers) and run on the UI thread; menu
+  updates that arrive while the popup is open (the modal menu loop still dispatches posted messages) are
+  kept and applied when it closes. Without those pystray internals (other version), calls run directly.
+  NOTIFYICONDATAW limits: tooltip 128, balloon title 64, balloon text 256 UTF-16 units incl. the NUL
+  (pystray raises ValueError beyond): truncated here.
+The colour icon is used on macOS (it reads on light and dark menu bars thanks to the orange body);
+render_tray_icon_mono exists if a template image is wanted later.
 """
 from __future__ import annotations
 
+import collections
 import logging
 import sys
 import threading
@@ -21,18 +34,108 @@ from .base import MenuItem, TrayBackend
 log = logging.getLogger("companion.tray")
 
 ICON_SIZE = 64          # pystray scales it down (Windows: 16/32 px; macOS: menu bar height)
-TOOLTIP_MAX = 127
+TOOLTIP_MAX = 127       # szTip is WCHAR[128]
+WIN_INFO_TITLE_MAX = 63
+WIN_INFO_MAX = 255
+WM_USER = 0x0400
+WM_PYSTRAY_NOTIFY = WM_USER + 11    # pystray._util.win32.WM_NOTIFY (icon clicks; opens the menu)
+WM_CM_UI = WM_USER + 0x60           # ours: "run the queued UI calls" (pystray uses +10 and +11)
+MAC_MENU_DELAY_S = 0.05
 
 
-def _main_thread_caller():
-    """fn(callable) that runs it on the UI thread: callAfter on macOS, direct call elsewhere."""
-    if sys.platform == "darwin":
+def _safe(fn, *args):
+    try:
+        fn(*args)
+    except Exception:
+        log.debug("tray UI update failed", exc_info=True)
+
+
+def cut_utf16(text: str, n: int) -> str:
+    """Truncate to at most n UTF-16 code units (what the Win32 WCHAR buffers count), with an ellipsis."""
+    if len(text.encode("utf-16-le")) // 2 <= n:
+        return text
+    out = text
+    while out and len((out + "…").encode("utf-16-le")) // 2 > n:
+        out = out[:-1]
+    return out + "…"
+
+
+def _mac_helpers():
+    """(callAfter, callLater) from PyObjCTools.AppHelper, or None."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        from PyObjCTools import AppHelper
+        return AppHelper.callAfter, AppHelper.callLater
+    except Exception:
+        return None
+
+
+class Win32Ui:
+    """Run callables on pystray's win32 UI thread (see the module docstring). install() needs the icon's
+    window, so it is called from the setup callback (pystray creates the window before calling it)."""
+
+    def __init__(self, icon, post=None):
+        self.icon = icon
+        self._post = post
+        self._q: collections.deque = collections.deque()
+        self.menu_open = False
+        self._pending_menu = None
+        self.installed = False
+
+    def install(self) -> bool:
+        handlers = getattr(self.icon, "_message_handlers", None)
+        hwnd = getattr(self.icon, "_hwnd", None)
+        if not isinstance(handlers, dict) or not hwnd:
+            return False
+        if self._post is None:
+            try:
+                import ctypes
+                pm = ctypes.WinDLL("user32").PostMessageW
+                pm.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t]
+                pm.restype = ctypes.c_int
+                self._post = lambda: bool(pm(hwnd, WM_CM_UI, 0, 0))
+            except Exception:
+                return False
+        orig = handlers.get(WM_PYSTRAY_NOTIFY)
+
+        def on_notify(wparam, lparam):
+            self.menu_open = True
+            try:
+                return orig(wparam, lparam) if orig else 0
+            finally:
+                self.menu_open = False
+                fn, self._pending_menu = self._pending_menu, None
+                if fn:
+                    _safe(fn)
+
+        handlers[WM_PYSTRAY_NOTIFY] = on_notify
+        handlers[WM_CM_UI] = self.drain
+        self.installed = True
+        return True
+
+    def call(self, fn, menu: bool = False) -> None:
+        if not self.installed:
+            _safe(fn)
+            return
+        self._q.append((fn, menu))
         try:
-            from PyObjCTools import AppHelper
-            return AppHelper.callAfter
+            ok = self._post()
         except Exception:
-            pass
-    return lambda fn, *a: fn(*a)
+            ok = False
+        if not ok:   # window gone (quitting): nothing left to race with
+            self.drain()
+
+    def drain(self, _wparam=0, _lparam=0) -> int:
+        while True:
+            try:
+                fn, menu = self._q.popleft()
+            except IndexError:
+                return 0
+            if menu and self.menu_open:
+                self._pending_menu = fn      # latest wins
+            else:
+                _safe(fn)
 
 
 def build_menu(pystray, items: list[MenuItem], run_action):
@@ -58,7 +161,7 @@ def build_menu(pystray, items: list[MenuItem], run_action):
 
 def tooltip_text(title: str, lines: list[str]) -> str:
     text = title if not lines else f"{title}\n{lines[0]}" if sys.platform == "win32" else f"{title} - {lines[0]}"
-    return text if len(text) <= TOOLTIP_MAX else text[:TOOLTIP_MAX - 1] + "…"
+    return cut_utf16(text, TOOLTIP_MAX)
 
 
 class PystrayTray(TrayBackend):
@@ -68,19 +171,42 @@ class PystrayTray(TrayBackend):
             import pystray as pystray_module
         self.pystray = pystray_module
         from .icon import render_app_icon
-        self._call = _main_thread_caller()
+        self._mac = _mac_helpers()
         self._menu_key = None
         self._icon_bytes = None
+        if sys.platform == "darwin":
+            self._accessory_app()
         self.icon = self.pystray.Icon("claudius-maximus", icon=render_app_icon(ICON_SIZE),
                                       title="Claudius Maximus", menu=self.pystray.Menu())
+        self._win = Win32Ui(self.icon) if sys.platform == "win32" else None
         self._running = False
 
-    def _ui(self, fn, *args):
+    @staticmethod
+    def _accessory_app():
+        """No Dock icon / app menu when not started from the .app bundle (LSUIElement covers the bundle)."""
+        try:
+            import AppKit
+            AppKit.NSApplication.sharedApplication().setActivationPolicy_(1)  # ...Accessory
+        except Exception:
+            pass
+
+    def _ui(self, fn, *args, menu: bool = False):
+        """Run fn(*args) on the UI thread (directly before run(), when there is no loop yet)."""
+        call = (lambda: fn(*args)) if args else fn
         if not self._running:
-            fn(*args)
+            _safe(call)
             return
         try:
-            self._call(fn, *args)
+            if self._mac:
+                after, later = self._mac
+                if menu:
+                    later(MAC_MENU_DELAY_S, _safe, call)
+                else:
+                    after(_safe, call)
+            elif self._win is not None:
+                self._win.call(call, menu=menu)
+            else:
+                _safe(call)
         except Exception:
             log.debug("tray UI update failed", exc_info=True)
 
@@ -113,8 +239,8 @@ class PystrayTray(TrayBackend):
 
     def set_menu(self, items: list[MenuItem]) -> None:
         """Only re-publish when the structure changed: assigning Icon.menu makes pystray rebuild the native
-        menu (update_menu), which would close an open menu on some platforms every refresh. Callables of an
-        unchanged structure are equivalent (labels/checks encode what they act on)."""
+        menu (update_menu). Callables of an unchanged structure are equivalent (labels/checks encode what
+        they act on)."""
         key = tuple(i.key() for i in items)
         if key == self._menu_key:
             return
@@ -123,25 +249,47 @@ class PystrayTray(TrayBackend):
 
         def apply():
             self.icon.menu = menu      # pystray's setter calls update_menu()
-        self._ui(apply)
+        self._ui(apply, menu=True)
 
     def notify(self, title: str, body: str) -> None:
+        if getattr(self.icon, "HAS_NOTIFICATION", True) is False:
+            log.info("notification not supported: %s: %s", title, body)
+            return
+        if sys.platform == "win32":
+            title, body = cut_utf16(title, WIN_INFO_TITLE_MAX), cut_utf16(body, WIN_INFO_MAX)
+
         def go():
             try:
                 self.icon.notify(body, title)
             except Exception as e:     # not supported on every backend / OS setting
                 log.info("notification failed: %s", e)
-        self._ui(go)
+        if self._mac:   # pystray's darwin notify is a blocking osascript call: keep it off the main thread
+            threading.Thread(target=go, name="tray-notify", daemon=True).start()
+        else:
+            self._ui(go)
 
     def stop(self) -> None:
-        try:
-            self.icon.stop()
-        except Exception:
-            log.debug("pystray stop failed", exc_info=True)
+        def go():
+            try:
+                self.icon.stop()
+            except Exception:
+                log.debug("pystray stop failed", exc_info=True)
+        if self._mac and self._running:
+            try:
+                self._mac[0](go)
+                return
+            except Exception:
+                pass
+        go()   # Windows: pystray's stop just posts WM_STOP, fine from any thread
 
     def run(self) -> None:
-        def setup(icon):
-            icon.visible = True
+        def setup(icon):   # pystray runs this in its own thread
+            if self._mac:   # visible=True creates the NSStatusItem button image: main thread only
+                self._ui(setattr, icon, "visible", True)
+            else:
+                icon.visible = True
+            if self._win is not None and not self._win.install():
+                log.info("pystray internals not as expected: tray updates run on the calling thread")
             if self.on_ready:
                 try:
                     self.on_ready()

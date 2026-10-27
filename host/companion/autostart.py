@@ -53,6 +53,19 @@ def app_command() -> list[str]:
     return cmd
 
 
+def mac_unstable_location(path: str | None = None) -> str:
+    """macOS: why the running .app can't be the target of a login item ("" if it can). Opened from the .dmg
+    it runs from /Volumes/... (gone after eject); opened from ~/Downloads with the quarantine flag, Gatekeeper
+    App Translocation runs it from a random read-only /private/var/folders/.../AppTranslocation/... copy. A
+    LaunchAgent pointing there would fail at the next login."""
+    p = path or (hostos.self_command()[0] if hostos.is_frozen() else "")
+    if "/AppTranslocation/" in p:
+        return "it runs from a temporary App Translocation copy"
+    if p.startswith("/Volumes/"):
+        return "it runs from the disk image"
+    return ""
+
+
 def _real_home() -> bool:
     try:
         import pwd
@@ -190,6 +203,10 @@ def is_enabled() -> bool:
 
 def enable() -> str:
     """Start the app at login. Raises OSError if the entry can't be written."""
+    if hostos.IS_MAC:   # checked before retiring the legacy service: fail without side effects
+        why = mac_unstable_location()
+        if why:
+            raise OSError(f"move {hostos.APP_NAME} to the Applications folder and open it from there first ({why})")
     notes = []
     legacy = disable_legacy_service()
     if legacy:

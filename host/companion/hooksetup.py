@@ -124,7 +124,9 @@ def is_ours_command(cmd, which: str = "hook") -> bool:
 def load_settings(path: str) -> dict:
     if not os.path.exists(path):
         return {}
-    with open(path) as f:
+    # utf-8-sig: Claude Code writes UTF-8 (non-ASCII paths / user names); an editor may have added a BOM. The
+    # locale encoding (cp1252 on Windows) would mangle or reject such a file.
+    with open(path, encoding="utf-8-sig") as f:
         txt = f.read()
     if not txt.strip():
         return {}
@@ -143,7 +145,7 @@ def save_settings(path: str, d: dict, backup: bool = True):
         print(f"  backup: {b}")
     mode = os.stat(path).st_mode & 0o777 if os.path.exists(path) else 0o644
     tmp = path + ".claudius.tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         json.dump(d, f, indent=2, ensure_ascii=False)
         f.write("\n")
     os.chmod(tmp, mode)
@@ -185,7 +187,7 @@ def strip_hooks(d: dict) -> bool:
 
 def read_manifest() -> dict:
     try:
-        with open(os.path.join(state_dir(), "install-manifest.json")) as f:
+        with open(os.path.join(state_dir(), "install-manifest.json"), encoding="utf-8") as f:
             return json.load(f)
     except (OSError, ValueError):
         return {}
@@ -193,7 +195,7 @@ def read_manifest() -> dict:
 
 def write_manifest(m: dict):
     os.makedirs(state_dir(), mode=0o700, exist_ok=True)
-    with open(os.path.join(state_dir(), "install-manifest.json"), "w") as f:
+    with open(os.path.join(state_dir(), "install-manifest.json"), "w", encoding="utf-8") as f:
         json.dump(m, f, indent=1)
 
 
@@ -218,7 +220,6 @@ def install_commands(hook_cmd: str, sl_cmd: str, statusline: bool, root: str = "
     m = read_manifest()
     if "had_hooks_key" not in m:  # first install: remember the original shape
         m["had_settings_file"] = existed
-    if "had_hooks_key" not in m:  # first install: remember the original shape
         m["had_hooks_key"] = "hooks" in d
         m["had_statusline"] = "statusLine" in d
 
@@ -248,7 +249,7 @@ def install_commands(hook_cmd: str, sl_cmd: str, statusline: bool, root: str = "
         else:
             if isinstance(sl, dict) and sl.get("command"):
                 os.makedirs(state_dir(), mode=0o700, exist_ok=True)
-                with open(os.path.join(state_dir(), "statusline-chain.json"), "w") as f:
+                with open(os.path.join(state_dir(), "statusline-chain.json"), "w", encoding="utf-8") as f:
                     json.dump({"command": sl["command"]}, f)
                 m["statusline_prev"] = sl
                 print(f"  statusLine: chaining your existing command: {sl['command']}")
@@ -287,7 +288,7 @@ def uninstall() -> int:
         prev = m.get("statusline_prev")
         if prev is None:
             try:
-                with open(os.path.join(state_dir(), "statusline-chain.json")) as f:
+                with open(os.path.join(state_dir(), "statusline-chain.json"), encoding="utf-8") as f:
                     c = json.load(f)
                 prev = dict(sl, command=c["command"])
             except (OSError, ValueError, KeyError):
@@ -326,6 +327,27 @@ def installed() -> dict:
     sl = d.get("statusLine")
     out["statusline"] = isinstance(sl, dict) and is_ours_command(sl.get("command", ""), "statusline")
     return out
+
+
+def installed_matches_self(statusline: bool | None = None) -> bool:
+    """True if our hooks are installed and all run the current program (hook_command()), and so does our
+    statusLine wrapper if present. False when nothing is installed, or after the program moved (new AppImage
+    path, .app copied to /Applications, repo moved): the app then re-runs install_for_app() on start.
+    statusline=True also requires the wrapper; None (default) accepts it absent; False ignores it."""
+    inst = installed()
+    if not inst["hooks"] or inst["commands"] != [hook_command("hook")]:
+        return False
+    if statusline is False:
+        return True
+    try:
+        sl = load_settings(settings_path()).get("statusLine")
+    except Exception:
+        return False
+    cur = sl.get("command") if isinstance(sl, dict) and is_ours_command(sl.get("command", ""), "statusline") \
+        else None
+    if cur is None:
+        return not statusline
+    return cur == hook_command("statusline")
 
 
 def check() -> int:

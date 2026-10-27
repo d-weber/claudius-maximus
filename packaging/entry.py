@@ -28,7 +28,26 @@ def _fix_std_streams() -> None:
             setattr(sys, name, open(os.devnull, mode))
 
 
+def _hook_fast_path() -> None:
+    """`hook` / `statusline`: what Claude Code runs on every event. Straight to companion.hookclient, before
+    _fix_std_streams (it would replace a missing stdin with os.devnull, hiding Claude Code's pipe from the
+    GetStdHandle fallback in hookclient.read_stdin, and AttachConsole is pointless here) and without importing
+    companion.__main__. Never raises, never returns: exit status 0 whatever happens (a windowed build would
+    otherwise show an error dialog, and a non-zero hook exit is reported by Claude Code)."""
+    try:
+        from companion import hookclient
+        if sys.argv[1] == "hook":
+            hookclient.run_hook(sys.argv[2:])
+        else:
+            hookclient.run_statusline()
+    except BaseException:
+        pass
+    os._exit(0)
+
+
 def run() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] in ("hook", "statusline"):
+        _hook_fast_path()
     if len(sys.argv) == 1:
         sys.argv.append("app")
     # macOS passes -psn_0_12345 to apps started from Finder on old systems: treat it as "no arguments".

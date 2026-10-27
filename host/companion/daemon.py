@@ -46,7 +46,7 @@ def dev_dir() -> Path:
     checkout (shared with tools/dev.py), the state dir in a frozen app (its bundle dir may be read-only)."""
     if not hostos.is_frozen() and (ROOT / "host" / "companion").is_dir():
         return ROOT
-    return Path(state_dir())
+    return Path(hostos.state_dir())   # not state_dir(): defined further down, and this runs at import
 
 
 DEVLOCK = dev_dir() / ".devlock"

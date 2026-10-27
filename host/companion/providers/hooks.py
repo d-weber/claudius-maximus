@@ -93,7 +93,10 @@ def state_dir() -> str:
 
 
 def sock_path() -> str:
-    return os.path.join(state_dir(), "hooks.sock")
+    """<state dir>/hooks.sock, or a short /tmp fallback when that is too long for AF_UNIX (same rule as the
+    client: companion/hookclient.py unix_sock_path)."""
+    from ..hookclient import unix_sock_path
+    return unix_sock_path(state_dir())
 
 
 def port_path() -> str:
@@ -198,10 +201,13 @@ class HooksProvider(Provider):
     def _bind(self):
         if self.transport == "udp":
             return self._bind_udp()
+        folder = os.path.dirname(self.path)
         try:
-            os.makedirs(os.path.dirname(self.path), mode=0o700, exist_ok=True)
+            os.makedirs(folder, mode=0o700, exist_ok=True)
         except OSError:
             pass
+        if folder.startswith("/tmp/") and not self._safe_tmp_dir(folder):
+            return
         if os.path.exists(self.path):
             # Is someone (another daemon) alive behind it?
             probe = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
@@ -230,6 +236,23 @@ class HooksProvider(Provider):
             return
         self.sock = s
         log.info("listening for Claude Code hooks on %s", self.path)
+
+    def _safe_tmp_dir(self, folder: str) -> bool:
+        """The short-path fallback lives in world-writable /tmp: it must be a real dir owned by us, 0700."""
+        from ..hookclient import owned_by_me
+        if not owned_by_me(folder):
+            try:
+                st = os.lstat(folder)
+                if st.st_uid == os.getuid() and not os.path.islink(folder):
+                    os.chmod(folder, 0o700)
+            except OSError:
+                pass
+        if owned_by_me(folder):
+            return True
+        if not self._bind_warned:
+            log.warning("hooks socket dir %s is not a private directory of ours; hooks disabled", folder)
+            self._bind_warned = True
+        return False
 
     def _bind_udp(self):
         """Loopback UDP on an ephemeral port. The single-instance daemon lock guarantees we are the only

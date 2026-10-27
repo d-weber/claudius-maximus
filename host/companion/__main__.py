@@ -177,8 +177,7 @@ def cmd_autostart(action: str) -> int:
     elif action == "disable":
         print(autostart.disable())
     else:
-        print(autostart.describe())
-        return 0 if autostart.is_enabled() else 1
+        print(autostart.describe())   # a query: exit 0 whether enabled or not
     return 0
 
 

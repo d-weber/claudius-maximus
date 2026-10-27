@@ -35,7 +35,8 @@ if WIN:
     hiddenimports += ["pystray._win32", "serial.tools.list_ports_windows", "psutil._pswindows"]
 elif MAC:
     hiddenimports += ["pystray._darwin", "serial.tools.list_ports_osx", "serial.tools.list_ports_posix",
-                      "AppKit", "Foundation", "objc", "PyObjCTools", "psutil._psosx"]
+                      "AppKit", "Foundation", "objc", "PyObjCTools.AppHelper",   # tray main-thread marshalling
+                      "PyObjCTools.MachSignals", "psutil._psosx"]
 else:
     hiddenimports += [*collect_submodules("dbus_fast"), "serial.tools.list_ports_linux",
                       "serial.tools.list_ports_posix", "psutil._pslinux"]

@@ -249,5 +249,87 @@ class FlashTest(unittest.TestCase):
         self.assertIs(before, after)      # logger restored
 
 
+class ReviewTest(unittest.TestCase):
+    """Integration review: logger restore on failure, progress never backwards, fallback gating, renamed port."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        write_bundle(self.root, "4b")
+        p = mock.patch.object(flasher, "firmware_dirs", return_value=[self.root])
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(self.tmp.cleanup)
+        p2 = mock.patch.object(flasher.time, "sleep")
+        p2.start()
+        self.addCleanup(p2.stop)
+
+    def test_logger_restored_after_esptool_error(self):
+        try:
+            import esptool
+            from esp_pylib.logger import EspLog
+        except ImportError:
+            self.skipTest("esptool not installed")
+        if flasher.esptool_version()[0] < 5:
+            self.skipTest("esptool < 5")
+        before = EspLog.instance
+        prog = flasher._Progress(flasher.bundled()["4b"], None)
+        with mock.patch.object(esptool, "main", side_effect=esptool.FatalError("Failed to connect")):
+            with self.assertRaises(esptool.FatalError):
+                flasher._run_esptool(["x"], prog, None)
+        self.assertIs(EspLog.instance, before)
+
+    def test_progress_never_goes_backwards(self):
+        pcts = []
+        prog = flasher._Progress(flasher.bundled()["4b"], lambda p, _m: pcts.append(p))
+        for f in (0.2, 1.0):           # bootloader
+            prog.image(f, "Writing")
+        for f in (0.1, 0.9):           # firmware (partitions + boot_app0 had no bar at all)
+            prog.image(f, "Writing")
+        for f in (0.5, 0.2, 0.8):      # a bar that restarts on the last image
+            prog.image(f, "Writing")
+        self.assertEqual(pcts, sorted(pcts))
+        self.assertLessEqual(pcts[-1], 99)
+
+    def test_no_dl_fallback_once_writing_started_even_without_progress(self):
+        def run(args, prog, log):
+            prog.image(0.0, "Writing at 0x0")   # 0 %: but the loader answered
+            raise RuntimeError("serial exception: device reports readiness to read but returned no data")
+        with mock.patch.object(flasher.list_ports, "comports", return_value=PORTS), \
+                mock.patch.object(flasher, "_run_esptool", side_effect=run), \
+                mock.patch.object(flasher, "request_download_mode") as dl:
+            with self.assertRaises(flasher.FlashError):
+                flasher.flash("4b", lock=False)
+        dl.assert_not_called()
+
+    def test_needs_update_dev_versions(self):
+        self.assertEqual(flasher.needs_update("0.3.0-dev", "4b"), (False, "up to date"))
+        self.assertEqual(flasher.needs_update("0.2.9-dev", "ESP32-S3-Touch-LCD-4B"), (True, "0.2.9-dev -> 0.3.0"))
+        self.assertTrue(flasher.needs_update("dev", "4b")[0])
+        self.assertEqual(flasher.needs_update(None, None), (True, "install 0.3.0"))
+
+    def test_wait_native_follows_serial_across_rename(self):
+        """Windows COM6 -> COM7 (or a new /dev/cu.usbmodem name): the board is found by its USB serial number,
+        not by name, even with another ESP32-S3 plugged in."""
+        seq = [
+            [info("COM6", 0x303A, 0x1001, "AA:BB")],                        # still there (resetting)
+            [],                                                             # gone
+            [info("COM3", 0x303A, 0x1001, "CC:DD")],                        # other board only
+            [info("COM3", 0x303A, 0x1001, "CC:DD"), info("COM7", 0x303A, 0x1001, "AA:BB")],
+        ]
+        it = iter(seq)
+        last = [seq[-1]]
+
+        def comports():
+            try:
+                last[0] = next(it)
+            except StopIteration:
+                pass
+            return last[0]
+        with mock.patch.object(flasher.list_ports, "comports", side_effect=comports):
+            p = flasher._wait_native(5.0, "AA:BB", gone_first="COM6")
+        self.assertEqual(p.device, "COM7")
+
+
 if __name__ == "__main__":
     unittest.main()

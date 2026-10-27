@@ -100,6 +100,38 @@ reached the host since the USB driver switch), torn JSON lines on a slow host (n
 one bad line), QA/show tools always releasing the device, QA mirror as a non-persisted override, dead code from the 2D
 face. Not done: a 9 px overlap of the counters row over the (empty) bottom rows of the scene.
 
+## Desktop app — 2026-10-27 (work in progress, commit f1b7d16)
+The host side is now an installable cross-platform app (architecture: docs/DESKTOP.md; user docs: README).
+- `claudius-maximus app`: tray / menu bar icon (pystray on Windows/macOS, StatusNotifierItem over dbus-fast on
+  Linux) running the daemon in-process; menu with device / sessions / plan, firmware update / install / flash
+  (4B, V4), start at login, hooks, log, claude.ai usage, quit. First run installs the hooks + statusLine wrapper
+  and start at login (retiring the systemd/launchd service of a script install). Observer mode when another
+  daemon holds the lock.
+- Flasher (`companion/flasher.py`, `tools/fw_bundle.py`): native USB-Serial-JTAG vs CH343 port detection, bundled
+  firmware with a manifest, in-process esptool 5; fallback `{"t":"cmd","dl":1}` (firmware 0.3.0, `version.h`)
+  then `--before no-reset --after watchdog-reset`. CLI `detect`, `flash`.
+- Windows port: msvcrt locks, hooks over loopback UDP (`hooks.port` = "<port> <key>"), Windows paths, psutil +
+  ctypes for the System screen and Focus. Hook commands for frozen builds (`"<exe>" hook`).
+- Packaging: PyInstaller onedir, Inno Setup installer, dmg, AppImage + tar.gz; CI on three OSes; release
+  workflow on `v*` tags (`ClaudiusMaximus-<ver>-<os>-<arch>.<ext>`, `firmware-<board>-<fwver>.zip`).
+
+Verified (recorded in flasher.py): flashing the 4B over the native port on Debian 13, both the reset path and the
+`dl` fallback, esptool 5.6.0. Development and tests ran on that Linux box only.
+
+Unverified:
+1. **Windows and macOS never run**: tray backends, installers, the Windows hooks transport, Focus on Windows,
+   autostart (Run key, LaunchAgent), Gatekeeper / SmartScreen steps in the README. Only CI exercises them
+   (unit tests + a frozen-build smoke test per OS).
+2. **V4 board never flashed** with the app (bundle built, `BOARD_NAME` mapping untested on a device).
+3. **CH343 (USB TO UART) flashing path untested with the new code** (in-process esptool, re-enumeration wait,
+   the "move the cable" hints).
+4. No release has been cut yet: the release workflow end to end, the installers on a clean machine, the AppImage
+   on other distros.
+5. Upgrading from a script install on macOS (bootout + `*.plist.disabled-by-app`) is untested.
+
 ## Daily use
-The LaunchAgent (macOS) / systemd user service (Linux) starts at login and feeds the device. Check: `cd host && .venv/bin/python -m companion status`.
-Dev: `tools/dev.py flash|shot|perf` (see docs/TEAM.md, docs/PERF.md). Uninstall: `tools/uninstall.sh`.
+Normal path: the desktop app from the Releases page; it starts at login and feeds the device (tray menu, or
+`<app> status`). Source checkout: the LaunchAgent (macOS) / systemd user service (Linux) from `tools/install.sh`
+does the same headless; check with `cd host && .venv/bin/python -m companion status`.
+Dev: `tools/dev.py flash|shot|perf` (see docs/TEAM.md, docs/PERF.md). Uninstall: README "Uninstall"
+(`tools/uninstall.sh` for a script install).

@@ -18,6 +18,13 @@
 #ifndef OutputDir
   #define OutputDir "..\..\dist\installer"
 #endif
+; "x64compatible" (x64 Windows and Windows 11 on Arm with x64 emulation) needs Inno Setup 6.3+; older 6.x
+; compilers only know "x64".
+#if Ver >= EncodeVer(6, 3, 0)
+  #define ArchAllowed "x64compatible"
+#else
+  #define ArchAllowed "x64"
+#endif
 #define AppName "Claudius Maximus"
 #define AppExe "ClaudiusMaximus.exe"
 
@@ -36,8 +43,8 @@ DisableDirPage=auto
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed={#ArchAllowed}
+ArchitecturesInstallIn64BitMode={#ArchAllowed}
 OutputDir={#OutputDir}
 OutputBaseFilename=ClaudiusMaximus-{#AppVersion}-windows-{#Arch}
 SetupIconFile=..\icons\app.ico
@@ -70,6 +77,10 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Parameters: "app"
 ; Same value as companion/autostart.py writes, so the tray's "Start at login" toggle and the installer agree.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "ClaudiusMaximus"; \
   ValueData: """{app}\{#AppExe}"" app"; Flags: uninsdeletevalue; Tasks: autostart
+; Unconditional: also remove the value at uninstall when "Start at login" was turned on later from the tray menu
+; (ValueType none writes nothing at install time).
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "ClaudiusMaximus"; \
+  Flags: uninsdeletevalue
 
 [Run]
 Filename: "{app}\{#AppExe}"; Parameters: "app"; Description: "{cm:LaunchProgram,{#AppName}}"; \

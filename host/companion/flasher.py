@@ -302,16 +302,22 @@ class _Progress:
         sizes = [p.stat().st_size for _, p in m.files]
         self.sizes, self.total = sizes, max(1, sum(sizes))
         self.idx, self.last_frac, self.last_pct = 0, 0.0, -1
+        self.started = False     # esptool reported writing: it reached the loader, the reset was not the issue
 
     def image(self, frac: float, msg: str):
+        self.started = True
         if frac + 1e-9 < self.last_frac and self.idx < len(self.sizes) - 1:   # a new image's bar started
             self.idx += 1
         self.last_frac = frac
         done = sum(self.sizes[:self.idx]) + frac * self.sizes[min(self.idx, len(self.sizes) - 1)]
         pct = min(99, int(100 * done / self.total))   # 100 only once the reset is done
-        if self.cb and pct != self.last_pct:
-            self.last_pct = pct
-            self.cb(pct, msg)
+        # never backwards: an image whose bar we never saw (or a re-started bar on the last image) would
+        # otherwise make the tray's percentage jump down
+        pct = max(pct, self.last_pct, 0)
+        if pct != self.last_pct:
+            self.last_pct = pct      # also without a callback: flash() reads it to tell "never connected"
+            if self.cb:
+                self.cb(pct, msg)
         if frac >= 1.0 and self.idx < len(self.sizes) - 1:
             self.idx += 1
             self.last_frac = 0.0
@@ -413,8 +419,11 @@ def _wait_native(timeout: float, serial_no: str | None, gone_first: str | None =
             time.sleep(0.1)
     while time.time() - t0 < timeout:
         ports = [p for p in detect() if p.kind == "native"]
-        if serial_no:
-            ports = [p for p in ports if p.serial == serial_no] or ports
+        if serial_no and any(p.serial for p in ports):
+            # by USB serial (the chip MAC), not by name: the node may come back renamed (COM6 -> COM7, a new
+            # cu.usbmodem*), and another ESP32-S3 on the bus must not be taken for ours while it is still resetting.
+            # Only an enumeration without serial numbers at all (some drivers) falls back to "any native port".
+            ports = [p for p in ports if p.serial == serial_no]
         if ports:
             return ports[0]
         time.sleep(0.2)
@@ -500,7 +509,7 @@ def flash(board: str, port: str | None = None, progress: Progress | None = None,
             if isinstance(e, KeyboardInterrupt):
                 raise
             say(f"esptool: {e}")
-            if p.kind != "native" or prog.last_pct > 0:
+            if p.kind != "native" or prog.started:
                 raise FlashError(_humanize(e, p.device, p.kind)) from e
             # DTR/RTS reset didn't reach the ROM loader: ask the firmware to reboot into it
             say("reset into the bootloader failed; asking the firmware to reboot into download mode")

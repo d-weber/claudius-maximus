@@ -32,6 +32,11 @@ Then, per OS:
 
 - **Linux**: `packaging/linux/make_appimage.sh dist/claudius-maximus out` writes the `.tar.gz` (the onedir plus
   a `.desktop` file and icon) and, if `appimagetool` is on `PATH`, the `.AppImage`.
+  The `.desktop` file says `Exec=claudius-maximus app`: right for the AppImage (its runtime starts `AppRun`,
+  and AppImage integrators rewrite `Exec`), but from the `.tar.gz` it only works if the binary is on `PATH`.
+  Either `ln -s "$PWD/claudius-maximus/claudius-maximus" ~/.local/bin/` or put the absolute path in `Exec=`
+  before copying the file to `~/.local/share/applications/` (and the icon to `~/.local/share/icons/`). The
+  app's own "Start at login" entry always uses the absolute path (or `$APPIMAGE`).
 - **macOS**: `packaging/macos/make_dmg.sh "dist/Claudius Maximus.app" out/ClaudiusMaximus-0.3.0-macos-arm64.dmg`.
   PyInstaller builds for the architecture of the Python you run it with: use an arm64 Python for Apple silicon
   and an x86_64 one (or an Intel Mac) for the x64 build.

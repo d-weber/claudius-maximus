@@ -703,5 +703,252 @@ class CliTest(TempHome):
         self.assertIn("hooks_installed", rep)
 
 
+
+# ---------------------------------------------------------------------------------------------
+# xplat review: Windows / macOS code paths exercised on any OS
+# ---------------------------------------------------------------------------------------------
+class FakeMsvcrt:
+    LK_NBLCK, LK_UNLCK = 2, 0
+
+    def __init__(self):
+        self.calls = []
+        self.held = set()
+
+    def locking(self, fd, mode, n):
+        pos = os.lseek(fd, 0, os.SEEK_CUR)
+        self.calls.append((mode, pos, n))
+        if mode == self.LK_NBLCK:
+            if pos in self.held:
+                raise PermissionError(13, "locked")
+            self.held.add(pos)
+        else:
+            self.held.discard(pos)
+
+
+class WindowsLockingTest(TempHome):
+    def _win_locking(self):
+        import importlib
+        fake = FakeMsvcrt()
+        with mock.patch.object(sys, "platform", "win32"), mock.patch.dict(sys.modules, {"msvcrt": fake}):
+            mod = importlib.reload(locking)
+        self.addCleanup(importlib.reload, locking)
+        return mod, fake
+
+    def test_lock_byte_is_past_the_holder_text(self):
+        mod, fake = self._win_locking()
+        p = os.path.join(self.tmp, ".devlock")
+        a, b = mod.open_lock_file(p), mod.open_lock_file(p)
+        try:
+            self.assertTrue(mod.try_lock(a))
+            self.assertFalse(mod.try_lock(b))
+            self.assertEqual(fake.calls[0], (fake.LK_NBLCK, mod.WIN_LOCK_OFFSET, 1))
+            self.assertEqual(os.lseek(a, 0, os.SEEK_CUR), 0)   # position restored for the holder write
+            mod.write_holder(a, "daemon pid=7\n")
+            mod.write_holder(a, "x\n")                        # shorter: truncated after the write
+            self.assertEqual(read_lock_holder(p), "x")
+            with open(p, "rb") as f:
+                self.assertEqual(f.read(), b" x\n")            # binary: no CRLF, nothing near the lock byte
+            mod.unlock(a)
+            self.assertEqual(fake.calls[-1], (fake.LK_UNLCK, mod.WIN_LOCK_OFFSET, 1))
+            self.assertTrue(mod.try_lock(b))
+        finally:
+            os.close(a)
+            os.close(b)
+
+
+class FrozenDaemonImportTest(TempHome):
+    def test_dev_dir_frozen_uses_state_dir(self):
+        with mock.patch.object(hostos, "is_frozen", return_value=True):
+            self.assertEqual(str(daemon_mod.dev_dir()), hostos.state_dir())
+
+    def test_daemon_module_imports_when_frozen(self):
+        """DEVLOCK is computed at import: a frozen build must not hit a NameError there."""
+        code = ("import sys; sys.frozen = True; import companion.daemon as d; "
+                "print(d.DEVLOCK.parent)")
+        r = subprocess.run([sys.executable, "-c", code], cwd=HOST, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(os.path.realpath(r.stdout.strip()), os.path.realpath(self.state))
+
+
+class ShortSocketPathTest(TempHome):
+    def _long_state(self):
+        d = os.path.join(self.tmp, "x" * 60, "y" * 40, ".claudius-maximus")
+        os.makedirs(d)
+        os.environ["CLAUDIUS_HOME"] = d
+        return d
+
+    def test_short_paths_unchanged(self):
+        self.assertEqual(hookclient.sock_path(), os.path.join(self.state, "hooks.sock"))
+        from companion.providers import hooks as hooks_mod
+        self.assertEqual(hooks_mod.sock_path(), hookclient.sock_path())
+
+    @unittest.skipUnless(POSIX and hasattr(socket, "AF_UNIX"), "AF_UNIX")
+    def test_long_state_dir_falls_back_to_tmp(self):
+        d = self._long_state()
+        sp = hookclient.sock_path()
+        self.assertTrue(sp.startswith(f"/tmp/claudius-maximus-{os.getuid()}-"), sp)
+        self.assertLessEqual(len(sp), hookclient.SUN_PATH_MAX)
+        self.addCleanup(shutil.rmtree, os.path.dirname(sp), True)
+        hp = HooksProvider()
+        self.assertEqual(hp.path, sp)
+        hp.poll(time.time())
+        try:
+            self.assertIsNotNone(hp.sock)
+            self.assertEqual(os.stat(os.path.dirname(sp)).st_mode & 0o777, 0o700)
+            self.assertEqual(hookclient.target(), ("unix", sp, ""))
+            hookclient.send(hookclient.compact(HOOK), hookclient.target())
+            for _ in range(50):
+                hp.poll(time.time())
+                if hp.received:
+                    break
+                time.sleep(0.02)
+            self.assertEqual(hp.received, 1)
+        finally:
+            hp.close()
+        self.assertTrue(d)
+
+    @unittest.skipUnless(POSIX and hasattr(socket, "AF_UNIX"), "AF_UNIX")
+    def test_foreign_tmp_dir_is_refused(self):
+        self._long_state()
+        sp = hookclient.sock_path()
+        folder = os.path.dirname(sp)
+        os.makedirs(folder, mode=0o755, exist_ok=True)
+        self.addCleanup(shutil.rmtree, folder, True)
+        os.chmod(folder, 0o755)
+        real = os.lstat
+
+        def lstat(p, *a, **k):   # pretend another user owns it
+            st = real(p, *a, **k)
+            if p == folder:
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, st.st_uid + 1, st.st_gid,
+                                       st.st_size, st.st_atime, st.st_mtime, st.st_ctime))
+            return st
+        with mock.patch("os.lstat", lstat):
+            self.assertFalse(hookclient.owned_by_me(folder))
+            hp = HooksProvider()
+            hp.poll(time.time())
+            self.assertIsNone(hp.sock)
+            open(sp, "w").close()
+            self.assertIsNone(hookclient.target())   # never send to a socket in a dir we don't own
+
+
+class StatuslineChainTest(TempHome):
+    def test_windows_runs_chain_with_git_bash(self):
+        bash = os.path.join(self.tmp, "Git", "bin", "bash.exe")
+        os.makedirs(os.path.dirname(bash))
+        open(bash, "w").close()
+        with mock.patch.object(hookclient, "IS_WINDOWS", True), \
+                mock.patch.dict(os.environ, {"CLAUDE_CODE_GIT_BASH_PATH": bash}):
+            self.assertEqual(hookclient.chain_argv("~/sl.sh"), ([bash, "-c", "~/sl.sh"], False))
+        os.environ.pop("CLAUDE_CODE_GIT_BASH_PATH", None)
+        git = os.path.join(self.tmp, "Git", "cmd", "git.exe")
+        os.makedirs(os.path.dirname(git))
+        open(git, "w").close()
+        with mock.patch.object(hookclient, "IS_WINDOWS", True), mock.patch("shutil.which", return_value=git):
+            self.assertEqual(hookclient.chain_argv("x")[0][0], bash)
+        with mock.patch.object(hookclient, "IS_WINDOWS", True), mock.patch("shutil.which", return_value=None):
+            self.assertEqual(hookclient.chain_argv("x"), ("x", True))   # no Git Bash: cmd via shell=True
+        self.assertEqual(hookclient.chain_argv("x"), ("x", True))       # POSIX: /bin/sh as before
+
+    def test_chain_subprocess_flags_on_windows(self):
+        with open(os.path.join(self.state, "statusline-chain.json"), "w", encoding="utf-8") as f:
+            json.dump({"command": "echo hi"}, f)
+        seen = {}
+
+        def run(args, **kw):
+            seen.update(kw, args=args)
+            return types_ns(stdout=b"hi\n")
+        out = io.BytesIO()
+        with mock.patch.object(hookclient, "IS_WINDOWS", True), mock.patch("subprocess.run", run), \
+                mock.patch.object(hookclient, "_win_bash", return_value=None), \
+                mock.patch.object(hookclient, "read_stdin", return_value=b"{}"), \
+                mock.patch.object(hookclient, "write_stdout", out.write):
+            hookclient.statusline_main()
+        self.assertEqual(seen["creationflags"], 0x08000000)
+        self.assertEqual(seen["stderr"], subprocess.DEVNULL)
+        self.assertEqual(out.getvalue(), b"hi\n")
+
+
+def types_ns(**kw):
+    import types
+    return types.SimpleNamespace(**kw)
+
+
+class HookSetupEncodingTest(TempHome):
+    def test_non_ascii_paths_and_bom(self):
+        path = hooksetup.settings_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:   # BOM + non-ASCII, as Notepad would save it
+            f.write("\ufeff".encode("utf-8") + json.dumps({"x": "Zoë"}, ensure_ascii=False).encode("utf-8"))
+        exe = "C:\\Users\\Zoë Doe\\AppData\\Local\\Programs\\ClaudiusMaximus\\ClaudiusMaximus.exe"
+        with mock.patch("sys.stdout"):
+            rc = hooksetup.install_commands(f'"{exe}" hook', f'"{exe}" statusline', True)
+        self.assertEqual(rc, 0)
+        with open(path, "rb") as f:
+            raw = f.read()
+        self.assertNotIn(b"\r\n", raw)
+        d = json.loads(raw.decode("utf-8"))   # strict UTF-8, whatever the locale encoding is
+        self.assertEqual(d["x"], "Zoë")
+        self.assertEqual(d["hooks"]["Stop"][0]["hooks"][0]["command"], f'"{exe}" hook')
+        self.assertTrue(hooksetup.is_ours_command(d["statusLine"]["command"], "statusline"))
+
+    def test_installed_matches_self(self):
+        self.assertFalse(hooksetup.installed_matches_self())
+        with mock.patch("sys.stdout"):
+            hooksetup.install_for_app(True)
+        self.assertTrue(hooksetup.installed_matches_self())
+        self.assertTrue(hooksetup.installed_matches_self(statusline=True))
+        with mock.patch("sys.stdout"):   # the app moved: old commands are no longer ours-for-this-program
+            hooksetup.install_commands('"/old/claudius-maximus" hook', '"/old/claudius-maximus" statusline', True)
+        self.assertTrue(hooksetup.installed()["hooks"])
+        self.assertFalse(hooksetup.installed_matches_self())
+
+
+class MacAutostartLocationTest(TempHome):
+    os_ = AutostartTest.os_
+    _with = AutostartTest._with
+
+    def test_unstable_locations(self):
+        f = autostart.mac_unstable_location
+        self.assertIn("Translocation", f("/private/var/folders/ab/T/AppTranslocation/1234/d/Claudius Maximus.app"
+                                         "/Contents/MacOS/claudius-maximus"))
+        self.assertIn("disk image", f("/Volumes/Claudius Maximus/Claudius Maximus.app/Contents/MacOS/x"))
+        self.assertEqual(f("/Applications/Claudius Maximus.app/Contents/MacOS/claudius-maximus"), "")
+
+    def test_enable_refuses_before_side_effects(self):
+        self._with("mac")
+        exe = "/Volumes/Claudius Maximus/Claudius Maximus.app/Contents/MacOS/claudius-maximus"
+        with mock.patch.object(hostos, "is_frozen", return_value=True), mock.patch.object(sys, "executable", exe), \
+                mock.patch.object(autostart, "disable_legacy_service") as legacy:
+            with self.assertRaises(OSError) as cm:
+                autostart.enable()
+            legacy.assert_not_called()
+        self.assertIn("Applications", str(cm.exception))
+        self.assertFalse(os.path.exists(autostart.plist_path()))
+
+    def test_bundle_plist(self):
+        self._with("mac")
+        exe = "/Applications/Claudius Maximus.app/Contents/MacOS/claudius-maximus"
+        with mock.patch.object(hostos, "is_frozen", return_value=True), mock.patch.object(sys, "executable", exe), \
+                mock.patch.object(autostart, "_run") as run:
+            autostart.enable()
+            run.assert_not_called()   # never launchctl bootstrap the app plist (would start a second app)
+        with open(autostart.plist_path(), "rb") as f:
+            d = plistlib.load(f)
+        self.assertEqual(d["ProgramArguments"], [exe, "app"])
+        self.assertTrue(d["RunAtLoad"])
+        self.assertEqual(d["LimitLoadToSessionType"], "Aqua")
+        self.assertNotIn("WorkingDirectory", d)
+        self.assertTrue(autostart.is_enabled())
+
+
+class AutostartStatusExitTest(TempHome):
+    def test_status_query_exits_zero_when_disabled(self):
+        from companion.__main__ import main
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(main(["autostart", "status"]), 0)
+        self.assertIn("disabled", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

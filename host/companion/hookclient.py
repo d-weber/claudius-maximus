@@ -5,7 +5,8 @@ MUST stay tiny, fast and silent: stdlib only, importable with `python -I -S`, no
 host/hooks/cm_hook.py / cm_statusline.py wrappers all run this same code in a few tens of ms).
 
 Transport (the daemon side is providers/hooks.py):
-  * macOS/Linux: one AF_UNIX SOCK_DGRAM datagram to ~/.claudius-maximus/hooks.sock;
+  * macOS/Linux: one AF_UNIX SOCK_DGRAM datagram to ~/.claudius-maximus/hooks.sock (or, when that path is
+    too long for AF_UNIX, /tmp/claudius-maximus-<uid>-<crc>/hooks.sock: see unix_sock_path);
   * Windows (no AF_UNIX in CPython there): one UDP datagram to 127.0.0.1:<port>, where the daemon writes
     "<port> <key>\\n" to ~/.claudius-maximus/hooks.port. The key (random per daemon start) goes in the JSON as
     "k" so other local programs cannot inject fake hook events by guessing the port.
@@ -49,8 +50,39 @@ def home():
     return os.environ.get("CLAUDIUS_HOME") or os.path.join(os.path.expanduser("~"), ".claudius-maximus")
 
 
+SUN_PATH_MAX = 100   # sun_path is 104 bytes on macOS, 108 on Linux (incl. the NUL): keep a margin
+
+
+def short_sock_dir(base):
+    """Fallback dir for the socket when <state dir>/hooks.sock is too long for AF_UNIX (deep $HOME or
+    $CLAUDIUS_HOME): /tmp/claudius-maximus-<uid>-<crc of the state dir>, created 0700 by the daemon. The crc
+    keeps two state dirs (tests, several checkouts) apart."""
+    import zlib
+    tag = "%08x" % (zlib.crc32(os.fsencode(os.path.abspath(base))) & 0xffffffff)
+    return os.path.join("/tmp", "claudius-maximus-%d-%s" % (os.getuid(), tag))
+
+
+def unix_sock_path(base):
+    """The daemon's AF_UNIX socket path for state dir `base` (shared with providers/hooks.py)."""
+    p = os.path.join(base, "hooks.sock")
+    if IS_WINDOWS or len(os.fsencode(p)) <= SUN_PATH_MAX:
+        return p
+    return os.path.join(short_sock_dir(base), "hooks.sock")
+
+
+def owned_by_me(path):
+    """The fallback socket dir is in world-writable /tmp: only talk to it if it is ours (never leak hook
+    data to a socket another user planted there)."""
+    try:
+        st = os.lstat(path)
+        import stat
+        return stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and not st.st_mode & 0o077
+    except (OSError, AttributeError):
+        return False
+
+
 def sock_path():
-    return os.path.join(home(), "hooks.sock")
+    return unix_sock_path(home())
 
 
 def port_path():
@@ -74,7 +106,8 @@ def target():
     """Where to send: ("unix", path, "") | ("udp", ("127.0.0.1", port), key) | None (daemon not running)."""
     sp = sock_path()
     if not IS_WINDOWS and os.path.exists(sp):
-        return ("unix", sp, "")
+        if os.path.dirname(sp) == home() or owned_by_me(os.path.dirname(sp)):
+            return ("unix", sp, "")
     pk = read_port_file()
     if pk:
         return ("udp", ("127.0.0.1", pk[0]), pk[1])
@@ -156,10 +189,12 @@ def compact(p, event="", key=""):
 def _win_std_fd(which):
     import ctypes
     import msvcrt
-    h = ctypes.windll.kernel32.GetStdHandle(which)  # -10 stdin, -11 stdout
-    if not h or h == ctypes.c_void_p(-1).value:
+    gsh = ctypes.windll.kernel32.GetStdHandle
+    gsh.argtypes, gsh.restype = [ctypes.c_ulong], ctypes.c_void_p   # HANDLE is pointer-sized
+    h = gsh(which & 0xFFFFFFFF)  # -10 stdin, -11 stdout (DWORD)
+    if not h or h == ctypes.c_void_p(-1).value:  # NULL / INVALID_HANDLE_VALUE
         return None
-    return msvcrt.open_osfhandle(h, os.O_RDONLY if which == -10 else os.O_WRONLY)
+    return msvcrt.open_osfhandle(h, (os.O_RDONLY if which == -10 else os.O_WRONLY) | getattr(os, "O_BINARY", 0))
 
 
 def read_stdin():
@@ -214,7 +249,7 @@ def record(p):
     now = time.time()
     path = os.path.join(base, "statusline.json")
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             prev = json.load(f)
         if not isinstance(prev, dict):
             prev = {}
@@ -241,7 +276,7 @@ def record(p):
         out["rate_limits"] = rl
         out["rate_limits_at"] = int(now)
     tmp = path + ".%d.tmp" % os.getpid()
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(out, f)
     os.replace(tmp, path)
 
@@ -265,11 +300,39 @@ def chained_command():
     if cmd:
         return cmd
     try:
-        with open(os.path.join(home(), "statusline-chain.json")) as f:
+        with open(os.path.join(home(), "statusline-chain.json"), encoding="utf-8") as f:
             c = json.load(f)
         return c.get("command") if isinstance(c, dict) else None
     except Exception:
         return None
+
+
+def _win_bash():
+    """Git Bash, the shell Claude Code itself runs hook / status line commands with on Windows (so the user's
+    previous statusLine command, written for it, keeps working): $CLAUDE_CODE_GIT_BASH_PATH, else the bash.exe
+    of the Git for Windows that provides git on PATH. Never System32\\bash.exe (that is WSL). None: use cmd."""
+    p = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH")
+    if p and os.path.isfile(p):
+        return p
+    import shutil
+    git = shutil.which("git")
+    if git:
+        d = os.path.dirname(os.path.realpath(git))   # <Git>\cmd, <Git>\bin or <Git>\mingw64\bin
+        for root in (os.path.dirname(d), os.path.dirname(os.path.dirname(d))):
+            for rel in (("bin", "bash.exe"), ("usr", "bin", "bash.exe")):
+                b = os.path.join(root, *rel)
+                if os.path.isfile(b):
+                    return b
+    return None
+
+
+def chain_argv(cmd):
+    """How to run the chained command: (args, shell) for subprocess.run."""
+    if IS_WINDOWS:
+        bash = _win_bash()
+        if bash:
+            return [bash, "-c", cmd], False
+    return cmd, True
 
 
 def statusline_main(argv=None):
@@ -288,7 +351,9 @@ def statusline_main(argv=None):
             kw = {}
             if IS_WINDOWS:
                 kw["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
-            r = subprocess.run(cmd, shell=True, input=raw, stdout=subprocess.PIPE, timeout=10, **kw)
+                kw["stderr"] = subprocess.DEVNULL  # a windowed exe may have no stderr handle to pass on
+            args, shell = chain_argv(cmd)
+            r = subprocess.run(args, shell=shell, input=raw, stdout=subprocess.PIPE, timeout=10, **kw)
             write_stdout(r.stdout)
         except Exception:
             pass

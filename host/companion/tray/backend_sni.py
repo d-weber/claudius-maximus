@@ -6,7 +6,10 @@ Modelled on ~/projects/claude_system_indicator/claude_tray.py (Gio), which works
  * IconPixmap is a(iiay) of ARGB32 in network byte order, several sizes so the panel never upscales;
  * ItemIsMenu=true: a click opens the menu (GetLayout); NewIcon / NewToolTip / LayoutUpdated tell the
    host to re-read;
- * the watcher's NameOwnerChanged is watched, so a restarted plasmashell gets us again.
+ * the watcher's NameOwnerChanged is watched, so a restarted plasmashell gets us again; while unregistered we
+   also retry every REGISTER_RETRY_S (an app autostarted before the panel is up must never give up);
+ * SIGINT/SIGTERM and the loss of the session bus (logout) end the app through on_quit, so the daemon thread
+   stops cleanly (status.json, instance lock).
 GNOME needs the AppIndicator extension for SNI; without a watcher the app keeps running and logs it.
 
 Threading: run() owns an asyncio loop on the main thread. set_* can be called from any thread: they store the
@@ -33,6 +36,8 @@ SNI_PATH = "/StatusNotifierItem"
 MENU_PATH = "/MenuBar"
 WATCHER = "org.kde.StatusNotifierWatcher"
 PIXMAP_SIZES = (22, 32, 44, 64)
+REGISTER_RETRY_S = 15.0   # also retry on a timer: NameOwnerChanged covers a watcher that appears later, this covers
+                          # a watcher that is there but refused/failed the first registration (plasmashell starting)
 
 
 def argb_pixmap(img) -> tuple[int, int, bytes]:
@@ -292,6 +297,7 @@ class SNITray(TrayBackend):
         self.bus: MessageBus | None = None
         self.name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
         self._stop: asyncio.Event | None = None
+        self._stop_requested = False   # stop() before the loop runs (or between loop creation and _main)
         self._lock = threading.Lock()
         self._pending_menu: list[MenuItem] | None = None
         self.sni = StatusNotifierItem(self)
@@ -356,6 +362,7 @@ class SNITray(TrayBackend):
         self._soon(lambda: asyncio.ensure_future(self._notify(title, body)))
 
     def stop(self) -> None:
+        self._stop_requested = True
         self._soon(lambda: self._stop and self._stop.set())
 
     # -- menu clicks ----------------------------------------------------------------------------
@@ -423,6 +430,14 @@ class SNITray(TrayBackend):
 
     async def _main(self):
         self._stop = asyncio.Event()
+        if self._stop_requested:
+            return
+        # first: a SIGTERM during startup (e.g. logout right after login) must still go through on_quit
+        for sig in (_signal.SIGINT, _signal.SIGTERM):
+            try:
+                self.loop.add_signal_handler(sig, self._quit_requested)
+            except (NotImplementedError, RuntimeError, ValueError):
+                pass
         self.bus = await MessageBus(bus_type=BusType.SESSION).connect()
         self.bus.export(SNI_PATH, self.sni)
         self.bus.export(MENU_PATH, self.menu)
@@ -438,21 +453,42 @@ class SNITray(TrayBackend):
         if not self.registered:
             log.warning("tray: no StatusNotifierWatcher yet (GNOME needs the AppIndicator extension); "
                         "will register when one appears")
-        for sig in (_signal.SIGINT, _signal.SIGTERM):
-            try:
-                self.loop.add_signal_handler(sig, self._quit_requested)
-            except (NotImplementedError, RuntimeError, ValueError):
-                pass
         if self.on_ready:
             try:
                 self.on_ready()
             except Exception:
                 log.exception("tray on_ready failed")
-        await self._stop.wait()
+        retry = asyncio.ensure_future(self._register_retry())
+        gone = asyncio.ensure_future(self._bus_gone())
+        if self._stop_requested:
+            self._stop.set()
         try:
-            self.bus.disconnect()
-        except Exception:
-            pass
+            await self._stop.wait()
+        finally:
+            for t in (retry, gone):
+                t.cancel()
+            try:
+                self.bus.disconnect()
+            except Exception:
+                pass
+
+    async def _register_retry(self):
+        while True:
+            await asyncio.sleep(REGISTER_RETRY_S)
+            if not self.registered:
+                await self._register()
+
+    async def _bus_gone(self):
+        """The session bus went away (logout, dbus restart): nothing can show us any more, quit cleanly."""
+        try:
+            await self.bus.wait_for_disconnect()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.info("tray: session bus error: %s", e)
+        if not self._stop.is_set():
+            log.warning("tray: lost the D-Bus session bus; quitting")
+            self._quit_requested()
 
     def _quit_requested(self):
         if self.on_quit:
@@ -466,6 +502,19 @@ class SNITray(TrayBackend):
         try:
             self.loop.run_until_complete(self._main())
         finally:
+            try:   # cancel leftovers (a pending notification, a registration) so close() doesn't warn
+                pending = [t for t in asyncio.all_tasks(self.loop) if not t.done()]
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    self.loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass
+            for sig in (_signal.SIGINT, _signal.SIGTERM):
+                try:
+                    self.loop.remove_signal_handler(sig)
+                except Exception:
+                    pass
             self.loop.close()
             self.loop = None
             self.bus = None

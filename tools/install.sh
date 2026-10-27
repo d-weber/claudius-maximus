@@ -1,11 +1,14 @@
 #!/bin/bash
-# Claudius Maximus — install the host side for the current user (macOS or Linux).
+# Claudius Maximus — headless install of the host side from a source checkout (macOS or Linux).
 #   tools/install.sh [--no-service] [--no-hooks] [--no-statusline]      (--no-launchd = --no-service)
 # Idempotent: safe to re-run (e.g. after moving the repo or updating).
 #  1. Python venv in host/.venv with pyserial (+ psutil, optional)
 #  2. Claude Code hooks + statusLine wrapper merged into ~/.claude/settings.json (timestamped backup)
 #  3. background service: macOS LaunchAgent ~/Library/LaunchAgents/com.claudius-maximus.daemon.plist
 #     (RunAtLoad, KeepAlive) or Linux systemd user unit ~/.config/systemd/user/claudius-maximus.service
+# The normal path is the desktop app from the GitHub Releases page (tray icon, flasher, start at login); this
+# script is for servers and development. The app and this service cannot both own the device: with both, the
+# app only shows the service's status; the app's "Start at login" stops and disables the service.
 # If $HOME is not your real home directory (testing), launchctl/systemctl are never called.
 set -euo pipefail
 
@@ -28,7 +31,7 @@ for a in "$@"; do
     --no-launchd|--no-service) DO_LAUNCHD=0 ;;
     --no-hooks) DO_HOOKS=0 ;;
     --no-statusline) SL_FLAG="--no-statusline" ;;
-    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "unknown option $a" >&2; exit 2 ;;
   esac
 done
@@ -43,7 +46,7 @@ fi
 
 echo "==> Python environment ($VENV)"
 if [ ! -x "$PY" ]; then
-  BASEPY="$(command -v python3.15 || command -v python3.14 || command -v python3.13 || command -v python3.12 || command -v python3)"
+  BASEPY="$(command -v python3.15 || command -v python3.14 || command -v python3.13 || command -v python3.12 || command -v python3.11 || command -v python3)"
   "$BASEPY" -m venv "$VENV"
 fi
 if ! "$PY" -c 'import serial' 2>/dev/null; then
@@ -104,3 +107,6 @@ echo
 echo "Done. Check with:   $PY -m companion status      (run from $ROOT/host)"
 echo "Logs:               $LOG"
 echo "Hooks take effect in new Claude Code sessions (or after /hooks reload)."
+echo "Desktop app instead (tray, firmware updates): https://github.com/d-weber/claudius-maximus/releases"
+echo "  It cannot share the device with this service; enabling its Start at login disables the service."
+echo "Remove with:        $ROOT/tools/uninstall.sh   (also removes the app's start-at-login entry, if any)"

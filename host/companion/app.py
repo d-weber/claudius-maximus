@@ -32,9 +32,10 @@ log = logging.getLogger("companion.app")
 USAGE_URL = "https://claude.ai/settings/usage"
 REFRESH_S = 2.0
 NO_HELLO_INSTALL_S = 10.0     # a board port without a hello for this long => offer "Install firmware…"
-SLOW_REFRESH_S = 10.0
+SLOW_REFRESH_S = 10.0         # autostart / hooks checks touch files: not every 2 s
 DAEMON_RETRY_S = 10.0         # observer mode: how often to try to take over the daemon lock
-FLASH_ERROR_SHOW_S = 300.0    # a failed flash keeps the badge red this long         # autostart / hooks checks touch files: not every 2 s
+FLASH_ERROR_SHOW_S = 300.0    # a failed flash keeps the badge red this long
+QUIT_FLASH_WAIT_S = 180.0     # Quit during a flash waits for esptool to finish (a half-written app won't boot)
 BOARD_LABELS = {"4b": "4B", "v4": "V4"}
 DEFAULT_BOARD = "4b"
 APP_TITLE = "Claudius Maximus"
@@ -402,6 +403,7 @@ class App:
         self._next_daemon_try = 0.0
         self.flash_state: dict = {"active": False, "pct": 0, "msg": "", "error": ""}
         self._flash_lock = threading.Lock()
+        self._flash_thread: threading.Thread | None = None
         self._quit = threading.Event()
         self._refresh_lock = threading.Lock()
         self._last_status: dict = {}
@@ -517,8 +519,12 @@ class App:
             st["update"] = (False, "")
             st["bundled"] = None
         now = time.time()
-        board_port = any(p.get("kind") in ("native", "uart") for p in st["ports"])
-        if board_port and not st.get("fw") and not self.flash_state["active"]:
+        # "Install firmware…" = the daemon has the native port open but no hello comes (blank or foreign
+        # firmware, board stuck in the ROM loader). Not when the port can't be opened (busy: a dev tool holds the
+        # device lock; paused; permissions) or only the CH343 port is there: no conclusion possible then, the
+        # "Flash firmware" submenu stays available.
+        native = any(p.get("kind") == "native" for p in st["ports"])
+        if native and st.get("connected") and not st.get("fw") and not self.flash_state["active"]:
             self._nohello_since = self._nohello_since or now
         else:
             self._nohello_since = None
@@ -572,19 +578,47 @@ class App:
         login. autostart.enable() also retires the old headless systemd/launchd daemon of a script install,
         whose lock the app then takes over within DAEMON_RETRY_S."""
         if settings_get("first_run_done", False):
+            self._refresh_stale_hooks()
             return
         done = []
-        if self.install_hooks(notify=False):
+        hooks_ok = self.install_hooks(notify=False)
+        if hooks_ok:
             done.append("Claude Code hooks installed")
-        if installer_handles_autostart():
+        else:
+            done.append("Could not install the Claude Code hooks (see the log; the menu has Install)")
+        # Autostart is enabled once, even if the hooks failed and the first run is retried at the next start:
+        # by then the user may have turned "Start at login" off on purpose.
+        if settings_get("first_run_autostart_done", False):
+            pass
+        elif installer_handles_autostart():
             log.info("first run: the installer manages start at login; not touching it")
+            settings_set("first_run_autostart_done", True)
         else:
             note = self.set_autostart(True, notify=False)
             if note:
                 done.append(note if isinstance(note, str) else "starts at login")
+                settings_set("first_run_autostart_done", True)
         self.notify("Claudius Maximus is running",
-                    (". ".join(d.rstrip(".") for d in done) + ". " if done else "") + "It lives in the system tray.")
-        settings_set("first_run_done", True)
+                    (". ".join(d.rstrip(".") for d in done) + ". " if done else "") + ("It lives in the menu bar." if sys.platform == "darwin" else "It lives in the system tray."))
+        if hooks_ok:   # otherwise try again at the next start (e.g. ~/.claude/settings.json was unreadable)
+            settings_set("first_run_done", True)
+
+    def _refresh_stale_hooks(self):
+        """Every start after the first: if our hooks are installed but their command is not this program's
+        (the AppImage moved, the macOS app was first run from the dmg, a python venv was recreated), rewrite them
+        so Claude Code doesn't run a missing file. Never installs hooks the user removed."""
+        try:
+            cm = load_cm_settings()
+            matches = getattr(cm, "installed_matches_self", None)
+            if matches is None or not cm.installed().get("hooks"):
+                return
+            if _quiet(matches):
+                return
+        except Exception as e:
+            _warn_once("hooks-stale", f"checking the installed hook command failed: {e}")
+            return
+        log.info("the installed Claude Code hooks point to another program; reinstalling them for this one")
+        self.install_hooks(notify=False)
 
     # -- actions ---------------------------------------------------------------------------------
     def install_hooks(self, notify: bool = True) -> bool:
@@ -666,7 +700,8 @@ class App:
         if board != self.board:
             self.board = board
             settings_set("board", board)
-        threading.Thread(target=self._flash_worker, args=(board,), name="flash", daemon=True).start()
+        self._flash_thread = threading.Thread(target=self._flash_worker, args=(board,), name="flash", daemon=True)
+        self._flash_thread.start()
 
     def _flash_worker(self, board: str):
         label = BOARD_LABELS.get(board, board)
@@ -721,6 +756,10 @@ class App:
             return
         self._quit.set()
         log.info("quitting")
+        ft = self._flash_thread
+        if ft is not None and ft.is_alive() and ft is not threading.current_thread():
+            log.info("quit: waiting for the firmware flash to finish")
+            ft.join(timeout=QUIT_FLASH_WAIT_S)
         d = self.daemon
         if d is not None:
             d.stop = True
@@ -785,7 +824,9 @@ def main(argv=None) -> int:
     holder["app"] = app
     _guard("first refresh", app.refresh)
     if opts.seconds:
-        threading.Timer(opts.seconds, app.quit).start()
+        t = threading.Timer(opts.seconds, app.quit)
+        t.daemon = True   # a non-daemon timer would keep the process alive after an earlier Quit
+        t.start()
     if not sys.platform.startswith("linux"):   # the SNI backend handles signals on its asyncio loop
         import signal
         try:
@@ -795,6 +836,10 @@ def main(argv=None) -> int:
             pass
     try:
         backend.run()
+    except Exception:
+        # e.g. no D-Bus session bus: the windowed app has no stderr, so the log is the only trace
+        log.exception("tray backend failed")
+        return 1
     finally:
         app.quit()
     log.info("Claudius Maximus app stopped")

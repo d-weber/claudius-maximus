@@ -40,6 +40,7 @@ jobs:
         run: |
           mkdir -p fwzip
           for dir in host/companion/firmware/*/; do
+            [ -f "$dir/manifest.json" ] || continue   # e.g. __pycache__/
             board="$(basename "$dir")"
             fwver="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["fw_version"])' "$dir/manifest.json")"
             (cd "$dir" && zip -r "$GITHUB_WORKSPACE/fwzip/firmware-$board-$fwver.zip" .)
@@ -66,7 +67,9 @@ jobs:
         include:
           - { runner: windows-latest, os: windows, arch: x64 }
           - { runner: macos-14, os: macos, arch: arm64 }
-          # Intel macOS: GitHub retired the macos-13 image; macos-15-intel is its x64 replacement.
+          # Intel macOS: GitHub retired the macos-13 image (Dec 2025); macos-15-intel is its x64 replacement and,
+          # per GitHub, the last Intel image (supported until about Aug 2027): drop this row when it goes away.
+          # macos-14 = arm64 (Apple silicon).
           - { runner: macos-15-intel, os: macos, arch: x64 }
           # Oldest supported Ubuntu = oldest glibc, so the AppImage/tar.gz runs on most distributions.
           - { runner: ubuntu-22.04, os: linux, arch: x64 }

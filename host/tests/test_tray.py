@@ -217,6 +217,9 @@ class AppTest(unittest.TestCase):
         self.tmp = __import__("tempfile").mkdtemp()
         self.env = mock.patch.dict(os.environ, {"CLAUDIUS_HOME": self.tmp})
         self.env.start()
+        stale = mock.patch.object(appmod.App, "_refresh_stale_hooks")   # reads the real Claude settings
+        stale.start()
+        self.addCleanup(stale.stop)
 
     def tearDown(self):
         self.env.stop()
@@ -437,6 +440,85 @@ class PystrayBackendTest(unittest.TestCase):
         tray.stop()
         self.assertTrue(tray.icon.stopped)
 
+    def test_win32_updates_run_on_ui_thread_and_wait_for_closed_menu(self):
+        """Windows: set_* post to pystray's window; a menu swap while the popup is open waits for it to close."""
+        posted = []
+        with mock.patch("sys.platform", "win32"):
+            tray = self.bp.PystrayTray(pystray_module=self.mod)
+        icon = tray.icon
+        icon._hwnd = 1234
+        opened = []
+
+        def pystray_on_notify(w, l):   # pystray's handler: TrackPopupMenuEx runs a modal loop in here
+            opened.append(icon.menu)
+            ui.drain()                  # the modal loop dispatches our posted message meanwhile
+            opened.append(icon.menu)
+            return 0
+        icon._message_handlers = {self.bp.WM_PYSTRAY_NOTIFY: pystray_on_notify}
+        ui = tray._win
+        ui._post = lambda: posted.append(1) or True
+        tray._running = True
+        self.assertTrue(ui.install())
+        app = FakeApp()
+        tray.set_menu(appmod.build_menu(STATES["up_to_date"], app))
+        self.assertEqual(posted, [1])
+        icon.menu = "old"   # nothing ran yet on the "UI thread"
+        tray.set_tooltip("T", ["x"])
+        self.assertNotEqual(icon.title, self.bp.tooltip_text("T", ["x"]))
+        icon._message_handlers[self.bp.WM_PYSTRAY_NOTIFY](0, 0x0205)   # right click: menu opens, then closes
+        self.assertEqual(opened[0], "old")
+        self.assertEqual(opened[1], "old")           # not swapped under the open popup
+        self.assertIsInstance(icon.menu, self.mod.Menu)   # applied once it closed
+        self.assertEqual(icon.title, self.bp.tooltip_text("T", ["x"]))   # non-menu updates ran during the modal loop
+
+    def test_win32_without_internals_runs_directly(self):
+        with mock.patch("sys.platform", "win32"):
+            tray = self.bp.PystrayTray(pystray_module=self.mod)
+        self.assertFalse(tray._win.install())   # fake Icon has no _message_handlers/_hwnd
+        tray._running = True
+        tray.set_tooltip("T", [])
+        self.assertEqual(tray.icon.title, "T")
+
+    def test_win32_notification_limits(self):
+        with mock.patch("sys.platform", "win32"):
+            tray = self.bp.PystrayTray(pystray_module=self.mod)
+            tray.notify("t" * 100, "b" * 400)
+        (title, body), = tray.icon.notified
+        self.assertEqual((len(title), len(body)), (63, 255))
+        self.assertEqual(len(self.bp.cut_utf16("\U0001F600" * 100, 127).encode("utf-16-le")) // 2, 127)
+        self.assertEqual(self.bp.cut_utf16("short", 127), "short")
+
+    def test_darwin_marshalling(self):
+        after, later = [], []
+        helpers = (lambda f, *a: after.append((f, a)), lambda d, f, *a: later.append((d, f, a)))
+        with mock.patch("sys.platform", "darwin"), mock.patch.object(self.bp, "_mac_helpers", return_value=helpers):
+            tray = self.bp.PystrayTray(pystray_module=self.mod)
+            tray._running = True
+            tray.set_tooltip("T", ["x"])
+            tray.set_menu(appmod.build_menu(STATES["up_to_date"], FakeApp()))
+            done = threading.Event()
+            tray.icon.notify = lambda m, t=None: done.set()
+            tray.notify("a", "b")
+            tray.stop()
+        self.assertTrue(done.wait(2))            # notify: own thread (osascript), not the main thread
+        self.assertNotEqual(tray.icon.title, "T - x")
+        self.assertEqual(len(later), 1)          # menu: callLater (default run loop mode: not while open)
+        self.assertGreater(later[0][0], 0)       # a zero delay would run it immediately, even mid-tracking
+        self.assertEqual(len(after), 2)          # tooltip + stop on the main thread
+        for f, a in after:
+            f(*a)
+        later[0][1](*later[0][2])
+        self.assertEqual(tray.icon.title, "T - x")
+        self.assertIsInstance(tray.icon.menu, self.mod.Menu)
+        self.assertTrue(tray.icon.stopped)
+
+    def test_pystray_not_imported_on_linux(self):
+        sys.modules.pop("pystray", None)
+        import importlib
+        import companion.tray.backend_pystray as bp
+        importlib.reload(bp)
+        self.assertNotIn("pystray", sys.modules)
+
     def test_make_backend_by_platform(self):
         import companion.tray as tray_pkg
         with mock.patch("sys.platform", "win32"):
@@ -529,6 +611,195 @@ class SNITest(unittest.TestCase):
 
     def test_underscore_escaped(self):
         self.assertEqual(self.sni.menu_label("cu.usbmodem_1"), "cu.usbmodem__1")
+
+
+# ---------------------------------------------------------------------------------------------
+class AppIntegrationTest(unittest.TestCase):
+    """Review fixes: install-needed heuristic, first-run retry, quit during a flash, --seconds timer, stale hooks."""
+
+    def setUp(self):
+        self.tmp = __import__("tempfile").mkdtemp()
+        self.env = mock.patch.dict(os.environ, {"CLAUDIUS_HOME": self.tmp})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        __import__("shutil").rmtree(self.tmp, ignore_errors=True)
+
+    def _app(self, daemon_status, ports):
+        fake_flasher = types.ModuleType("companion.flasher")
+        fake_flasher.detect = lambda: ports
+        fake_flasher.needs_update = lambda fw, board: (False, "up to date")
+        fake_flasher.bundled = lambda: {"4b": object()}
+        app = appmod.App(types.SimpleNamespace(no_setup=True), backend=None, start_daemon=False)
+        app.daemon = types.SimpleNamespace(public_status=lambda: dict(daemon_status))
+        app.autostart = lambda: False
+        app.hooks_installed = lambda: True
+        import companion
+        patches = (mock.patch.dict(sys.modules, {"companion.flasher": fake_flasher}),
+                   mock.patch.object(companion, "flasher", fake_flasher, create=True))
+        return app, patches
+
+    def _install_needed_after(self, daemon_status, ports, seconds=11):
+        app, (p1, p2) = self._app(daemon_status, ports)
+        t = [1000.0]
+        with p1, p2, mock.patch.object(appmod.time, "time", lambda: t[0]):
+            app.status()
+            t[0] += seconds
+            return app.status()["install_needed"]
+
+    def test_install_needed_only_when_port_open_without_hello(self):
+        self.assertTrue(self._install_needed_after({"connected": True, "fw": None}, [NATIVE]))
+        self.assertFalse(self._install_needed_after({"connected": True, "fw": None}, [NATIVE], seconds=5))
+        # a dev tool holds the device lock: the port is not ours, no conclusion about the firmware
+        self.assertFalse(self._install_needed_after(
+            {"connected": False, "fw": None, "device_error": "device lock held by another tool"}, [NATIVE]))
+        # only the CH343 port: the link can't work there, the Flash submenu stays
+        self.assertFalse(self._install_needed_after({"connected": False, "fw": None}, [UART]))
+        self.assertFalse(self._install_needed_after({"connected": True, "fw": "0.3.0"}, [NATIVE]))
+
+    def test_first_run_retried_when_hooks_fail_autostart_once(self):
+        backend = mock.Mock()
+        app = appmod.App(types.SimpleNamespace(no_setup=True), backend=backend, start_daemon=False)
+        app.install_hooks = mock.Mock(side_effect=[False, True])
+        app._refresh_stale_hooks = mock.Mock()
+        app.set_autostart = mock.Mock(return_value="will start at login")
+        store = {}
+        with mock.patch.object(appmod, "settings_get", lambda k, d=None: store.get(k, d)), \
+                mock.patch.object(appmod, "settings_set", store.__setitem__), \
+                mock.patch.object(appmod, "installer_handles_autostart", return_value=False):
+            app._first_run()
+            self.assertNotIn("first_run_done", store)
+            self.assertIn("Could not install", backend.notify.call_args.args[1])
+            app._first_run()
+            self.assertTrue(store["first_run_done"])
+            app._first_run()
+        self.assertEqual(app.install_hooks.call_count, 2)
+        app.set_autostart.assert_called_once_with(True, notify=False)
+
+    def test_stale_hooks_reinstalled_on_later_starts(self):
+        app = appmod.App(types.SimpleNamespace(no_setup=True), backend=None, start_daemon=False)
+        app.install_hooks = mock.Mock(return_value=True)
+        cm = types.SimpleNamespace(installed=lambda: {"hooks": True}, installed_matches_self=lambda: False)
+        with mock.patch.object(appmod, "settings_get", lambda k, d=None: True), \
+                mock.patch.object(appmod, "load_cm_settings", return_value=cm):
+            app._first_run()
+            app.install_hooks.assert_called_once_with(notify=False)
+            cm.installed_matches_self = lambda: True
+            app._first_run()
+            cm.installed, cm.installed_matches_self = (lambda: {"hooks": False}), (lambda: False)
+            app._first_run()       # the user removed the hooks: leave them removed
+        self.assertEqual(app.install_hooks.call_count, 1)
+
+    def test_quit_waits_for_flash_then_stops_daemon(self):
+        order = []
+        release = threading.Event()
+        backend = mock.Mock()
+        backend.stop.side_effect = lambda: order.append("tray stop")
+        app = appmod.App(types.SimpleNamespace(no_setup=True), backend=backend, start_daemon=False)
+
+        def worker():
+            release.wait(2)
+            order.append("flash done")
+        app._flash_thread = threading.Thread(target=worker)
+        app._flash_thread.start()
+        d = types.SimpleNamespace(stop=False)
+        app.daemon = d
+        threading.Timer(0.2, release.set).start()
+        app.quit()
+        self.assertEqual(order, ["flash done", "tray stop"])
+        self.assertTrue(d.stop)
+
+    def test_seconds_timer_is_daemon(self):
+        timers = []
+        real_timer = threading.Timer
+
+        def timer(*a, **kw):
+            t = real_timer(*a, **kw)
+            timers.append(t)
+            return t
+
+        class FakeBackend:
+            def __init__(self, on_ready, on_quit):
+                self.stopped = threading.Event()
+
+            def run(self):
+                self.stopped.wait(5)
+
+            def stop(self):
+                self.stopped.set()
+
+            def __getattr__(self, name):
+                return lambda *a, **kw: None
+
+        class FakeApp2:
+            def __init__(self, opts, backend):
+                self.backend = backend
+
+            def refresh(self):
+                pass
+
+            def quit(self):
+                self.backend.stop()
+        with mock.patch("companion.tray.make_backend", FakeBackend), mock.patch.object(appmod, "App", FakeApp2), \
+                mock.patch.object(appmod, "setup_logging"), mock.patch.object(appmod.threading, "Timer", timer):
+            t0 = time.time()
+            self.assertEqual(appmod.main(["app", "--no-setup", "--seconds", "0.1"]), 0)
+        self.assertLess(time.time() - t0, 3)
+        self.assertTrue(timers and all(t.daemon for t in timers))
+
+
+@unittest.skipUnless(HAVE_DBUS_FAST, "dbus-fast not installed")
+class SNILifecycleTest(unittest.TestCase):
+    def setUp(self):
+        from companion.tray import backend_sni
+        self.sni = backend_sni
+
+    def test_stop_before_run_returns(self):
+        tray = self.sni.SNITray()
+        tray.stop()                       # e.g. --seconds elapsed / Quit before the loop started
+        done = threading.Event()
+        with mock.patch.object(self.sni, "MessageBus") as mb:
+            th = threading.Thread(target=lambda: (tray.run(), done.set()), daemon=True)
+            th.start()
+            self.assertTrue(done.wait(3))
+        mb.assert_not_called()
+
+    def test_register_retry_until_watcher_accepts(self):
+        import asyncio
+        tray = self.sni.SNITray()
+        calls = []
+
+        async def register():
+            calls.append(1)
+            tray.registered = len(calls) >= 3
+
+        tray._register = register
+
+        async def go():
+            with mock.patch.object(self.sni, "REGISTER_RETRY_S", 0.01):
+                t = asyncio.ensure_future(tray._register_retry())
+                await asyncio.sleep(0.3)
+                t.cancel()
+        asyncio.run(go())
+        self.assertEqual(len(calls), 3, "keeps retrying while unregistered, stops once registered")
+
+    def test_bus_loss_quits(self):
+        import asyncio
+        quit_called = threading.Event()
+        tray = self.sni.SNITray(on_quit=quit_called.set)
+
+        class Bus:
+            async def wait_for_disconnect(self):
+                return None
+
+        async def go():
+            tray._stop = asyncio.Event()
+            tray.bus = Bus()
+            await tray._bus_gone()
+        with self.assertLogs("companion.tray", "WARNING"):
+            asyncio.run(go())
+        self.assertTrue(quit_called.wait(2))
 
 
 if __name__ == "__main__":
