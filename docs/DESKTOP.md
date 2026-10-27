@@ -132,8 +132,8 @@ class Port:
     kind: str              # "native" (303a:1001 USB-Serial-JTAG = the link port) | "uart" (1a86:55d3 CH343 = the 4B's USB-TO-UART port) | "other"
     vid: int; pid: int; serial: str | None; description: str
 
-BOARDS = {"4b": "ESP32-S3-Touch-LCD-4B", "v4": "ESP32-S3-Touch-LCD-4 V4"}   # id -> hello BOARD_NAME
-def board_id(board) -> str | None                   # id or BOARD_NAME -> "4b" | "v4"
+BOARDS = {"4b": "ESP32-S3-Touch-LCD-4B"}   # id -> hello BOARD_NAME (one board; the id keeps the manifest layout)
+def board_id(board) -> str | None                   # id or BOARD_NAME -> "4b"
 def detect() -> list[Port]                          # enumeration only, no device I/O
 def link_port(ports=None) -> Port | None            # the native port, if any
 def bundled() -> dict[str, Manifest]                # board id -> manifest of the firmware shipped with this app
@@ -183,7 +183,7 @@ package's `companion/firmware/`, and `<_MEIPASS>/companion/firmware/`.
 Firmware version: `FW_VERSION` in `firmware/src/core/version.h`, read by `fw_bundle.py`; bump it on every release
 that changes firmware, it is how installed apps know to offer an update.
 
-CLI: `claudius-maximus detect` (ports, link port, bundled firmware), `claudius-maximus flash [--board 4b|v4]
+CLI: `claudius-maximus detect` (ports, link port, bundled firmware), `claudius-maximus flash [--board 4b]
 [--port X] [--erase]` (board default: the `board` setting, else `4b`; claims the device from a running daemon;
 progress on stderr; exit 0/1).
 
@@ -223,7 +223,7 @@ Menu (top to bottom), refreshed every 2 s: device line (`Device: connected on CO
 not found` / `Device: found on X, not answering` / `Device: busy on X (holder)` / `Board on USB-TO-UART port: move
 the cable to USB-OTG` / `Flashing firmware: N%`); `Sessions: 2 (1 working, 1 needs you)`; `Plan: 5h 42% · 7d 12%`
 (when known); separator; one of `Update firmware (0.2.0 → 0.3.0)…` (connected, older fw), `Install firmware…`
-(a board port seen but no hello for 10 s) or `Flash firmware ▸ 4B / V4`; `Start at login` (check);
+(a board port seen but no hello for 10 s) or `Flash firmware…`; `Start at login` (check);
 `Claude Code hooks: installed` / `Install Claude Code hooks`; `Open log`; `Open claude.ai usage`; separator;
 `Quit`.
 

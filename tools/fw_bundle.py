@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the firmware and bundle the flashable images for the desktop app.
 
-  host/.venv/bin/python tools/fw_bundle.py [--board 4b|v4|all] [--no-build] [--out DIR]
+  host/.venv/bin/python tools/fw_bundle.py [--board 4b|all] [--no-build] [--out DIR]
 
 For each board: `pio run -e <env>` in its own build dir (firmware/.pio/build-bundle/<env>, so it never collides
 with tools/dev.py builds), then copy bootloader.bin, partitions.bin, boot_app0.bin (from the Arduino framework
@@ -13,7 +13,7 @@ Offsets and flash parameters are the ones `pio run -t upload -v` passes to espto
   --flash-mode dio --flash-freq 80m --flash-size detect
   0x0 bootloader.bin 0x8000 partitions.bin 0xe000 boot_app0.bin 0x10000 firmware.bin
 (PlatformIO turns board_build.flash_mode = qio into "dio" for the image header; the QIO bootloader switches
-modes itself.) We write flash_size 16MB instead of "detect": both boards carry 16 MB and it skips a probe.
+modes itself.) We write flash_size 16MB instead of "detect": the board carries 16 MB and it skips a probe.
 """
 from __future__ import annotations
 
@@ -30,8 +30,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 FW = ROOT / "firmware"
 
-ENVS = {"4b": "companion", "v4": "companion_v4"}
-NAMES = {"4b": "ESP32-S3-Touch-LCD-4B", "v4": "ESP32-S3-Touch-LCD-4 V4"}   # board.h BOARD_NAME
+ENVS = {"4b": "companion"}
+NAMES = {"4b": "ESP32-S3-Touch-LCD-4B"}   # board.h BOARD_NAME
 PARTS = [("bootloader.bin", "0x0"), ("partitions.bin", "0x8000"), ("boot_app0.bin", "0xe000"),
          ("firmware.bin", "0x10000")]
 FLASH = {"chip": "esp32s3", "flash_size": "16MB", "flash_mode": "dio", "flash_freq": "80m"}
@@ -106,7 +106,7 @@ def bundle(board: str, out_root: Path, tree: str, version: str) -> Path:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--board", choices=["4b", "v4", "all"], default="all")
+    ap.add_argument("--board", choices=["4b", "all"], default="all")
     ap.add_argument("--no-build", action="store_true", help="bundle the existing build dir as is")
     ap.add_argument("--out", type=Path, default=ROOT / "host" / "companion" / "firmware")
     a = ap.parse_args(argv)

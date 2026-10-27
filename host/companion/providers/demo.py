@@ -25,7 +25,7 @@ TOOLS = [
     ("Bash", ["npm test", "pio run -t upload", "git status", "pytest -x tests/", "Build firmware and flash"]),
     ("Grep", ["\"TODO\" in src/", "\"useEffect\" in *.tsx", "\"class Provider\""]),
     ("WebSearch", ["ST7701 init sequence", "LVGL 8 tileview"]),
-    ("WebFetch", ["docs.lvgl.io/8.4/widgets/tileview.html", "waveshare.com/wiki/ESP32-S3-Touch-LCD-4"]),
+    ("WebFetch", ["docs.lvgl.io/8.4/widgets/tileview.html", "waveshare.com/wiki/ESP32-S3-Touch-LCD-4B"]),
     ("Write", ["src/fx/alerts.cpp", "docs/PLAN.md"]),
     ("Agent", ["Explore auth module", "Research pricing"]),
 ]

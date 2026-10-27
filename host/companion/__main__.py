@@ -5,7 +5,7 @@
     focus SID                    raise the terminal running that session
     app                          tray app (companion/app.py)
     detect                       serial ports + bundled firmware (companion/flasher.py)
-    flash [--board 4b|v4] [--port P] [--erase]
+    flash [--board 4b] [--port P] [--erase]
     hook | statusline            what Claude Code runs (fast path: companion/hookclient.py, nothing else)
     autostart enable|disable|status
     hooks install|uninstall|check [--no-statusline]
@@ -224,7 +224,7 @@ def build_parser():
     sub.add_parser("app", help="tray / menu bar app (runs the daemon)", add_help=False)
     sub.add_parser("detect", help="list serial ports and the bundled firmware")
     p = sub.add_parser("flash", help="flash the bundled firmware")
-    p.add_argument("--board", choices=["4b", "v4"])
+    p.add_argument("--board", choices=["4b"])
     p.add_argument("--port")
     p.add_argument("--erase", action="store_true", help="erase the whole flash first")
     sub.add_parser("hook", help="Claude Code hook relay (reads the hook JSON on stdin)")

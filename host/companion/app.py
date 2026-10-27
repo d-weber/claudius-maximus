@@ -36,7 +36,7 @@ SLOW_REFRESH_S = 10.0         # autostart / hooks checks touch files: not every 
 DAEMON_RETRY_S = 10.0         # observer mode: how often to try to take over the daemon lock
 FLASH_ERROR_SHOW_S = 300.0    # a failed flash keeps the badge red this long
 QUIT_FLASH_WAIT_S = 180.0     # Quit during a flash waits for esptool to finish (a half-written app won't boot)
-BOARD_LABELS = {"4b": "4B", "v4": "V4"}
+BOARD_LABELS = {"4b": "4B"}
 DEFAULT_BOARD = "4b"
 APP_TITLE = "Claudius Maximus"
 
@@ -176,7 +176,7 @@ def _port_dict(p) -> dict:
 
 
 def board_id(name: str | None) -> str | None:
-    """Device hello `board` (its BOARD_NAME, e.g. "ESP32-S3-Touch-LCD-4B") -> "4b" | "v4"."""
+    """Device hello `board` (its BOARD_NAME, e.g. "ESP32-S3-Touch-LCD-4B") -> "4b"."""
     if not name:
         return None
     if name.lower() in BOARD_LABELS:
@@ -202,8 +202,6 @@ def board_id(name: str | None) -> str | None:
     n = name.upper().replace("_", "-")
     if n.endswith("4B"):
         return "4b"
-    if n.endswith("V4") or n.endswith("LCD-4"):
-        return "v4"
     return None
 
 
@@ -369,12 +367,9 @@ def build_menu(st: dict, app) -> list:
         items.append(MenuItem("Install firmware…", action=lambda: app.flash(chosen), enabled=can_flash))
     else:
         bundled = st.get("bundled")
-        subs = []
-        for bid, label in BOARD_LABELS.items():
-            ok = can_flash and (bundled is None or bid in bundled)
-            subs.append(MenuItem(label, action=(lambda b=bid: app.flash(b)), enabled=ok,
-                                 checked=(bid == (dev_board or chosen))))
-        items.append(MenuItem("Flash firmware", children=subs, enabled=can_flash))
+        b = dev_board or chosen
+        ok = can_flash and (bundled is None or b in bundled)
+        items.append(MenuItem("Flash firmware…", action=lambda: app.flash(b), enabled=ok))
 
     items.append(MenuItem("Start at login", action=lambda: app.set_autostart(not st.get("autostart")),
                           checked=bool(st.get("autostart"))))
@@ -522,7 +517,7 @@ class App:
         # "Install firmware…" = the daemon has the native port open but no hello comes (blank or foreign
         # firmware, board stuck in the ROM loader). Not when the port can't be opened (busy: a dev tool holds the
         # device lock; paused; permissions) or only the CH343 port is there: no conclusion possible then, the
-        # "Flash firmware" submenu stays available.
+        # "Flash firmware…" entry stays available.
         native = any(p.get("kind") == "native" for p in st["ports"])
         if native and st.get("connected") and not st.get("fw") and not self.flash_state["active"]:
             self._nohello_since = self._nohello_since or now

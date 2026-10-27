@@ -5,7 +5,7 @@ tools/fw_bundle.py from the PlatformIO build, with a manifest.json) and writes t
 in-process: a frozen app has no Python interpreter to run `esptool` as a subprocess, and in-process we get
 real progress callbacks instead of scraping a terminal.
 
-Ports. The ESP32-S3's native USB-Serial-JTAG (303a:1001) is the host link port on both boards; esptool's
+Ports. The ESP32-S3's native USB-Serial-JTAG (303a:1001) is the host link port; esptool's
 default reset sequence works on it (the USB-JTAG peripheral can reset the chip into the ROM loader), and the
 port re-enumerates after the final reset (sometimes under a new name on macOS/Windows), so `flash()` waits for
 it to come back and returns its new name. The 4B also has a "USB TO UART" port, a CH343 (1a86:55d3) wired to
@@ -53,7 +53,6 @@ from serial.tools import list_ports
 DEFAULT_BOARD = "4b"
 BOARDS: dict[str, str] = {                    # board id -> BOARD_NAME reported in the device hello (board.h)
     "4b": "ESP32-S3-Touch-LCD-4B",
-    "v4": "ESP32-S3-Touch-LCD-4 V4",
 }
 BOARD_IDS: dict[str, str] = {name: bid for bid, name in BOARDS.items()}   # BOARD_NAME -> board id
 
@@ -65,7 +64,7 @@ REENUM_TIMEOUT_S = 15.0
 
 
 def board_id(board: str | None) -> str | None:
-    """Board id ("4b"/"v4") from an id or a hello BOARD_NAME; None when unknown."""
+    """Board id ("4b") from an id or a hello BOARD_NAME; None when unknown."""
     if not board:
         return None
     b = board.strip()
@@ -478,7 +477,7 @@ def pick_port(port: str | None) -> Port:
 
 def flash(board: str, port: str | None = None, progress: Progress | None = None, log: Log | None = None,
           erase: bool = False, *, lock: bool = False) -> FlashResult:
-    """Write the bundled firmware for `board` ("4b" | "v4"). port None = auto (native first, else the CH343).
+    """Write the bundled firmware for `board` ("4b"). port None = auto (native first, else the CH343).
     progress(pct, msg) is called with 0..100; log(line) gets esptool's output. The caller makes the port free
     (App: daemon.pause_device(); CLI: daemon.claim_device()); lock=True takes the shared device lock here
     instead (scripts). Raises FlashError with a sentence for the user."""

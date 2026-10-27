@@ -60,14 +60,10 @@ the device over USB.
 
 ## Hardware
 
-One of these Waveshare 4" boards (both: ESP32-S3R8, 8 MB PSRAM, 16 MB flash, ST7701 480×480 RGB panel, GT911 touch):
-
-- [ESP32-S3-Touch-LCD-4B](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-4B) (TCA9554 IO expander, AXP2101 PMIC):
-  the default build. Plug the cable into the **USB-OTG** port, not the "USB TO UART" one: the host link uses the
-  ESP32-S3's native USB.
-- [ESP32-S3-Touch-LCD-4](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-4), **V4** board revision (CH32V003 IO
-  expander): the app's Flash menu has a V4 entry (`claudius-maximus flash --board v4`); from source,
-  `pio run -e companion_v4` (`PLATFORMIO_DEFAULT_ENVS=companion_v4 tools/dev.py flash`).
+The Waveshare [ESP32-S3-Touch-LCD-4B](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-4B) (ESP32-S3R8, 8 MB
+PSRAM, 16 MB flash, ST7701 480×480 RGB panel, GT911 touch, TCA9554 IO expander, AXP2101 PMIC). Plug the cable into
+the **USB-OTG** port, not the "USB TO UART" one: the host link uses the ESP32-S3's native USB (the UART port only
+works for flashing). The older ESP32-S3-Touch-LCD-4 V4 was supported up to firmware 0.3.0 and is not any more.
 
 Plus a USB-C data cable (not a charge-only one) to your Mac, Windows or Linux machine.
 
@@ -127,7 +123,7 @@ or flashing, red: error) and the 5-hour / weekly plan bars when known. The menu,
 | `Plan: 5h 42% · 7d 12%` | Plan limits, once Claude Code reported them (claude.ai Pro/Max). |
 | `Update firmware (0.2.0 → 0.3.0)…` | Shown when the board runs an older firmware than the app ships. |
 | `Install firmware…` | Shown when a board port is seen but no firmware answers for 10 s (blank or foreign firmware). |
-| `Flash firmware ▸ 4B / V4` | Otherwise: reflash on demand; the check mark is the detected (or last chosen) board. |
+| `Flash firmware…` | Otherwise: reflash the bundled firmware on demand. |
 | `Start at login` | Toggles the autostart entry above. |
 | `Claude Code hooks: installed` / `Install Claude Code hooks` | Hook state; the second form installs them. |
 | `Open log` | Opens the log file (paths under Troubleshooting). |
@@ -156,7 +152,7 @@ From the command line (see below for the binary's path):
 
 ```bash
 claudius-maximus detect                   # serial ports (native / uart / other), link port, bundled firmware
-claudius-maximus flash --board 4b         # or --board v4; --port X to pick the port, --erase to wipe first
+claudius-maximus flash                    # --port X to pick the port, --erase to wipe the flash first
 ```
 
 `flash` asks a running daemon (the app or the service) to release the port first, prints progress on stderr and
@@ -183,7 +179,7 @@ Python (`cd host && .venv/bin/python -m companion status`); there, no command me
 | `status [--json]` | daemon, device, hooks, sessions, plan limits, log path |
 | `focus SID` | raise the terminal running that session (8-char id from `status`) |
 | `detect` | serial ports, link port, bundled firmware |
-| `flash [--board 4b\|v4] [--port P] [--erase]` | flash the bundled firmware |
+| `flash [--port P] [--erase]` | flash the bundled firmware |
 | `hooks install\|uninstall\|check [--no-statusline]` | the Claude Code hooks and statusLine wrapper in `settings.json` |
 | `autostart enable\|disable\|status` | start the tray app at login |
 | `hook`, `statusline` | what Claude Code runs (reads the hook JSON on stdin; not for manual use) |

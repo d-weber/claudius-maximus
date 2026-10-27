@@ -1,28 +1,12 @@
 #pragma once
-// Board profile: which Waveshare 4" board the firmware is built for. Both carry the same ESP32-S3R8 module
-// (8 MB OPI PSRAM, 16 MB flash), ST7701 480x480 RGB panel and GT911 touch; they differ in the pin map, the IO
-// expander and the backlight driver. Selected by the PlatformIO env (platformio.ini):
-//   -DCM_BOARD_4B  ESP32-S3-Touch-LCD-4B: TCA9554 expander @0x20 carries the panel's 3-wire SPI init bus, the
-//                  panel reset and the touch reset/INT; backlight PWM on GPIO4 (AP3032, inverted); I2C 47/48.
-//                  Host link = the "USB-OTG" port (native USB-Serial-JTAG). The "USB TO UART" port is a CH343
-//                  on UART0 and is not used.
-//   -DCM_BOARD_V4  ESP32-S3-Touch-LCD-4 V4: CH32V003 expander @0x24 (display power, resets, backlight PWM);
-//                  I2C 15/7; the only USB port is the native one.
+// Board profile: the Waveshare ESP32-S3-Touch-LCD-4B (ESP32-S3R8 module, 8 MB OPI PSRAM, 16 MB flash, ST7701
+// 480x480 RGB panel, GT911 touch). A TCA9554 expander @0x20 carries the panel's 3-wire SPI init bus, the panel
+// reset and the touch reset/INT; backlight PWM on GPIO4 (AP3032, inverted); I2C on 47/48.
+// Host link = the "USB-OTG" port (native USB-Serial-JTAG). The "USB TO UART" port is a CH343 on UART0 and is
+// only used for flashing.
 // Sources: 4B schematic + Waveshare BSP (waveshare/esp32_s3_touch_lcd_4b) + Arduino demo 06_LVGL_Arduino_v9.
-#if defined(CM_BOARD_4B) && defined(CM_BOARD_V4)
-#error "CM_BOARD_4B and CM_BOARD_V4 are exclusive"
-#endif
-#if !defined(CM_BOARD_4B) && !defined(CM_BOARD_V4)
-#define CM_BOARD_4B 1
-#endif
-#ifndef CM_BOARD_4B
-#define CM_BOARD_4B 0
-#endif
-#ifndef CM_BOARD_V4
-#define CM_BOARD_V4 0
-#endif
+// (The older ESP32-S3-Touch-LCD-4 V4 with its CH32V003 expander was supported until firmware 0.3.0.)
 
-#if CM_BOARD_4B
 #define BOARD_NAME "ESP32-S3-Touch-LCD-4B"
 #define BOARD_I2C_SDA 47
 #define BOARD_I2C_SCL 48
@@ -41,19 +25,9 @@
 #define BOARD_EXIO_TP_INT 6
 #define BOARD_EXIO_LCD_RST 7
 #define BOARD_BL_PIN 4
-#else
-#define BOARD_NAME "ESP32-S3-Touch-LCD-4 V4"
-#define BOARD_I2C_SDA 15
-#define BOARD_I2C_SCL 7
-#define BOARD_LCD_HSYNC 38
-#define BOARD_LCD_VSYNC 39
-#define BOARD_LCD_DE 40
-#define BOARD_LCD_PCLK 41
-#define BOARD_LCD_DATA {5, 45, 48, 47, 21, 14, 13, 12, 11, 10, 9, 46, 3, 8, 18, 17}
-#endif
 
 // Panel orientation: 1 = the UI is drawn rotated by 180 degrees (the picture upright with the board's
-// connectors on the side the user wants). Confirmed on the V4; set per build with -DHAL_ROT180=0/1.
+// connectors on the side the user wants). Set per build with -DHAL_ROT180=0/1.
 #ifndef HAL_ROT180
 #define HAL_ROT180 1
 #endif

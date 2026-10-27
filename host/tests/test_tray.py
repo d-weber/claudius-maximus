@@ -143,13 +143,13 @@ class IconTest(unittest.TestCase):
 class MenuModelTest(unittest.TestCase):
     def test_no_device(self):
         items = appmod.build_menu(STATES["no_device"], FakeApp())
-        self.assertEqual(labels(items), ["Device: not found", "Sessions: none", "---", "Flash firmware",
+        self.assertEqual(labels(items), ["Device: not found", "Sessions: none", "---", "Flash firmware…",
                                          "Start at login", "Install Claude Code hooks", "Open log",
                                          "Open claude.ai usage", "---", "Quit"])
         self.assertFalse(items[0].enabled)
-        sub = find(items, "Flash firmware").children
-        self.assertEqual([s.label for s in sub], ["4B", "V4"])
-        self.assertEqual([s.checked for s in sub], [True, False])
+        fl = find(items, "Flash firmware…")
+        self.assertIsNone(fl.children)
+        self.assertTrue(fl.enabled)
 
     def test_uart_only(self):
         st = STATES["uart_only"]
@@ -163,7 +163,7 @@ class MenuModelTest(unittest.TestCase):
         self.assertEqual(items[0].label, "Device: connected on /dev/ttyACM0 · fw 0.3.0 (4B)")
         self.assertEqual(items[1].label, "Sessions: 2 (1 working, 1 needs you)")
         self.assertEqual(items[2].label, "Plan: 5h 42% · 7d 12%")
-        self.assertIn("Flash firmware", labels(items))
+        self.assertIn("Flash firmware…", labels(items))
         self.assertTrue(find(items, "Start at login").checked)
         self.assertFalse(find(items, "Claude Code hooks: installed").enabled)
         find(items, "Start at login").action()
@@ -180,16 +180,16 @@ class MenuModelTest(unittest.TestCase):
         items = appmod.build_menu(STATES["update"], app)
         upd = find(items, "Update firmware")
         self.assertEqual(upd.label, "Update firmware (0.2.0 → 0.3.0)…")
-        self.assertNotIn("Flash firmware", labels(items))
+        self.assertNotIn("Flash firmware…", labels(items))
         upd.action()
         self.assertEqual(app.calls, [("flash", "4b")])
         self.assertEqual(appmod.tray_state(STATES["update"]), "update")
 
     def test_install_needed(self):
         app = FakeApp()
-        items = appmod.build_menu(dict(STATES["install"], board_choice="v4"), app)
+        items = appmod.build_menu(dict(STATES["install"], board_choice="4b"), app)
         find(items, "Install firmware…").action()
-        self.assertEqual(app.calls, [("flash", "v4")])
+        self.assertEqual(app.calls, [("flash", "4b")])
 
     def test_flashing(self):
         st = STATES["flashing"]
@@ -206,8 +206,8 @@ class MenuModelTest(unittest.TestCase):
 
     def test_board_id(self):
         self.assertEqual(appmod.board_id("ESP32-S3-Touch-LCD-4B"), "4b")
-        self.assertEqual(appmod.board_id("ESP32-S3-Touch-LCD-4"), "v4")
-        self.assertEqual(appmod.board_id("v4"), "v4")
+        self.assertIsNone(appmod.board_id("ESP32-S3-Touch-LCD-4 V4"))
+        self.assertEqual(appmod.board_id("4b"), "4b")
         self.assertIsNone(appmod.board_id(None))
 
 
@@ -273,7 +273,7 @@ class AppTest(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"companion.flasher": fake_flasher}), \
                 mock.patch.object(companion, "flasher", fake_flasher, create=True):
             with self.assertLogs("companion.app", "ERROR"):
-                app._flash_worker("v4")
+                app._flash_worker("4b")
         self.assertEqual(events, ["resume"])
         self.assertEqual(backend.notify.call_args_list[-1].args, ("Flashing failed", "No board on USB"))
         self.assertEqual(appmod.tray_state({"flash": app.flash_state}), "error")
@@ -341,12 +341,12 @@ class AppTest(unittest.TestCase):
             st = app._daemon_status()
         self.assertTrue(st["observer"])
         self.assertIn("already running", st["observer_msg"])
-        self.assertFalse(find(appmod.build_menu(dict(st, ports=[]), FakeApp()), "Flash firmware").enabled)
+        self.assertFalse(find(appmod.build_menu(dict(st, ports=[]), FakeApp()), "Flash firmware…").enabled)
 
     def test_settings_fallback_roundtrip(self):
         with mock.patch.dict(sys.modules, {"companion.hostos": None}):
-            appmod.settings_set("board", "v4")
-            self.assertEqual(appmod.settings_get("board"), "v4")
+            appmod.settings_set("board", "4b")
+            self.assertEqual(appmod.settings_get("board"), "4b")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -409,11 +409,8 @@ class PystrayBackendTest(unittest.TestCase):
         self.assertIs(entries[3], self.mod.Menu.SEPARATOR)
         self.assertEqual(entries[0].text, items[0].label)
         self.assertFalse(entries[0].enabled)
-        flash = next(e for e in entries if e.text == "Flash firmware")
-        self.assertIsInstance(flash.submenu, self.mod.Menu)
-        self.assertEqual([e.text for e in flash.submenu.items], ["4B", "V4"])
-        self.assertTrue(flash.submenu.items[0].checked(None))
-        self.assertFalse(flash.submenu.items[1].checked(None))
+        flash = next(e for e in entries if e.text == "Flash firmware…")
+        self.assertIsNone(flash.submenu)
         login = next(e for e in entries if e.text == "Start at login")
         self.assertTrue(login.checked(login))
         quit_ = entries[-1]
@@ -553,16 +550,21 @@ class SNITest(unittest.TestCase):
         self.assertEqual(first[1]["enabled"], Variant("b", False))
         sep = kids[3].value
         self.assertEqual(sep[1], {"type": Variant("s", "separator")})
-        flash = next(k.value for k in kids if k.value[1].get("label", Variant("s", "")).value == "Flash firmware")
-        self.assertEqual(flash[1]["children-display"].value, "submenu")
-        self.assertEqual([c.value[1]["toggle-state"].value for c in flash[2]], [1, 0])
-        self.assertEqual(flash[2][0].value[1]["toggle-type"].value, "checkmark")
+        flash = next(k.value for k in kids if k.value[1].get("label", Variant("s", "")).value == "Flash firmware…")
+        self.assertNotIn("children-display", flash[1])
         # depth 0: no children; the whole reply marshals with the method's signature
         self.assertEqual(call(tray.menu, 0, 0, [])[1][2], [])
         Message(path="/MenuBar", member="GetLayout", signature="u(ia{sv}av)", body=[rev, root])._marshall(False)
         # property filter
         _, (_, props, _) = call(tray.menu, first[0], -1, ["label"])
         self.assertEqual(list(props), ["label"])
+        # submenus and check items marshal too (no longer in the default menu since the V4 board went)
+        tray.set_menu([MenuItem("Pick", children=[MenuItem("A", checked=True), MenuItem("B", checked=False)])])
+        _, root2 = call(tray.menu, 0, -1, [])
+        pick = root2[2][0].value
+        self.assertEqual(pick[1]["children-display"].value, "submenu")
+        self.assertEqual([c.value[1]["toggle-state"].value for c in pick[2]], [1, 0])
+        self.assertEqual(pick[2][0].value[1]["toggle-type"].value, "checkmark")
 
     def test_ids_stable_and_revision(self):
         m = self.sni.MenuModel()

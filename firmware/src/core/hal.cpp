@@ -10,21 +10,14 @@
 #include <rom/ets_sys.h>
 #include <TouchDrvGT911.hpp>
 #include "board.h"
-#if CM_BOARD_V4
-#include "WS_CH32_IO.h"
-#endif
 #include "perf.h"
 
 // ST7701 is configured over a bit-banged 3-wire SPI (Arduino_GFX bus + init table); pixels go through the
 // ESP32-S3 RGB LCD peripheral, driven directly with esp_lcd so the panel config (bounce buffers) is ours.
-#if CM_BOARD_4B
-// 4B: CS/SCL/SDA and the panel reset are pins of the TCA9554 expander, bit-banged over I2C (init only)
+// CS/SCL/SDA and the panel reset are pins of the TCA9554 expander, bit-banged over I2C (init only)
 static Arduino_XCA9554SWSPI *expander = new Arduino_XCA9554SWSPI(BOARD_EXIO_LCD_RST, BOARD_EXIO_LCD_CS, BOARD_EXIO_LCD_SCL,
                                                                  BOARD_EXIO_LCD_SDA, &Wire, BOARD_EXPANDER_ADDR);
 static Arduino_DataBus *bus = expander;
-#else
-static Arduino_DataBus *bus = new Arduino_SWSPI(GFX_NOT_DEFINED, 42, 2, 1, GFX_NOT_DEFINED);
-#endif
 static esp_lcd_panel_handle_t panel;
 static uint16_t *fb;  // 480x480 RGB565 in PSRAM, panel orientation (= the UI rotated by 180 degrees if HAL_ROT180)
 
@@ -126,9 +119,7 @@ static bool IRAM_ATTR lcd_on_vsync(esp_lcd_panel_handle_t, const esp_lcd_rgb_pan
 }
 
 static void panel_init() {
-#if CM_BOARD_V4
-  bus->begin();            // 4B: begun in hal_init (the expander also resets the touch controller)
-#endif
+  // bus->begin() ran in board_init (the expander also resets the touch controller)
   bus->sendCommand(0x01);  // software reset
   delay(120);
   bus->batchOperation(st7701_type1_init_operations, sizeof(st7701_type1_init_operations));
@@ -234,7 +225,7 @@ static void flush_wait() {
   while (disp_drv.draw_buf && disp_drv.draw_buf->flushing) taskYIELD();
 }
 
-// The GT911 INT line does not reach the ESP32 on either board (V4: not wired; 4B: on the expander), so it
+// The GT911 INT line does not reach the ESP32 (it ends on the expander), so it
 // is polled. The I2C transactions (~0.3 ms every 10 ms) run in a task on core 0; touch_cb (LVGL, core 1)
 // only reads the latest sample.
 //
@@ -338,20 +329,8 @@ static void touch_cb(lv_indev_drv_t *, lv_indev_data_t *data) {
   data->state = (s & 0x80000000u) ? LV_INDEV_STATE_PR : LV_INDEV_STATE_REL;
 }
 
-#if CM_BOARD_V4
-// The CH32 helper keeps its outputs latched across ESP32 resets (it is only reset by power-cycling),
-// so a glitched I2C write during reflashing can leave the buzzer on. Re-assert the safe output state
-// periodically: power/LCD/touch enabled, buzzer off. We never use the buzzer.
-static void ch32_guard_cb(lv_timer_t *) {
-  WS_CH32_IO::writeRegister(Wire, WS_CH32_IO::REG_OUTPUT, WS_CH32_IO::OUT_DISPLAY_ON, WS_CH32_IO::I2C_ADDRESS, 1);
-}
-#endif
-
 // Bring up the I2C bus, the IO expander and whatever the board needs before the panel and touch init.
 static void board_init() {
-#if CM_BOARD_V4
-  WS_CH32_IO::begin(Wire, BOARD_I2C_SDA, BOARD_I2C_SCL, 400000, nullptr);   // display power + resets + backlight
-#else
   Wire.begin(BOARD_I2C_SDA, BOARD_I2C_SCL);
   Wire.setClock(400000);
   bus->begin();   // finds the TCA9554, pulses the panel reset (EXIO7), drives CS/SCL/SDA high
@@ -368,7 +347,6 @@ static void board_init() {
   // backlight: AP3032 boost driver, PWM fed into its feedback node (duty 0 = full brightness, max = off),
   // same 5 kHz / 10 bit as the Waveshare BSP. Left floating at boot the panel is at full brightness.
   ledcAttach(BOARD_BL_PIN, 5000, 10);
-#endif
 }
 
 void hal_init() {
@@ -407,21 +385,12 @@ void hal_init() {
   lv_indev_drv_register(&id);
   last_touch = millis();
   hal_set_brightness(100);
-#if CM_BOARD_V4
-  ch32_guard_cb(nullptr);
-  lv_timer_create(ch32_guard_cb, 3000, nullptr);
-#endif
 }
 
 void hal_set_brightness(uint8_t pct) {
   if (pct > 100) pct = 100;
   brightness = pct;
-#if CM_BOARD_V4
-  // CH32 PWM is inverted: 0 = full brightness, 255 = off
-  WS_CH32_IO::setPwm(Wire, (uint8_t)((100 - pct) * 255 / 100));
-#else
   ledcWrite(BOARD_BL_PIN, (uint32_t)(100 - pct) * 1023 / 100);   // inverted, see board_init
-#endif
 }
 
 uint8_t hal_get_brightness() { return brightness; }

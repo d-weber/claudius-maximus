@@ -136,9 +136,9 @@ chip. Older firmware ignores the key.
 ```
 
 `hello` fields: `fw` = `FW_VERSION` (`firmware/src/core/version.h`; the desktop app compares it with the firmware it
-ships to offer an update); `board` = `BOARD_NAME` from `firmware/src/core/board.h`, `"ESP32-S3-Touch-LCD-4B"` or
-`"ESP32-S3-Touch-LCD-4 V4"` (sent since 0.2.0; the host maps it to the board ids `4b` / `v4` in
-`host/companion/flasher.py` `BOARDS` and shows it in `status`); `caps` see Partial `state`; `screen` see `screen`.
+ships to offer an update); `board` = `BOARD_NAME` from `firmware/src/core/board.h`, `"ESP32-S3-Touch-LCD-4B"` (sent since
+0.2.0; firmware up to 0.3.0 could also report `"ESP32-S3-Touch-LCD-4 V4"`; the host maps it to the board id `4b`
+in `host/companion/flasher.py` `BOARDS` and shows it in `status`); `caps` see Partial `state`; `screen` see `screen`.
 
 ### Device → host actions
 | action | meaning |

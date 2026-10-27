@@ -103,8 +103,8 @@ face. Not done: a 9 px overlap of the counters row over the (empty) bottom rows 
 ## Desktop app — 2026-10-27 (work in progress, commit f1b7d16)
 The host side is now an installable cross-platform app (architecture: docs/DESKTOP.md; user docs: README).
 - `claudius-maximus app`: tray / menu bar icon (pystray on Windows/macOS, StatusNotifierItem over dbus-fast on
-  Linux) running the daemon in-process; menu with device / sessions / plan, firmware update / install / flash
-  (4B, V4), start at login, hooks, log, claude.ai usage, quit. First run installs the hooks + statusLine wrapper
+  Linux) running the daemon in-process; menu with device / sessions / plan, firmware update / install / flash,
+  start at login, hooks, log, claude.ai usage, quit. First run installs the hooks + statusLine wrapper
   and start at login (retiring the systemd/launchd service of a script install). Observer mode when another
   daemon holds the lock.
 - Flasher (`companion/flasher.py`, `tools/fw_bundle.py`): native USB-Serial-JTAG vs CH343 port detection, bundled
@@ -122,7 +122,8 @@ Unverified:
 1. **Windows and macOS never run**: tray backends, installers, the Windows hooks transport, Focus on Windows,
    autostart (Run key, LaunchAgent), Gatekeeper / SmartScreen steps in the README. Only CI exercises them
    (unit tests + a frozen-build smoke test per OS).
-2. **V4 board never flashed** with the app (bundle built, `BOARD_NAME` mapping untested on a device).
+2. **Only the 4B board is supported** since the commit after 0.3.0 (the V4 pin map, CH32 helper and `companion_v4`
+   env were removed).
 3. **CH343 (USB TO UART) flashing path untested with the new code** (in-process esptool, re-enumeration wait,
    the "move the cable" hints).
 4. No release has been cut yet: the release workflow end to end, the installers on a clean machine, the AppImage
