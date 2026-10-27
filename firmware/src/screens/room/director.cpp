@@ -544,7 +544,8 @@ void Director::stepLighting() {
   int k = 0;
   while (k < 7 && tod >= SKYK[k + 1].h) k++;
   float t = (tod - SKYK[k].h) / (SKYK[k + 1].h - SKYK[k].h);
-  if (t < 0) t = 0; if (t > 1) t = 1;
+  if (t < 0) t = 0;
+  if (t > 1) t = 1;
   skyA = mixRgb(SKYK[k].a, SKYK[k + 1].a, t);
   skyB = mixRgb(SKYK[k].b, SKYK[k + 1].b, t);
   if (rain && win.mode == SKY_DAY) { skyA = mixRgb(skyA, 0x8a98a8, 0.8f); skyB = mixRgb(skyB, 0xb0bcc8, 0.8f); }
@@ -765,12 +766,14 @@ void Director::draw(Canvas &c) {
   bool night = win.mode == SKY_NIGHT;
   if (!night && !rain && tod >= 7.f && tod < 19.5f) {
     int off = (int)lroundf((13.f - tod) * 2.6f);
-    if (off > 14) off = 14; if (off < -14) off = -14;
+    if (off > 14) off = 14;
+    if (off < -14) off = -14;
     drawSunPatch(c, off, 20 + iabs(off) / 2, FL);
   } else if (night && task != TASK_OFFLINE) {
     float mt = tod >= 21.f ? tod - 24.f : tod;
     int off = (int)lroundf(mt * -2.5f);
-    if (off > 10) off = 10; if (off < -10) off = -10;
+    if (off > 10) off = 10;
+    if (off < -10) off = -10;
     drawSunPatch(c, off, 16, MOONF);
   }
   if (lampOn) drawLampPool(c);

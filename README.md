@@ -19,7 +19,7 @@ Swipe left and right between tiles. Tap any session to open its detail view.
 
 | | |
 |---|---|
-| **Home**: Clawd at his isometric desk, animated by what your agents are doing (reading, writing code, running commands, searching, thinking, delegating to mini helpers, waiting on you, done, asleep), with the plan limit and the session counters. Tap him for the news. | **Agents**: one card per session with status, current tool, todo progress, context use and subagents. |
+| **Home**: Clawd's Studio, a little pixel-art room seen from above. Clawd walks to the station of whatever your agents are doing (the desk to write code, the bookshelf to read, the server rack to run commands, under the desk to search, the rug to think, the whiteboard to plan, the door with a big "!" when one needs you, bed when nothing runs), with mini helpers for subagents and the plan on the whiteboard. The room lives on the real clock (sun patch, dusk, lamp, moon, clouds, rain, a bird), and Clawd fidgets and runs errands at random so it stays fun all day. Tap him for the news. | **Agents**: one card per session with status, current tool, todo progress, context use and subagents. |
 | **Activity**: a live feed of tool calls, prompts, errors and finished turns, filterable to "needs me" or errors. | **Usage**: 5-hour and weekly plan limits, today's cost and tokens, model mix, hourly and daily charts. |
 | **System**: btop-style CPU, memory, top processes, network and the share used by Claude Code. | **Orbit**: sessions as planets around Clawd, with subagents as moons and tool activity as sparks. |
 | **Settings**: brightness, auto-dim, screensaver, alert behaviour and a mirrored desk, stored on the device. | **Detail**: the selected session's current action, tokens, cost, context, model, todos, subagents, and a **Focus** button that brings its terminal to the front. |
@@ -300,15 +300,14 @@ PROTOCOL.md                 host ⇄ device protocol (source of truth for data)
 firmware/                   PlatformIO, Arduino-ESP32 3.x, LVGL 8.4, ArduinoJson 7
   src/core/                 display/touch HAL, state model, serial link, settings, perf probe
   src/ui/                   tile manager, theme (palette, fonts, status colours)
-  src/screens/              one file per screen; iso/ = the isometric Clawd library + one file per animation
-                              (ported 1:1 from iso-clawd/, see src/screens/iso/README.md; tools/iso_qa.py diffs them)
+  src/screens/              one file per screen; room/ = Clawd's Studio (the home screen's pixel-art room and its
+                              behaviour director, portable C++: tools/room_sim.py renders it on the host)
   src/fx/                   alerts overlay, auto-dim / screensaver / night clock
 host/companion/             Python daemon, data providers, tray app (app.py, tray/), flasher, hooks client/installer
 host/hooks/                 Claude Code hook + statusLine wrapper scripts (thin shims over companion/)
 host/launchd/, host/systemd/  background service templates (macOS LaunchAgent, Linux systemd user unit)
 packaging/, .github/        PyInstaller spec, installers, CI and release workflows (packaging/README.md)
 tools/                      dev.py (build/flash/screenshot/perf), fw_bundle.py, install/uninstall, bench, udev rule
-iso-clawd/                  the isometric Clawd prototypes (browser, source of truth for the animations)
 docs/                       DESKTOP.md (desktop app architecture), PERF.md (measurements), STATUS.md, TEAM.md
 ```
 
@@ -320,7 +319,9 @@ host/.venv/bin/python tools/dev.py flash
 host/.venv/bin/python tools/dev.py shot out.png --screen agents [--detail] [--alert waiting]   # framebuffer PNG with demo data
 host/.venv/bin/python tools/dev.py perf --screen orbit                                          # fps, frame time, CPU, heap
 host/.venv/bin/python tools/dev.py show mock.png --seconds 30                                   # a PNG mock-up on the panel
-host/.venv/bin/python tools/iso_qa.py 11-writing-code --frames 0,10,20                          # JS vs device pixel diff
+python3 tools/room_sim.py states                                                               # home room: one frame per state (host, no device)
+python3 tools/room_sim.py task code --seconds 40 --gif                                         # ... animated GIF + activity log
+python3 tools/room_sim.py day --seconds 1800                                                   # ... scripted session: fidget variety stats
 ```
 
 This project was designed and built by a team of Claude Code agents working in parallel;

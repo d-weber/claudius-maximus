@@ -91,7 +91,7 @@ def cmd_task(a, exe: Path) -> None:
     step = max(1, int(a.seconds * 12 / 24))
     sheet(frames[::step][:24], 6, 2, a.out / f"task_{a.task}_sheet.png")
     if a.gif:
-        gif(frames, a.out / f"task_{a.task}.gif", 2, 12)
+        gif(frames, a.out / f"task_{a.task}.gif", a.zoom, 12)
         print(a.out / f"task_{a.task}.gif")
     print(a.out / f"task_{a.task}_sheet.png")
     print(log[-1500:])
@@ -134,6 +134,7 @@ def main() -> int:
     t.add_argument("task", choices=TASKS)
     t.add_argument("--seconds", type=float, default=40)
     t.add_argument("--gif", action="store_true")
+    t.add_argument("--zoom", type=int, default=2)
     t.add_argument("--react", nargs=2, metavar=("REACT", "PERIOD_S"))
     t.set_defaults(f=cmd_task)
     d = sub.add_parser("day")

@@ -191,7 +191,8 @@ class _LinuxThermal:
 def _skip_nic(nic: str) -> bool:
     if IS_WINDOWS:
         low = nic.lower()
-        return any(k in low for k in _SKIP_NIC_WIN)
+        if any(k in low for k in _SKIP_NIC_WIN):
+            return True
     return nic.startswith(_SKIP_NIC)
 
 

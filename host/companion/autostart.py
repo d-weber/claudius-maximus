@@ -66,10 +66,19 @@ def mac_unstable_location(path: str | None = None) -> str:
     return ""
 
 
+def _uid() -> int:
+    return os.getuid() if hasattr(os, "getuid") else 0
+
+
 def _real_home() -> bool:
+    """False when HOME points somewhere else than the account's home (tests): never touch launchctl/systemctl."""
     try:
-        import pwd
-        return os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir) == os.path.realpath(hostos.home())
+        if sys.platform == "win32":
+            real = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+        else:
+            import pwd
+            real = pwd.getpwuid(os.getuid()).pw_dir
+        return os.path.normcase(os.path.realpath(real)) == os.path.normcase(os.path.realpath(hostos.home()))
     except Exception:
         return True
 
@@ -171,7 +180,7 @@ def disable_legacy_service() -> str:
         return ""
     p = hostos.service_path()
     if hostos.IS_MAC:
-        _run(["launchctl", "bootout", f"gui/{os.getuid()}/{hostos.SERVICE_LABEL}"])
+        _run(["launchctl", "bootout", f"gui/{_uid()}/{hostos.SERVICE_LABEL}"])
         try:
             os.replace(p, p + ".disabled-by-app")
         except OSError as e:

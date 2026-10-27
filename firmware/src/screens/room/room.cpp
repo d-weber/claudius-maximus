@@ -22,8 +22,8 @@ const Rgb BASE[N_COL] = {
     RGB(0x9c6438, 255),   // F3
     RGB(0xddaa74, 255),   // FL   sun patch on F1
     RGB(0x9aa6c8, 60),    // MOONF moon patch (mostly emissive: moonlight)
-    RGB(0xe0b068, 90),    // LAMPF lamp pool on the floor
-    RGB(0xf0b060, 0),     // SPOTF alarm spotlight by the door
+    RGB(0xe8b86a, 30),    // LAMPF lamp pool on the floor
+    RGB(0xffd890, 0),     // SPOTF alarm spotlight by the door
     RGB(0x5b8fb9, 255),   // RUG
     RGB(0x3f6d96, 255),   // RUG2
     RGB(0xf4ecdc, 255),   // CRM
@@ -352,7 +352,8 @@ static void screenWeb(Canvas &c, int t) {
 static void screenSaver(Canvas &c, int t) {
   // a bouncing dot in the dark
   int px = 82 + (t * 1) % 24, py = 19 + (t / 2) % 16;
-  if (px > 93) px = 93 - (px - 93); if (py > 26) py = 26 - (py - 26);
+  if (px > 93) px = 93 - (px - 93);
+  if (py > 26) py = 26 - (py - 26);
   c.p(px, py, SCRD); c.p(px + 1, py, SCRD);
   for (int k = 0; k < 3; k++) c.p(83 + (t * 3 + k * 5) % 11, 20 + (t + k * 3) % 7, SCRD);
 }

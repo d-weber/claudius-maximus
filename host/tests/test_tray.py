@@ -427,6 +427,7 @@ class PystrayBackendTest(unittest.TestCase):
     def test_tooltip_notify_icon_stop(self):
         ready = []
         tray = self.bp.PystrayTray(on_ready=lambda: ready.append(1), pystray_module=self.mod)
+        tray._mac = None   # no AppKit run loop in a unit test: run UI calls directly (also on macOS)
         tray.set_tooltip("Claudius Maximus", ["Device: not found", "Sessions: none"])
         self.assertIn("Device: not found", tray.icon.title)
         self.assertLessEqual(len(self.bp.tooltip_text("x", ["y" * 400])), 127)

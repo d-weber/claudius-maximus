@@ -370,7 +370,8 @@ class HookSetupTest(TempHome):
         with mock.patch("sys.stdout", out):
             self.assertEqual(hooksetup.install("/repo", "/repo/host/.venv/bin/python", True), 0)
         cmds = self.commands()
-        self.assertIn('"/repo/host/.venv/bin/python" -I -S "/repo/host/hooks/cm_hook.py"', cmds)
+        hook_py = os.path.join('/repo', 'host', 'hooks', 'cm_hook.py')
+        self.assertIn(f'"/repo/host/.venv/bin/python" -I -S "{hook_py}"', cmds)
         self.assertEqual(len([c for c in cmds if "cm_hook.py" in c]), len(hooksetup.EVENTS))
         # the app installs its own form: replaces ours, keeps the user's, statusLine chain preserved
         exe = "/opt/Claudius Maximus/claudius-maximus"
@@ -464,6 +465,7 @@ class AutostartTest(TempHome):
             self.assertEqual(autostart._run(["systemctl", "--user", "disable", "--now", "x"]), 0)
             run.assert_not_called()
 
+    @unittest.skipIf(sys.platform == "win32", "desktop entries escape backslashes; Windows paths are meaningless here")
     def test_linux_desktop_entry(self):
         self._with("linux")
         self.assertFalse(autostart.is_enabled())
@@ -845,7 +847,8 @@ class StatuslineChainTest(TempHome):
         os.makedirs(os.path.dirname(git))
         open(git, "w").close()
         with mock.patch.object(hookclient, "IS_WINDOWS", True), mock.patch("shutil.which", return_value=git):
-            self.assertEqual(hookclient.chain_argv("x")[0][0], bash)
+            found = hookclient.chain_argv("x")[0][0]
+            self.assertEqual(os.path.normcase(os.path.realpath(found)), os.path.normcase(os.path.realpath(bash)))
         with mock.patch.object(hookclient, "IS_WINDOWS", True), mock.patch("shutil.which", return_value=None):
             self.assertEqual(hookclient.chain_argv("x"), ("x", True))   # no Git Bash: cmd via shell=True
         self.assertEqual(hookclient.chain_argv("x"), ("x", True))       # POSIX: /bin/sh as before
