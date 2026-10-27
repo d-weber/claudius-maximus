@@ -1,18 +1,31 @@
-"""CLI: python -m companion [run|status|focus SID] [--demo] [--dry-run] ..."""
-import argparse
-import json
-import logging
-import logging.handlers
+"""CLI: claudius-maximus (= python -m companion) <command> ...
+
+    run [--demo] [--port P] [--dry-run] [--seconds N] [--log [FILE]] [-v]   headless daemon (the default)
+    status [--json]              daemon, device, hooks, sessions, plan limits
+    focus SID                    raise the terminal running that session
+    app                          tray app (companion/app.py)
+    detect                       serial ports + bundled firmware (companion/flasher.py)
+    flash [--board 4b|v4] [--port P] [--erase]
+    hook | statusline            what Claude Code runs (fast path: companion/hookclient.py, nothing else)
+    autostart enable|disable|status
+    hooks install|uninstall|check [--no-statusline]
+
+Backward compatible: no command, or only options (`python -m companion --demo`), means `run`.
+"""
 import os
 import sys
-import time
 
-from .hostos import log_path, service_installed, service_name
+COMMANDS = ("run", "status", "focus", "app", "detect", "flash", "hook", "statusline", "autostart", "hooks")
 
-DEFAULT_LOG = log_path()
+
+def _default_log():
+    from .hostos import log_path
+    return log_path()
 
 
 def setup_logging(verbose: bool, log_file: str | None):
+    import logging
+    import logging.handlers
     level = logging.DEBUG if verbose else logging.INFO
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     root = logging.getLogger()
@@ -25,13 +38,14 @@ def setup_logging(verbose: bool, log_file: str | None):
             root.addHandler(h)
         except OSError as e:
             print(f"cannot open log file {log_file}: {e}", file=sys.stderr)
-    if not log_file or sys.stderr.isatty():
+    if sys.stderr is not None and (not log_file or sys.stderr.isatty()):
         h = logging.StreamHandler(sys.stderr)
         h.setFormatter(fmt)
         root.addHandler(h)
 
 
 def _ago(ts) -> str:
+    import time
     if not ts:
         return "never"
     d = int(time.time() - ts)
@@ -43,15 +57,16 @@ def _ago(ts) -> str:
 
 
 def _pid_alive(pid) -> bool:
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except (OSError, TypeError, ValueError):
-        return False
+    from .hostos import pid_alive  # os.kill(pid, 0) would terminate the process on Windows
+    return pid_alive(pid)
 
 
 def cmd_status(as_json: bool) -> int:
+    import json
+    import time
     from .daemon import state_dir, status_path, ROOT
+    from .hooksetup import installed
+    from .hostos import service_installed, service_name
     from .link import find_port
     st = {}
     try:
@@ -60,15 +75,8 @@ def cmd_status(as_json: bool) -> int:
     except (OSError, ValueError):
         pass
     running = bool(st.get("pid")) and _pid_alive(st.get("pid")) and time.time() - st.get("updated", 0) < 30
-    settings = os.path.expanduser("~/.claude/settings.json")
-    hooks_installed = statusline_installed = False
-    try:
-        with open(settings) as f:
-            s = f.read()
-        hooks_installed = "cm_hook.py" in s
-        statusline_installed = "cm_statusline.py" in s
-    except OSError:
-        pass
+    inst = installed()
+    hooks_installed, statusline_installed = inst["hooks"], inst["statusline"]
     sl = {}
     try:
         with open(os.path.join(state_dir(), "statusline.json")) as f:
@@ -89,7 +97,8 @@ def cmd_status(as_json: bool) -> int:
     print(f"device port    : {report['device_port'] or 'not found'}")
     if running:
         if st.get("connected"):
-            print(f"device         : connected on {st.get('port')}  fw={st.get('fw') or '?'}  hello {_ago(st.get('last_hello'))}")
+            board = f"  board={st['board']}" if st.get("board") else ""
+            print(f"device         : connected on {st.get('port')}  fw={st.get('fw') or '?'}{board}  hello {_ago(st.get('last_hello'))}")
         else:
             why = st.get("device_error") or "?"
             if st.get("lock_holder") and "lock" in why:
@@ -110,35 +119,159 @@ def cmd_status(as_json: bool) -> int:
         print(f"plan limits    : {', '.join(parts)} (seen {_ago(sl.get('rate_limits_at'))})")
     else:
         print(f"plan limits    : {'unknown (statusLine wrapper not installed)' if not statusline_installed else 'not seen yet'}")
-    print(f"log            : {DEFAULT_LOG}")
+    print(f"log            : {_default_log()}")
     return 0 if running else 1
 
 
-def main():
-    ap = argparse.ArgumentParser(prog="companion", description="Claudius Maximus host daemon",
-                                 epilog="commands: run (default) | status [--json] | focus SID")
-    ap.add_argument("command", nargs="?", default="run", choices=["run", "status", "focus"])
-    ap.add_argument("arg", nargs="?", help="session id for `focus`")
-    ap.add_argument("--demo", action="store_true", help="stream fake data instead of real sessions")
-    ap.add_argument("--port", help="serial port (auto-detected by default)")
-    ap.add_argument("--dry-run", action="store_true", help="print the JSON stream to stdout instead of the device")
-    ap.add_argument("--seconds", type=float, default=0, help="exit after N seconds (testing)")
-    ap.add_argument("--log", nargs="?", const=DEFAULT_LOG, default=None,
-                    help=f"log to a rotating file (default {DEFAULT_LOG})")
-    ap.add_argument("--json", action="store_true", help="status: machine-readable output")
-    ap.add_argument("-v", "--verbose", action="store_true")
-    a = ap.parse_args()
+def cmd_detect() -> int:
+    from . import flasher
+    ports = flasher.detect()
+    if not ports:
+        print("no serial ports found")
+    else:
+        print(f"{'port':24} {'kind':7} {'vid:pid':10} description")
+        for p in ports:
+            print(f"{p.device:24} {p.kind:7} {p.vid or 0:04x}:{p.pid or 0:04x}  {p.description}")
+    link = flasher.link_port(ports)
+    print(f"link port: {link.device if link else 'none'}")
+    b = flasher.bundled()
+    if not b:
+        print("bundled firmware: none in this build")
+    for board, m in sorted(b.items()):
+        print(f"bundled firmware: {board:3} fw {m.fw_version} (built {m.built})")
+    return 0
 
+
+def cmd_flash(board: str | None, port: str | None, erase: bool) -> int:
+    from . import flasher
+    from .daemon import claim_device
+    from .hostos import settings_get
+    board = board or settings_get("board") or "4b"
+
+    def progress(pct, msg):
+        print(f"\r[{pct:3d}%] {msg[:70]:70}", end="", file=sys.stderr, flush=True)
+
+    try:
+        # ask a running daemon (headless or the tray app) to release the port; flash() itself doesn't lock
+        with claim_device("flash", timeout=30):
+            res = flasher.flash(board, port=port, progress=progress, erase=erase)
+    except flasher.FlashError as e:
+        print(f"\nflash failed: {e}", file=sys.stderr)
+        return 1
+    except TimeoutError as e:
+        print(f"\nflash failed: {e}", file=sys.stderr)
+        return 1
+    print(f"\nflashed {res.board} fw {res.fw_version} via {res.port} in {res.seconds:.0f}s", file=sys.stderr)
+    print(f"link port: {res.link_port or 'not back yet'}", file=sys.stderr)
+    kind = next((p.kind for p in flasher.detect() if p.device == res.port), None)
+    if res.link_port is None and kind == "uart":
+        print("warning: flashed over the USB-TO-UART port; move the cable to USB-OTG for the host link",
+              file=sys.stderr)
+    return 0
+
+
+def cmd_autostart(action: str) -> int:
+    from . import autostart
+    if action == "enable":
+        print(autostart.enable())
+    elif action == "disable":
+        print(autostart.disable())
+    else:
+        print(autostart.describe())   # a query: exit 0 whether enabled or not
+    return 0
+
+
+def cmd_hooks(action: str, statusline: bool) -> int:
+    from . import hooksetup
+    try:
+        if action == "install":
+            return hooksetup.install_for_app(statusline)
+        if action == "uninstall":
+            return hooksetup.uninstall()
+    except (ValueError, OSError) as e:
+        print(f"error: cannot update {hooksetup.settings_path()}: {e}", file=sys.stderr)
+        return 2
+    rc = hooksetup.check()
+    inst = hooksetup.installed()
+    print(f"hooks: {'installed' if inst['hooks'] else 'not installed'}, "
+          f"statusLine wrapper: {'installed' if inst['statusline'] else 'not installed'} "
+          f"({hooksetup.settings_path()})")
+    for c in inst["commands"]:
+        print(f"  {c}")
+    return rc
+
+
+def build_parser():
+    import argparse
+    ap = argparse.ArgumentParser(prog="claudius-maximus", description="Claudius Maximus desk companion")
+    sub = ap.add_subparsers(dest="command", metavar="command")
+
+    def run_opts(p):
+        p.add_argument("--demo", action="store_true", help="stream fake data instead of real sessions")
+        p.add_argument("--port", help="serial port (auto-detected by default)")
+        p.add_argument("--dry-run", action="store_true", help="print the JSON stream to stdout instead of the device")
+        p.add_argument("--seconds", type=float, default=0, help="exit after N seconds (testing)")
+        p.add_argument("--log", nargs="?", const=_default_log(), default=None,
+                       help=f"log to a rotating file (default {_default_log()})")
+        p.add_argument("-v", "--verbose", action="store_true")
+
+    run_opts(sub.add_parser("run", help="run the headless daemon (default)"))
+    p = sub.add_parser("status", help="daemon, device, hooks, sessions, plan limits")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p = sub.add_parser("focus", help="raise the terminal running a session")
+    p.add_argument("sid", nargs="?", default="")
+    p.add_argument("-v", "--verbose", action="store_true")
+    sub.add_parser("app", help="tray / menu bar app (runs the daemon)", add_help=False)
+    sub.add_parser("detect", help="list serial ports and the bundled firmware")
+    p = sub.add_parser("flash", help="flash the bundled firmware")
+    p.add_argument("--board", choices=["4b", "v4"])
+    p.add_argument("--port")
+    p.add_argument("--erase", action="store_true", help="erase the whole flash first")
+    sub.add_parser("hook", help="Claude Code hook relay (reads the hook JSON on stdin)")
+    sub.add_parser("statusline", help="Claude Code statusLine wrapper")
+    p = sub.add_parser("autostart", help="start the tray app at login")
+    p.add_argument("action", choices=["enable", "disable", "status"], nargs="?", default="status")
+    p = sub.add_parser("hooks", help="Claude Code hooks in ~/.claude/settings.json")
+    p.add_argument("action", choices=["install", "uninstall", "check"], nargs="?", default="check")
+    p.add_argument("--no-statusline", action="store_true")
+    return ap
+
+
+def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # fast paths first: nothing but companion.hookclient (stdlib) gets imported
+    if argv and argv[0] == "hook":
+        from .hookclient import run_hook
+        run_hook(argv[1:])
+    if argv and argv[0] == "statusline":
+        from .hookclient import run_statusline
+        run_statusline()
+    if argv and argv[0] == "app":
+        from .app import main as app_main
+        return app_main(argv[1:]) or 0
+    if not argv or (argv[0].startswith("-") and argv[0] not in ("-h", "--help")):
+        argv = ["run"] + argv  # backward compatible default
+    a = build_parser().parse_args(argv)
     if a.command == "status":
-        sys.exit(cmd_status(a.json))
-    setup_logging(a.verbose, a.log)
+        return cmd_status(a.json)
+    if a.command == "detect":
+        return cmd_detect()
+    if a.command == "flash":
+        return cmd_flash(a.board, a.port, a.erase)
+    if a.command == "autostart":
+        setup_logging(False, None)
+        return cmd_autostart(a.action)
+    if a.command == "hooks":
+        return cmd_hooks(a.action, not a.no_statusline)
     if a.command == "focus":
+        setup_logging(a.verbose, None)
         from .runtime_focus import focus_session
-        print(focus_session(a.arg or ""))
-        return
+        print(focus_session(a.sid or ""))
+        return 0
+    setup_logging(a.verbose, a.log)
     from .daemon import run
-    sys.exit(run(demo=a.demo, port=a.port, dry_run=a.dry_run, seconds=a.seconds) or 0)
+    return run(demo=a.demo, port=a.port, dry_run=a.dry_run, seconds=a.seconds) or 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -5,7 +5,9 @@ FILES / IPC (all under CLAUDIUS_HOME, default ~/.claudius-maximus/)
 ================================================================================================
 hooks.sock          unix DATAGRAM socket bound by the daemon (HooksProvider). Hook scripts send one JSON
                     datagram (<= 2000 bytes) per hook invocation. If the socket file is missing the hook
-                    does nothing. See host/hooks/cm_hook.py for the datagram format (short keys).
+                    does nothing. See companion/hookclient.py for the datagram format (short keys).
+hooks.port          Windows only (no AF_UNIX there): "<port> <key>" of a UDP socket bound to 127.0.0.1:0.
+                    Same datagrams, plus "k": <key> (others are dropped). Deleted when the daemon stops.
 statusline.json     **For providers/usage.py.** Written atomically (tmp + rename) by the statusLine wrapper
                     host/hooks/cm_statusline.py every time Claude Code refreshes its status line (after each
                     assistant message, and when a rate-limit window resets). Format:
@@ -68,6 +70,7 @@ import json
 import logging
 import os
 import socket
+import sys
 import time
 
 from .base import Provider
@@ -90,7 +93,15 @@ def state_dir() -> str:
 
 
 def sock_path() -> str:
-    return os.path.join(state_dir(), "hooks.sock")
+    """<state dir>/hooks.sock, or a short /tmp fallback when that is too long for AF_UNIX (same rule as the
+    client: companion/hookclient.py unix_sock_path)."""
+    from ..hookclient import unix_sock_path
+    return unix_sock_path(state_dir())
+
+
+def port_path() -> str:
+    """Windows: "<port> <key>" of the loopback UDP socket (see companion/hookclient.py)."""
+    return os.path.join(state_dir(), "hooks.port")
 
 
 def statusline_cache_path() -> str:
@@ -103,11 +114,13 @@ def _short(s: str, n: int = 80) -> str:
 
 
 def _relpath(p: str, cwd: str | None) -> str:
-    if cwd and p.startswith(cwd.rstrip("/") + "/"):
-        return p[len(cwd.rstrip("/")) + 1:]
+    for sep in ("/", "\\"):
+        if cwd and p.startswith(cwd.rstrip(sep) + sep):
+            return p[len(cwd.rstrip(sep)) + 1:]
     home = os.path.expanduser("~")
-    if p.startswith(home + "/"):
-        return "~" + p[len(home):]
+    for sep in ("/", "\\"):
+        if p.startswith(home + sep):
+            return "~" + p[len(home):]
     return p
 
 
@@ -155,24 +168,46 @@ def tool_label(tool: str) -> str:
 
 
 class HooksProvider(Provider):
-    def __init__(self, path: str | None = None):
+    """transport: "unix" (AF_UNIX datagram socket at `path`, macOS/Linux) or "udp" (127.0.0.1, ephemeral port
+    written with a random key to `port_file`, Windows). Default: udp on Windows, unix elsewhere; the
+    CLAUDIUS_HOOKS_TRANSPORT env var overrides (tests)."""
+
+    def __init__(self, path: str | None = None, transport: str | None = None, port_file: str | None = None):
         self.path = path or sock_path()
+        self.transport = transport or os.environ.get("CLAUDIUS_HOOKS_TRANSPORT") or (
+            "udp" if sys.platform == "win32" or not hasattr(socket, "AF_UNIX") else "unix")
+        self.port_file = port_file or port_path()
+        self.key = ""
+        self.port = 0
         self.sock: socket.socket | None = None
         self.sessions: dict[str, dict] = {}   # full session_id -> record
         self.events: list[dict] = []
         self.rate_limits: dict | None = None
         self.rate_limits_at = 0
         self.received = 0
+        self.rejected = 0
         self.last_hook_at = 0.0
         self._next_bind_try = 0.0
         self._bind_warned = False
 
+    @property
+    def address(self) -> str:
+        """Human description of where we listen (status / logs)."""
+        if self.transport == "udp":
+            return f"udp 127.0.0.1:{self.port}" if self.sock else "udp (not bound)"
+        return self.path
+
     # -- socket ------------------------------------------------------------------------------
     def _bind(self):
+        if self.transport == "udp":
+            return self._bind_udp()
+        folder = os.path.dirname(self.path)
         try:
-            os.makedirs(os.path.dirname(self.path), mode=0o700, exist_ok=True)
+            os.makedirs(folder, mode=0o700, exist_ok=True)
         except OSError:
             pass
+        if folder.startswith("/tmp/") and not self._safe_tmp_dir(folder):
+            return
         if os.path.exists(self.path):
             # Is someone (another daemon) alive behind it?
             probe = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
@@ -202,6 +237,62 @@ class HooksProvider(Provider):
         self.sock = s
         log.info("listening for Claude Code hooks on %s", self.path)
 
+    def _safe_tmp_dir(self, folder: str) -> bool:
+        """The short-path fallback lives in world-writable /tmp: it must be a real dir owned by us, 0700."""
+        from ..hookclient import owned_by_me
+        if not owned_by_me(folder):
+            try:
+                st = os.lstat(folder)
+                if st.st_uid == os.getuid() and not os.path.islink(folder):
+                    os.chmod(folder, 0o700)
+            except OSError:
+                pass
+        if owned_by_me(folder):
+            return True
+        if not self._bind_warned:
+            log.warning("hooks socket dir %s is not a private directory of ours; hooks disabled", folder)
+            self._bind_warned = True
+        return False
+
+    def _bind_udp(self):
+        """Loopback UDP on an ephemeral port. The single-instance daemon lock guarantees we are the only
+        daemon, so an existing hooks.port is stale and simply overwritten."""
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.bind(("127.0.0.1", 0))
+            try:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+            except OSError:
+                pass
+            s.setblocking(False)
+            self.port = s.getsockname()[1]
+        except OSError as e:
+            s.close()
+            log.warning("cannot bind hooks UDP socket: %s", e)
+            return
+        self.key = os.urandom(8).hex()
+        self.sock = s
+        if not self._write_port_file():
+            self.sock = None
+            s.close()
+            return
+        log.info("listening for Claude Code hooks on udp 127.0.0.1:%d (%s)", self.port, self.port_file)
+
+    def _write_port_file(self) -> bool:
+        try:
+            os.makedirs(os.path.dirname(self.port_file), mode=0o700, exist_ok=True)
+            tmp = f"{self.port_file}.{os.getpid()}.tmp"
+            with open(tmp, "w") as f:
+                f.write(f"{self.port} {self.key}\n")
+            os.replace(tmp, self.port_file)
+            return True
+        except OSError as e:
+            log.warning("cannot write %s: %s", self.port_file, e)
+            return False
+
+    def _endpoint_file(self) -> str:
+        return self.port_file if self.transport == "udp" else self.path
+
     def fileno(self) -> int | None:
         return self.sock.fileno() if self.sock else None
 
@@ -212,7 +303,7 @@ class HooksProvider(Provider):
             finally:
                 self.sock = None
                 try:
-                    os.unlink(self.path)
+                    os.unlink(self._endpoint_file())
                 except OSError:
                     pass
 
@@ -224,7 +315,7 @@ class HooksProvider(Provider):
                 self._bind()
             if not self.sock:
                 return
-        elif not os.path.exists(self.path):  # someone removed our socket file: rebind
+        elif not os.path.exists(self._endpoint_file()):  # someone removed our socket / port file: rebind
             self.sock.close()
             self.sock = None
             self._bind()
@@ -235,12 +326,17 @@ class HooksProvider(Provider):
                 data = self.sock.recv(4096)
             except (BlockingIOError, InterruptedError):
                 break
+            except ConnectionResetError:
+                continue  # Windows: ICMP port-unreachable from an earlier send surfaces here; harmless
             except OSError as e:
                 log.warning("hooks socket error: %s", e)
                 break
             try:
                 msg = json.loads(data.decode("utf-8", "replace"))
                 if isinstance(msg, dict):
+                    if self.key and msg.pop("k", None) != self.key:
+                        self.rejected += 1   # UDP is reachable by any local program: key from hooks.port
+                        continue
                     self.handle(msg)
             except Exception:
                 log.debug("bad hook datagram: %r", data[:200], exc_info=True)
@@ -283,7 +379,8 @@ class HooksProvider(Provider):
 
     @staticmethod
     def _name(s: dict) -> str:
-        return os.path.basename((s.get("cwd") or "").rstrip("/")) or s["sid"][:8]
+        cwd = (s.get("cwd") or "").rstrip("/\\")
+        return os.path.basename(cwd.replace("\\", "/")) or s["sid"][:8]
 
     def handle(self, m: dict) -> None:
         ev = m.get("e") or ""

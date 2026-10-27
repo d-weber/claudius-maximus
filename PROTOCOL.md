@@ -1,6 +1,8 @@
 # Claudius Maximus — host ⇄ device protocol
 
-Transport: USB CDC serial (`/dev/cu.usbmodem*`, Espressif VID `0x303a`), 115200 nominal (USB, speed irrelevant).
+Transport: the ESP32-S3's native USB-Serial-JTAG port (VID:PID `303a:1001`; `/dev/cu.usbmodem*` on macOS,
+`/dev/ttyACM*` on Linux, `COMn` on Windows), 115200 nominal (USB, speed irrelevant). The 4B's "USB TO UART" port
+(CH343, `1a86:55d3`) does not carry the protocol; it is only used for flashing.
 Framing: one JSON object per line (`\n`). Max line 32 KB. Every message has a `"t"` (type) key.
 Times are **unix epoch seconds** (integers). Strings are UTF-8; the device fonts only render ASCII + LVGL symbols,
 so the host should strip/transliterate exotic characters (emoji etc.).
@@ -109,16 +111,34 @@ Bursts of > 12 events in one host tick keep every non-`tool` event and only the 
 { "t": "cmd", "bl": 80 }                  // backlight percent 0-100
 { "t": "cmd", "shot": 1 }                 // request screenshot (see below)
 { "t": "cmd", "demo_alert": "waiting" }   // dev: trigger alert visuals
+{ "t": "cmd", "hello": 1 }                // re-send the hello
+{ "t": "cmd", "dl": 1 }                   // reboot into the ROM download mode (fw >= 0.3.0), see below
 ```
+
+#### `dl` — reboot into download mode (firmware ≥ 0.3.0)
+The device answers `{"t":"log","msg":"rebooting into download mode"}`, flushes, sets `RTC_CNTL_FORCE_DOWNLOAD_BOOT`
+and restarts: the ROM serial loader then comes up on the same USB-Serial-JTAG port (it re-enumerates; same name on
+Linux, possibly a new one on macOS/Windows). The desktop app's flasher (`host/companion/flasher.py`) uses it only as
+a fallback, when esptool's DTR/RTS reset (`--before default-reset`) does not reach the loader. It then runs esptool
+with `--before no-reset` and **must finish with `--after watchdog-reset`**: DTR is still asserted from pyserial's
+open, so the USB-Serial-JTAG ignores the RTS pulse of `--after hard-reset` and the flasher stub keeps running.
+Open the port without toggling DTR/RTS to send the command (as the daemon does), or the open itself may reset the
+chip. Older firmware ignores the key.
 
 ## Device → host
 ```jsonc
-{ "t": "hello", "fw": "0.2.0", "w": 480, "h": 480, "caps": ["part", "screen"], "screen": "home" } // on boot / on host connect
+{ "t": "hello", "fw": "0.3.0", "board": "ESP32-S3-Touch-LCD-4B", "w": 480, "h": 480, "caps": ["part", "screen"],
+  "screen": "home" }                                       // on boot / on host connect / on {"t":"cmd","hello":1}
 { "t": "screen", "id": "system" }                          // visible screen changed (tile id, or "detail")
 { "t": "log", "msg": "..." }
 { "t": "action", "action": "focus", "sid": "969ca7a9" }   // user tapped "focus" → host raises that terminal
 { "t": "shot", "w": 480, "h": 480, "fmt": "rgb565le", "len": 460800 } // followed immediately by len raw bytes
 ```
+
+`hello` fields: `fw` = `FW_VERSION` (`firmware/src/core/version.h`; the desktop app compares it with the firmware it
+ships to offer an update); `board` = `BOARD_NAME` from `firmware/src/core/board.h`, `"ESP32-S3-Touch-LCD-4B"` or
+`"ESP32-S3-Touch-LCD-4 V4"` (sent since 0.2.0; the host maps it to the board ids `4b` / `v4` in
+`host/companion/flasher.py` `BOARDS` and shows it in `status`); `caps` see Partial `state`; `screen` see `screen`.
 
 ### Device → host actions
 | action | meaning |

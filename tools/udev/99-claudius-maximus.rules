@@ -1,5 +1,9 @@
-# Claudius Maximus (Linux, optional): keep ModemManager off the ESP32-S3's USB serial port, and make it
+# Claudius Maximus (Linux, optional): keep ModemManager off the board's USB serial ports, and make them
 # accessible without being in the dialout group.   sudo cp tools/udev/99-claudius-maximus.rules /etc/udev/rules.d/
 #                                                     sudo udevadm control --reload && sudo udevadm trigger
+# 303a:1001 = ESP32-S3 native USB-Serial-JTAG (the USB-OTG port, host link + flashing)
+# 1a86:55d3 = CH343 on the ESP32-S3-Touch-LCD-4B's "USB TO UART" port (flashing only)
 SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1", MODE="0660", TAG+="uaccess"
 SUBSYSTEM=="usb", ATTR{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d3", ENV{ID_MM_DEVICE_IGNORE}="1", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="55d3", ENV{ID_MM_DEVICE_IGNORE}="1"

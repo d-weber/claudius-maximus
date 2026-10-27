@@ -4,13 +4,16 @@ Everything that ends up on the device goes through `ascii_text()` (the device fo
 """
 from __future__ import annotations
 
+import ntpath
 import os
 import re
+import sys
 import unicodedata
 from datetime import datetime
 from urllib.parse import urlsplit
 
 HOME = os.path.expanduser("~")
+IS_WINDOWS = sys.platform == "win32"
 
 # --------------------------------------------------------------------------------------------- text
 _PUNCT = {
@@ -66,10 +69,39 @@ def plain(s: str) -> str:
     return _MD.sub(lambda m: m.group(2) if m.group(2) is not None else "", s or "").strip()
 
 
+def folder_name(cwd: str) -> str:
+    """Last component of a directory path ("" if none). Windows paths may use either separator and end in one;
+    Claude Code on Windows reports cwd like C:\\Users\\x\\proj."""
+    if IS_WINDOWS:
+        return ntpath.basename((cwd or "").rstrip("/\\"))
+    return os.path.basename((cwd or "").rstrip("/"))
+
+
+def _win_under(p: str, base: str) -> bool:
+    """p == base or p inside base, Windows rules: case-insensitive, / and \\ are the same separator."""
+    a, b = p.replace("/", "\\").lower(), base.replace("/", "\\").rstrip("\\").lower()
+    return bool(b) and (a == b or a.startswith(b + "\\"))
+
+
 def tilde(p: str) -> str:
+    if IS_WINDOWS:
+        return "~" + p[len(HOME.rstrip("/\\")):] if p and _win_under(p, HOME) else (p or "")
     if p and (p == HOME or p.startswith(HOME + "/")):
         return "~" + p[len(HOME):]
     return p or ""
+
+
+def _short_path_win(p: str, cwd: str | None, maxlen: int) -> str:
+    c = (cwd or "").rstrip("/\\")
+    rel = p[len(c) + 1:] if c and _win_under(p, c) and len(p) > len(c) else tilde(p)
+    if len(rel) <= maxlen:
+        return rel
+    parts = [x for x in re.split(r"[\\/]", p) if x]
+    if len(parts) >= 2:
+        two = parts[-2] + "\\" + parts[-1]
+        if len(two) <= maxlen:
+            return two
+    return parts[-1] if parts else rel
 
 
 def short_path(p: str, cwd: str | None = None, maxlen: int = 40) -> str:
@@ -77,6 +109,8 @@ def short_path(p: str, cwd: str | None = None, maxlen: int = 40) -> str:
     if not p:
         return ""
     p = str(p)
+    if IS_WINDOWS:
+        return _short_path_win(p, cwd, maxlen)
     c = (cwd or "").rstrip("/")
     if c and p.startswith(c + "/"):
         rel = p[len(c) + 1:]
@@ -172,7 +206,7 @@ def tool_detail(name: str, inp, cwd: str | None = None, n: int = 80) -> str:
     elif t == "Artifact":
         d = g("action") or "publish"
         if g("file_path"):
-            d += " " + os.path.basename(g("file_path"))
+            d += " " + (ntpath if IS_WINDOWS else os.path).basename(g("file_path"))
     elif t.startswith("mcp__"):
         parts = t.split("__")
         d = parts[1] if len(parts) > 2 else ""

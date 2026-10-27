@@ -7,3 +7,9 @@ backup/*.bin
 !docs/**/*.png
 .devwant.*
 mocks/
+host/companion/firmware/*/
+# packaging (PyInstaller / setuptools output); the generated app icons are committed
+build/
+dist/
+*.egg-info/
+!packaging/icons/*.png

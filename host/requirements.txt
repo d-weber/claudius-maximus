@@ -1,4 +1,8 @@
-# Claudius Maximus host daemon (install into host/.venv: host/.venv/bin/pip install -r host/requirements.txt)
+# Claudius Maximus host side. Mirrors host/pyproject.toml (the source of truth): pip install -e host
 pyserial>=3.5
-psutil>=5.9   # host system metrics (providers/system.py)
-pillow>=10     # dev only: tools/dev.py show (PNG mock-ups on the device)
+psutil>=5.9                                      # host system metrics (providers/system.py)
+pillow>=10                                       # tray icons, tools/dev.py show
+esptool>=5.0,<6                                  # firmware flashing (companion/flasher.py)
+pystray>=0.19; sys_platform != "linux"           # tray icon on Windows/macOS
+pyobjc-framework-Cocoa>=10; sys_platform == "darwin"
+dbus-fast>=2.20; sys_platform == "linux"         # StatusNotifierItem tray on Linux

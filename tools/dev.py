@@ -25,7 +25,6 @@ Exit code != 0 on failure. Don't hold the device more than ~60 s at a time.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import struct
@@ -39,6 +38,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "host"))
 
+from companion import locking  # noqa: E402
 from companion.link import DeviceLink  # noqa: E402
 from companion.providers.demo import DemoProvider  # noqa: E402
 from companion.daemon import snapshot  # noqa: E402
@@ -70,25 +70,20 @@ def build_dir() -> Path:
 def device_lock(what: str):
     want = ROOT / f".devwant.{os.getpid()}"   # tells the companion daemon to release the port now
     want.touch()
-    fd = os.open(LOCK, os.O_CREAT | os.O_RDWR)
+    fd = locking.open_lock_file(LOCK)
     t0 = time.time()
-    while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            break
-        except BlockingIOError:
-            if time.time() - t0 > 600:
-                sys.exit("timed out waiting for device lock")
-            time.sleep(0.5)
+    while not locking.try_lock(fd):
+        if time.time() - t0 > 600:
+            sys.exit("timed out waiting for device lock")
+        time.sleep(0.5)
     waited = time.time() - t0
     if waited > 1:
         print(f"[dev] waited {waited:.0f}s for device lock", file=sys.stderr)
-    os.ftruncate(fd, 0)
-    os.write(fd, f"{dev_name()} {what} pid={os.getpid()}\n".encode())
+    locking.write_holder(fd, f"{dev_name()} {what} pid={os.getpid()}\n")
     try:
         yield
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        locking.unlock(fd)
         os.close(fd)
         want.unlink(missing_ok=True)
 

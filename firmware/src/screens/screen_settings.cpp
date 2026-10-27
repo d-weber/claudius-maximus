@@ -13,9 +13,7 @@
 #include <Wire.h>
 #include "WS_CH32_IO.h"
 
-#ifndef FW_VERSION
-#define FW_VERSION "0.1.0"
-#endif
+#include "../core/version.h"
 
 static lv_obj_t *cont;
 static lv_obj_t *bri_slider, *bri_val, *dim_slider, *dim_val;

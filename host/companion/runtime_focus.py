@@ -14,6 +14,14 @@ Linux (best effort): tmux pane selection as above, then a window tool activates 
 session's terminal process (walking up the parents until a window is found; VS Code & co. are matched by
 the project folder name in the window title). Tools, first available wins: KWin's D-Bus scripting (KDE,
 X11 and Wayland, nothing to install), kdotool, xdotool (X11), wmctrl (X11). Without any, nothing is raised.
+
+Windows (best effort, psutil + ctypes user32, nothing spawned): the session's ancestors (psutil parents), then
+the visible top-level windows (EnumWindows). In order: VS Code / Cursor / Windsurf / Zed -> the editor window
+whose title contains the project folder name; else a window owned by an ancestor (mintty for Git Bash; classic
+console windows report their client shell as owner); else any window titled with the project folder name; else
+the topmost Windows Terminal window (WindowsTerminal.exe is usually not an ancestor of the shell, and its tab
+title is whatever Claude Code set). Raised with ShowWindow (SW_RESTORE only if minimized) + SetForegroundWindow,
+working around the foreground lock with a synthetic Alt press and AttachThreadInput.
 """
 from __future__ import annotations
 
@@ -21,11 +29,19 @@ import glob
 import json
 import logging
 import os
+import ntpath
 import shutil
 import subprocess
 import sys
 
 log = logging.getLogger("companion.focus")
+
+IS_WINDOWS = sys.platform == "win32"
+
+
+def _claude_dir() -> str:
+    """Same rule as providers.sessions.claude_dir() (not imported: keeps `companion focus` light)."""
+    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
 
 
 def _run(args: list[str], timeout: float = 5.0, input: str | None = None) -> str:
@@ -42,9 +58,9 @@ def find_session(sid: str) -> dict | None:
     if not sid:
         return None
     best = None
-    for f in glob.glob(os.path.expanduser("~/.claude/sessions/*.json")):
+    for f in glob.glob(os.path.join(glob.escape(_claude_dir()), "sessions", "*.json")):
         try:
-            with open(f) as fh:
+            with open(f, encoding="utf-8") as fh:
                 d = json.load(fh)
         except Exception:
             continue
@@ -333,12 +349,185 @@ def _focus_linux(sid: str, pid: int, tty: str, cwd: str) -> str:
     return f"session {sid}: no window found for the process tree (tty {tty}, {tool})"
 
 
+# ---- Windows ----------------------------------------------------------------------------------------
+_WIN_EDITORS = ("code", "code - insiders", "codium", "vscodium", "cursor", "windsurf", "zed")
+_WIN_TERMINALS = ("windowsterminal", "windowsterminalpreview")
+_SW_SHOW, _SW_RESTORE = 5, 9
+_VK_MENU, _KEYEVENTF_KEYUP = 0x12, 0x0002
+_ASFW_ANY = -1
+
+
+def _exe_name(name: str) -> str:
+    n = (name or "").lower()
+    return n[:-4] if n.endswith(".exe") else n
+
+
+def _user32():
+    """ctypes user32 with 64-bit-safe prototypes (HWND is pointer-sized). Patched by the tests."""
+    import ctypes
+    u = ctypes.WinDLL("user32", use_last_error=True)
+    H, B, I = ctypes.c_void_p, ctypes.c_int, ctypes.c_int
+    proto = {
+        "EnumWindows": ([ctypes.c_void_p, ctypes.c_ssize_t], B),
+        "GetWindowThreadProcessId": ([H, ctypes.POINTER(ctypes.c_ulong)], ctypes.c_ulong),
+        "IsWindowVisible": ([H], B), "IsIconic": ([H], B),
+        "GetWindowTextLengthW": ([H], I), "GetWindowTextW": ([H, ctypes.c_wchar_p, I], I),
+        "ShowWindow": ([H, I], B), "SetForegroundWindow": ([H], B), "BringWindowToTop": ([H], B),
+        "GetForegroundWindow": ([], H), "AllowSetForegroundWindow": ([ctypes.c_ulong], B),
+        "AttachThreadInput": ([ctypes.c_ulong, ctypes.c_ulong, B], B),
+        "keybd_event": ([ctypes.c_ubyte, ctypes.c_ubyte, ctypes.c_ulong, ctypes.c_size_t], None),
+    }
+    for fn, (args, res) in proto.items():
+        f = getattr(u, fn)
+        f.argtypes, f.restype = args, res
+    return u
+
+
+def _win_thread_id() -> int:
+    import ctypes
+    try:
+        return int(ctypes.WinDLL("kernel32").GetCurrentThreadId())
+    except Exception:
+        return 0
+
+
+def _win_ancestors(pid: int, limit: int = 40) -> list[tuple[int, str]]:
+    """[(pid, exe name lower-case without .exe), ...] from `pid` up. psutil checks create times, so a
+    recycled parent pid (common on Windows: ppid is never reset) is not followed."""
+    import psutil
+    try:
+        p = psutil.Process(pid)
+        chain = [p] + p.parents()
+    except Exception:
+        return []
+    out = []
+    for q in chain[:limit]:
+        try:
+            out.append((q.pid, _exe_name(q.name())))
+        except Exception:
+            out.append((q.pid, "?"))
+    return out
+
+
+def _win_windows(u) -> list[tuple[int, int, str]]:
+    """Visible, titled top-level windows in z-order (topmost first): [(hwnd, owner pid, title)]."""
+    import ctypes
+    found: list[tuple[int, int, str]] = []
+    proto = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+
+    def cb(hwnd, _lparam):
+        try:
+            if hwnd and u.IsWindowVisible(hwnd):
+                n = u.GetWindowTextLengthW(hwnd)
+                if n > 0:
+                    buf = ctypes.create_unicode_buffer(n + 1)
+                    u.GetWindowTextW(hwnd, buf, n + 1)
+                    owner = ctypes.c_ulong(0)
+                    u.GetWindowThreadProcessId(hwnd, ctypes.pointer(owner))
+                    if buf.value:
+                        found.append((int(hwnd), int(owner.value), buf.value))
+        except Exception:
+            pass
+        return 1
+
+    u.EnumWindows(proto(cb), 0)
+    return found
+
+
+def _win_raise(u, hwnd: int) -> bool:
+    """Restore if minimized (SW_RESTORE would un-maximize a maximized window), then take the foreground.
+    Windows only lets the foreground process (or one that just received input) set it: a synthetic Alt
+    press counts as input, and AttachThreadInput to the current foreground thread is the second resort."""
+    try:
+        u.AllowSetForegroundWindow(_ASFW_ANY)
+        u.ShowWindow(hwnd, _SW_RESTORE if u.IsIconic(hwnd) else _SW_SHOW)
+        u.keybd_event(_VK_MENU, 0, 0, 0)
+        u.keybd_event(_VK_MENU, 0, _KEYEVENTF_KEYUP, 0)
+        ok = bool(u.SetForegroundWindow(hwnd))
+        if not ok:
+            import ctypes
+            fg = u.GetForegroundWindow()
+            fg_tid = u.GetWindowThreadProcessId(fg, ctypes.pointer(ctypes.c_ulong(0))) if fg else 0
+            me = _win_thread_id()
+            if fg_tid and me and fg_tid != me and u.AttachThreadInput(me, fg_tid, 1):
+                try:
+                    ok = bool(u.SetForegroundWindow(hwnd))
+                finally:
+                    u.AttachThreadInput(me, fg_tid, 0)
+        u.BringWindowToTop(hwnd)
+        return ok
+    except Exception as e:
+        log.debug("raise window failed: %s", e)
+        return False
+
+
+def _win_proc_names(pids: set[int]) -> dict[int, str]:
+    import psutil
+    out = {}
+    for p in pids:
+        try:
+            out[p] = _exe_name(psutil.Process(p).name())
+        except Exception:
+            out[p] = "?"
+    return out
+
+
+def _focus_windows(sid: str, pid: int, tty: str, cwd: str) -> str:
+    try:
+        import psutil  # noqa: F401
+    except ImportError:
+        return f"session {sid}: psutil missing (pip install psutil)"
+    try:
+        u = _user32()
+    except Exception as e:
+        return f"session {sid}: user32 unavailable ({e})"
+    chain = _win_ancestors(pid)
+    if not chain:
+        return f"session {sid}: process {pid} gone"
+    names = [n for _, n in chain]
+    needle = ntpath.basename((cwd or "").rstrip("/\\"))
+    wins = _win_windows(u)
+    if not wins:
+        return f"session {sid}: no visible window"
+    owners = _win_proc_names({w[1] for w in wins})
+    low = needle.lower()
+
+    def titled(pred=lambda _n: True):
+        return [w for w in wins if low and low in w[2].lower() and pred(owners.get(w[1], "?"))]
+
+    def done(w, how):
+        ok = _win_raise(u, w[0])
+        what = owners.get(w[1], "?")
+        return f"focused {what} for {sid} ({how}{', exact' if ok else ', foreground refused'})"
+
+    in_editor = any(n in _WIN_EDITORS for n in names)
+    if in_editor and needle:
+        hits = titled(lambda n: n in _WIN_EDITORS) or titled()
+        if hits:
+            return done(hits[0], f"window {needle!r}")
+    by_pid: dict[int, list] = {}
+    for w in wins:
+        by_pid.setdefault(w[1], []).append(w)
+    for p, comm in chain:
+        if p in by_pid:
+            return done(by_pid[p][0], f"window of {comm}")
+    hits = titled(lambda n: n in _WIN_TERMINALS or n in _WIN_EDITORS) or titled()
+    if hits:
+        return done(hits[0], f"window {needle!r}")
+    wt = [w for w in wins if owners.get(w[1], "?") in _WIN_TERMINALS]
+    if wt:
+        return done(wt[0], "topmost Windows Terminal window, tab not selected")
+    return f"session {sid}: no window found for the process tree ({' < '.join(names[:6])})"
+
+
 def focus_session(sid: str) -> str:
     """Focus the terminal hosting session `sid`. Returns a short description of what happened."""
     rec = find_session(sid)
     if not rec or not rec.get("pid"):
         return f"session {sid} not found"
     pid = int(rec["pid"])
+    if IS_WINDOWS:   # no ps, no tty on Windows
+        return _focus_windows(sid, pid, "", rec.get("cwd") or "")
     info = _ps(pid)
     if not info:
         return f"session {sid}: process {pid} gone"

@@ -1,14 +1,15 @@
-// HOME — Clawd at his desk (isometric scene, home_face.cpp) plus a glanceable summary of all agents.
-//   top bar:   clock + date | 5h budget mini bar
-//   scene:     full-width isometric desk reflecting the aggregate mood, speech bubble (tap Clawd for news)
-//   stats:     working / need you / idle / helpers  (tap -> agents screen)
+// HOME — Clawd's Studio (home_face.cpp: the top-down pixel-art room, 480 x 424) plus a HUD band:
+//   room:  Clawd at the station of whatever the agents are doing, the room living on the real clock
+//   HUD:   clock + date | working / need you / idle / helpers (tap -> agents) | 5h budget
 #include "screens.h"
 #include "../ui/theme.h"
 #include "../core/model.h"
 #include "home_face.h"
 #include <time.h>
 
-static lv_obj_t *lbl_clock, *lbl_date, *budget_box, *budget_bar, *budget_pct;
+static const int ROOM_H = 424, HUD_Y = 424, HUD_H = 56;
+
+static lv_obj_t *hud, *lbl_clock, *lbl_date, *budget_box, *budget_bar, *budget_pct;
 static lv_obj_t *stats_row, *stat_num[4], *stat_cap[4];
 static lv_timer_t *tmr;
 static bool visible = false, host_prev = false, greeted = false;
@@ -29,6 +30,8 @@ static const char *const QUIPS[] = {
     "Nice code. Truly.",
     "Grab a coffee, I've got this.",
     "Tap me again, I like it.",
+    "The plant says hi.",
+    "I watered the plant. You're welcome.",
 };
 static const int N_QUIPS = sizeof(QUIPS) / sizeof(QUIPS[0]);
 
@@ -46,16 +49,19 @@ static const char *tool_verb(const char *tool) {
   return tool;
 }
 
+// What Clawd does in the room for a tool (home_face.h tool_cat)
 static char tool_category(const char *tool) {
-  if (!tool || !*tool) return 't';
-  if (!strcmp(tool, "Read") || !strcmp(tool, "Grep") || !strcmp(tool, "Glob") || !strcmp(tool, "LS")) return 'r';
-  if (!strcmp(tool, "Edit") || !strcmp(tool, "MultiEdit") || !strcmp(tool, "Write") || !strcmp(tool, "NotebookEdit"))
-    return 'e';
+  if (!tool || !*tool) return 'e';
+  if (!strcmp(tool, "Read")) return 'r';
+  if (!strcmp(tool, "Grep") || !strcmp(tool, "Glob") || !strcmp(tool, "LS")) return 's';
+  if (!strcmp(tool, "Edit") || !strcmp(tool, "MultiEdit") || !strcmp(tool, "Write") || !strcmp(tool, "NotebookEdit")) return 'e';
   if (!strncmp(tool, "Bash", 4)) return 'x';
   if (!strncmp(tool, "Web", 3)) return 'w';
   if (!strcmp(tool, "Agent") || !strcmp(tool, "Task")) return 'a';
-  if (!strcmp(tool, "thinking") || !strcmp(tool, "writing")) return 't';
-  return 0;
+  if (!strcmp(tool, "TodoWrite")) return 'p';
+  if (!strcmp(tool, "thinking")) return 't';
+  if (!strcmp(tool, "writing")) return 'e';
+  return 'e';
 }
 
 static bool is_file_tool(const char *tool) {
@@ -88,15 +94,7 @@ static lv_obj_t *mk_label(lv_obj_t *p, const lv_font_t *f, lv_color_t c) {
   return l;
 }
 
-static void set_single_line(lv_obj_t *l, lv_coord_t w) {
-  lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
-  lv_obj_set_width(l, w);
-  lv_obj_set_height(l, lv_font_get_line_height(lv_obj_get_style_text_font(l, 0)));
-}
-
 // ------------------------------------------------------------------ change-only setters
-// Every lv_label_set_text / lv_obj_set_style_* / flag change invalidates (and may relayout) even when the
-// value is identical, so refresh() only touches what actually changed.
 static void set_txt(lv_obj_t *l, const char *t) {
   if (strcmp(lv_label_get_text(l), t)) lv_label_set_text(l, t);
 }
@@ -121,6 +119,7 @@ static void set_hidden(lv_obj_t *o, bool h) {
 static void refresh(JsonObjectConst s) {
   bool host = model_host_connected();
   int busy = 0, wait = 0, idle = 0, help = 0, alive = 0;
+  int todo_done = 0, todo_total = 0;
   JsonObjectConst f_busy;
   for (JsonObjectConst x : s["sessions"].as<JsonArrayConst>()) {
     const char *st = x["status"] | "offline";
@@ -131,10 +130,12 @@ static void refresh(JsonObjectConst s) {
     alive++;
     for (JsonObjectConst a : x["subagents"].as<JsonArrayConst>())
       if (!strcmp(a["status"] | "", "busy")) help++;
+    todo_done += x["todos"]["done"] | 0;
+    todo_total += x["todos"]["total"] | 0;
   }
   if (help == 0) help = s["totals"]["subagents_active"] | 0;
 
-  // character mood
+  // Clawd
   char cat = 0;
   if (!f_busy.isNull()) cat = tool_category(f_busy["activity"]["tool"] | "");
   HomeMood m = !host ? HOME_MOOD_OFFLINE
@@ -143,6 +144,8 @@ static void refresh(JsonObjectConst s) {
                : busy ? HOME_MOOD_BUSY
                       : HOME_MOOD_IDLE;
   float energy = busy ? 0.35f + 0.22f * (busy - 1) + 0.06f * help : 0.1f;
+  if (energy > 1) energy = 1;
+  home_face_set_plan(todo_done, todo_total);
   home_face_set_mood(m, energy, host ? help : 0, cat);
 
   // stats
@@ -169,7 +172,6 @@ static void refresh(JsonObjectConst s) {
   } else {
     set_hidden(budget_box, true);
   }
-
 }
 
 static void update_clock() {
@@ -218,7 +220,7 @@ static void face_tapped() {
   int n = 0;
   JsonObjectConst s = model_state();
   if (!model_host_connected()) {
-    snprintf(lines[n++], 112, "Zzz... start the companion daemon on your Mac and I'll wake up.");
+    snprintf(lines[n++], 112, "Zzz... start the companion app on your computer and I'll wake up.");
   } else {
     int nb = 0;
     for (JsonObjectConst x : s["sessions"].as<JsonArrayConst>()) {
@@ -249,64 +251,48 @@ static void face_tapped() {
 static void stats_clicked(lv_event_t *) { ui_nav("agents"); }
 
 static void on_timer(lv_timer_t *) {
-  home_face_tick();
+  home_face_tick(visible);
   uint32_t now = lv_tick_get();
   if (now - last_slow < 500) return;
   last_slow = now;
-  update_clock();
+  if (visible) update_clock();
   bool host = model_host_connected();
   if (host != host_prev) {
     host_prev = host;
     refresh(model_state());
-    if (host && !greeted) { greeted = true; greet(); }
+    if (host && !greeted) { greeted = true; if (visible) greet(); }
     if (!host) greeted = false;
   }
 }
 
 // ------------------------------------------------------------------ ScreenDef
 static void create(lv_obj_t *p) {
-  home_face_create(p, 54, 363);   // scene: logical 160 x 121 at 3x
+  home_face_create(p, 0);
   home_face_on_tap(face_tapped);
 
-  // top bar
-  lv_obj_t *row = lv_obj_create(p);
-  style_plain(row);
-  lv_obj_set_size(row, 240, 32);
-  lv_obj_set_pos(row, 26, 12);
-  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
-  lv_obj_set_style_pad_column(row, 10, 0);
-  lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE);
-  lbl_clock = mk_label(row, F_TITLE, C_TEXT);
-  lv_label_set_text(lbl_clock, "--:--");
-  lbl_date = mk_label(row, F_SMALL, C_MUTED);
-  lv_obj_set_style_pad_bottom(lbl_date, 3, 0);
+  // HUD band
+  hud = lv_obj_create(p);
+  style_plain(hud);
+  lv_obj_set_size(hud, 480, HUD_H);
+  lv_obj_set_pos(hud, 0, HUD_Y);
+  lv_obj_set_style_bg_color(hud, lv_color_hex(0x1D1A24), 0);
+  lv_obj_set_style_bg_opa(hud, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_color(hud, lv_color_hex(0x2B1E2A), 0);
+  lv_obj_set_style_border_width(hud, 1, 0);
+  lv_obj_set_style_border_side(hud, LV_BORDER_SIDE_TOP, 0);
+  lv_obj_clear_flag(hud, LV_OBJ_FLAG_CLICKABLE);
 
-  budget_box = lv_obj_create(p);
-  style_plain(budget_box);
-  lv_obj_set_size(budget_box, 160, 28);
-  lv_obj_align(budget_box, LV_ALIGN_TOP_RIGHT, -24, 14);
-  lv_obj_clear_flag(budget_box, LV_OBJ_FLAG_CLICKABLE);
-  budget_pct = mk_label(budget_box, F_SMALL, C_TEXT);
-  lv_obj_align(budget_pct, LV_ALIGN_RIGHT_MID, 0, 0);
-  budget_bar = lv_bar_create(budget_box);
-  lv_obj_set_size(budget_bar, 64, 8);
-  lv_obj_align(budget_bar, LV_ALIGN_RIGHT_MID, -46, 0);
-  lv_bar_set_range(budget_bar, 0, 100);
-  lv_obj_set_style_bg_color(budget_bar, C_SURFACE2, 0);
-  lv_obj_set_style_bg_opa(budget_bar, LV_OPA_COVER, 0);
-  lv_obj_set_style_radius(budget_bar, 4, 0);
-  lv_obj_set_style_radius(budget_bar, 4, LV_PART_INDICATOR);
-  lv_obj_t *l5 = mk_label(budget_box, F_SMALL, C_MUTED);
-  lv_label_set_text(l5, "5h");
-  lv_obj_align(l5, LV_ALIGN_RIGHT_MID, -118, 0);
-  lv_obj_add_flag(budget_box, LV_OBJ_FLAG_HIDDEN);
+  lbl_clock = mk_label(hud, F_TITLE, C_TEXT);
+  lv_label_set_text(lbl_clock, "--:--");
+  lv_obj_set_pos(lbl_clock, 12, 3);
+  lbl_date = mk_label(hud, F_SMALL, C_MUTED);
+  lv_obj_set_pos(lbl_date, 13, 29);
 
   // stats row
-  stats_row = lv_obj_create(p);
+  stats_row = lv_obj_create(hud);
   style_plain(stats_row);
-  lv_obj_set_size(stats_row, 448, 58);
-  lv_obj_set_pos(stats_row, 16, 408);
+  lv_obj_set_size(stats_row, 268, 44);   // keep the bottom 12 px clear: the tileview's page dots live there
+  lv_obj_set_pos(stats_row, 100, 0);
   lv_obj_set_flex_flow(stats_row, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(stats_row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_add_flag(stats_row, LV_OBJ_FLAG_CLICKABLE);
@@ -314,26 +300,44 @@ static void create(lv_obj_t *p) {
   for (int i = 0; i < 4; i++) {
     lv_obj_t *c = lv_obj_create(stats_row);
     style_plain(c);
-    lv_obj_set_size(c, 104, 58);
+    lv_obj_set_size(c, 66, 44);
     lv_obj_clear_flag(c, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(c, LV_OBJ_FLAG_EVENT_BUBBLE);
-    stat_num[i] = mk_label(c, &lv_font_montserrat_28, C_DIM);
+    stat_num[i] = mk_label(c, F_BODY, C_DIM);
     lv_label_set_text(stat_num[i], "0");
-    lv_obj_align(stat_num[i], LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_align(stat_num[i], LV_ALIGN_TOP_MID, 0, 4);
     stat_cap[i] = mk_label(c, F_SMALL, C_DIM);
     lv_label_set_text(stat_cap[i], STAT_CAP[i]);
-    lv_obj_align(stat_cap[i], LV_ALIGN_BOTTOM_MID, 0, -2);
+    lv_obj_align(stat_cap[i], LV_ALIGN_TOP_MID, 0, 25);
   }
   lv_obj_add_flag(stats_row, LV_OBJ_FLAG_HIDDEN);
 
-  tmr = lv_timer_create(on_timer, 36, nullptr);
-  lv_timer_pause(tmr);
+  // budget
+  budget_box = lv_obj_create(hud);
+  style_plain(budget_box);
+  lv_obj_set_size(budget_box, 100, 44);
+  lv_obj_set_pos(budget_box, 370, 0);
+  lv_obj_clear_flag(budget_box, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_t *l5 = mk_label(budget_box, F_SMALL, C_MUTED);
+  lv_label_set_text(l5, "5h");
+  lv_obj_set_pos(l5, 0, 6);
+  budget_pct = mk_label(budget_box, F_SMALL, C_TEXT);
+  lv_obj_align(budget_pct, LV_ALIGN_TOP_RIGHT, 0, 6);
+  budget_bar = lv_bar_create(budget_box);
+  lv_obj_set_size(budget_bar, 100, 8);
+  lv_obj_set_pos(budget_bar, 0, 30);
+  lv_bar_set_range(budget_bar, 0, 100);
+  lv_obj_set_style_bg_color(budget_bar, lv_color_hex(0x3A3546), 0);
+  lv_obj_set_style_bg_opa(budget_bar, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(budget_bar, 4, 0);
+  lv_obj_set_style_radius(budget_bar, 4, LV_PART_INDICATOR);
+  lv_obj_add_flag(budget_box, LV_OBJ_FLAG_HIDDEN);
+
+  tmr = lv_timer_create(on_timer, 36, nullptr);   // keeps running while hidden: the room lives on, drawing is skipped
 }
 
 static void update(JsonObjectConst s) {
   if (model_host_connected() != host_prev) return;  // timer handles transitions (+ greeting)
-  // Skip when nothing home shows changed: the sessions/totals/usage parts. Unchanged values are filtered
-  // again per widget inside refresh().
   static uint32_t seen[3] = {0, 0, 0};
   uint32_t k[3] = {model_part_version("sessions"), model_part_version("totals"), model_part_version("usage")};
   if (!memcmp(k, seen, sizeof k)) return;
@@ -342,7 +346,6 @@ static void update(JsonObjectConst s) {
 }
 
 static void on_event(JsonObjectConst ev) {
-  if (!visible) return;
   const char *k = ev["kind"] | "";
   const char *name = ev["name"] | "agent";
   char buf[112];
@@ -351,41 +354,49 @@ static void on_event(JsonObjectConst ev) {
     static const char *const YAY[] = {"Woohoo!", "Nailed it!", "High five!", "Another one done!", "Yay, %s!",
                                       "Look at %s go!"};
     home_face_react(HOME_REACT_HAPPY);
+    if (!visible) return;
     snprintf(buf, sizeof(buf), YAY[(now / 7) % 6], name);
     home_face_say(buf, 2600, 2);
   } else if (!strcmp(k, "waiting")) {
     home_face_react(HOME_REACT_SURPRISE);
+    if (!visible) return;
     snprintf(buf, sizeof(buf), "Psst! %s needs you.", name);
     home_face_say(buf, 3500, 3);
   } else if (!strcmp(k, "tool_error")) {
     home_face_react(HOME_REACT_WINCE);
+    if (!visible) return;
     static const char *const OUCH[] = {"Ouch!", "Oops...", "That stung.", "Hmm, not quite."};
     home_face_say(OUCH[(now / 7) % 4], 1800, 1);
   } else if (!strcmp(k, "session_start")) {
     home_face_react(HOME_REACT_SURPRISE);
+    if (!visible) return;
     snprintf(buf, sizeof(buf), "Oh hi, %s!", name);
     home_face_say(buf, 2800, 2);
   } else if (!strcmp(k, "session_end")) {
+    if (!visible) return;
     snprintf(buf, sizeof(buf), "Bye, %s.", name);
     home_face_say(buf, 2500, 1);
   } else if (!strcmp(k, "todo_done")) {
     home_face_react(HOME_REACT_HOP);
+    if (!visible) return;
     if (!home_face_bubble_visible()) {
       snprintf(buf, sizeof(buf), "Checked off: %s", ev["text"] | "a todo");
       home_face_say(buf, 2600, 0);
     }
   } else if (!strcmp(k, "subagent_start")) {
+    if (!visible) return;
     if (!home_face_bubble_visible()) {
       snprintf(buf, sizeof(buf), "%s sent out a helper.", name);
       home_face_say(buf, 2400, 0);
     }
   } else if (!strcmp(k, "compact")) {
+    if (!visible) return;
     if (!home_face_bubble_visible()) {
       snprintf(buf, sizeof(buf), "Tidying up %s's memory...", name);
       home_face_say(buf, 2600, 0);
     }
   } else if (!strcmp(k, "tool")) {
-    if (now - last_glance > 5000) { last_glance = now; home_face_react(HOME_REACT_GLANCE); }
+    if (visible && now - last_glance > 20000) { last_glance = now; home_face_react(HOME_REACT_GLANCE); }
   }
 }
 
@@ -394,9 +405,6 @@ static void on_show(bool v) {
   if (v) {
     home_face_resume();
     update_clock();
-    lv_timer_resume(tmr);
-  } else {
-    lv_timer_pause(tmr);
   }
 }
 

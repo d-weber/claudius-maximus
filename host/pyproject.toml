@@ -1,0 +1,47 @@
+# Claudius Maximus host package: daemon, tray app, firmware flasher.
+#   pip install -e host            (development; the repo's host/.venv)
+#   pip install -e "host[dev]"     (+ PyInstaller and PlatformIO, for packaging/ and firmware builds)
+# The frozen desktop app is built from packaging/claudius-maximus.spec (see packaging/README.md).
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claudius-maximus"
+dynamic = ["version"]
+description = "Desk companion for Claude Code: host daemon, tray app and firmware flasher for the Claudius Maximus device"
+# setuptools refuses files outside host/ (the repo README is ../README.md), so the long description is inline.
+readme = {text = "Host side of Claudius Maximus, a desk companion screen for Claude Code. See https://github.com/d-weber/claudius-maximus", content-type = "text/markdown"}
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = [
+  "pyserial>=3.5",
+  "psutil>=5.9",
+  "pillow>=10",
+  "esptool>=5.0,<6",
+  "pystray>=0.19; sys_platform != 'linux'",
+  "pyobjc-framework-Cocoa>=10; sys_platform == 'darwin'",
+  "dbus-fast>=2.20; sys_platform == 'linux'",
+]
+
+[project.optional-dependencies]
+dev = ["pyinstaller>=6.10", "platformio>=6.1"]
+
+[project.scripts]
+claudius-maximus = "companion.__main__:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+# companion, companion.providers, companion.tray, companion.firmware (and any future subpackage).
+# The per-board firmware dirs (companion/firmware/<board>/) have no __init__.py: they are package data.
+where = ["."]
+include = ["companion", "companion.*"]
+namespaces = false
+
+[tool.setuptools.dynamic]
+version = {attr = "companion.version.__version__"}
+
+[tool.setuptools.package-data]
+"companion.firmware" = ["*/*.bin", "*/manifest.json"]
