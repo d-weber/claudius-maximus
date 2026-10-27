@@ -231,3 +231,20 @@ JSON parse of a state ≈ 5.6 ms (≈ 6/s). Flush (copy to PSRAM framebuffer) �
   - Notes for owners: remaining frame_max / loop_max spikes (55–125 ms) are single full-area repaints from screen
     content (alert toasts sliding over a tile, orbit's ~23k px/frame at 18 fps = orbit's own animation), not the
     pipeline. Orbit is still the most expensive per pixel (~1.1 µs/px: many overlapping AA arcs/circles).
+
+- **touch-fix / scan-out** (2026-10-16, first use by hand on the panel): swipes became taps (SensorLib getPoint()
+  ignoring the GT911 buffer-ready bit: own status-bit-aware poll, perf `touch_*`), and the image jumped sideways
+  for a frame now and then. New scan-out probe in hal.cpp (RGB driver vsync + frame-complete callbacks): the DMA
+  finishes a frame a steady 465 us before vsync; the gap's shortfall = stall = sideways displacement (10 us =
+  120 px); the vsync ISR's own lateness against the fixed frame period is measured too. Findings, demo stream 15-
+  20 s: baseline `lcd_n10` 10-15, `vs_n10` 10-19, max ~87 us. Unchanged by: blit pauses (HAL_BLIT_PAUSE_US=30),
+  pclk 10 MHz, 2-row chunks, a build that never writes the framebuffer, synthetic flash/PSRAM streaming from
+  core 0 (zero stalls on a static screen), LVGL on its own TLSF pool. Zero with rendering but no host stream.
+  Cause: Arduino HWCDC's USB-serial ISR (one xQueueSendFromISR per byte, 60-90 us per 64-byte packet with
+  interrupts masked on core 1) delaying the vsync ISR in which the driver restarts the DMA. **KEPT — IDF
+  usb_serial_jtag driver installed from core 0** (`Link` in core/link.cpp): `lcd_n10` = `vs_n10` = 0 on agents,
+  home --cycle, orbit; agents 58 → 60 fps, heap_int 147 → 181 KB. Rejected: bounce buffers (frame desync with
+  the core-0 flush competing for PSRAM: vertical offset + heavy flicker on page changes), GDMA memcpy flush
+  (9.4 ms per 60-line band, 64-byte bursts, vs 0.9 ms for the cached CPU blit). perf `--cycle` changes page every
+  1.2 s. `HAL_BLIT_ROWS` (4) chunks the blit's cache write-back; `HAL_BLIT_PAUSE_US`, `HAL_PCLK_HZ`, `HAL_BOUNCE_PX`
+  remain as experiment knobs.

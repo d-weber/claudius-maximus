@@ -46,6 +46,7 @@ import logging
 import os
 import socket
 import subprocess
+import sys
 import time
 import unicodedata
 from collections import deque
@@ -64,9 +65,16 @@ NET_HIST_N = 40
 PROC_EVERY_S = 4.0
 PROC_HIDDEN_S = 30.0   # process table refresh while the device reports another screen (ps costs ~40 ms CPU)
 TOP_N = 6
-_SKIP_NIC = ("lo", "utun", "awdl", "llw", "bridge", "gif", "stf", "anpi", "ap", "ipsec", "ppp", "vmenet")
+_SKIP_NIC = ("lo", "utun", "awdl", "llw", "bridge", "gif", "stf", "anpi", "ap", "ipsec", "ppp", "vmenet",
+             "docker", "veth", "br-", "virbr", "tun", "tap", "wg", "tailscale", "zt", "vmnet", "lxc", "cni", "flannel")
 
-_libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+IS_MAC = sys.platform == "darwin"
+IS_LINUX = sys.platform.startswith("linux")
+try:
+    _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    _HAS_SYSCTL = hasattr(_libc, "sysctlbyname")   # macOS / BSD only
+except OSError:
+    _libc, _HAS_SYSCTL = None, False
 
 
 def _ascii(s: str) -> str:
@@ -75,6 +83,8 @@ def _ascii(s: str) -> str:
 
 
 def _sysctl_int(name: str) -> int | None:
+    if not _HAS_SYSCTL:
+        return None
     for ctype in (ctypes.c_int64, ctypes.c_int32):
         v = ctype(0)
         sz = ctypes.c_size_t(ctypes.sizeof(v))
@@ -140,9 +150,35 @@ class _Thermal:
         return self.NAMES[v] if 0 <= v < 4 else None
 
 
+class _LinuxThermal:
+    """CPU package temperature (psutil.sensors_temperatures) mapped to the macOS-style thermal levels."""
+    PREFER = ("coretemp", "k10temp", "zenpower", "cpu_thermal", "acpitz")
+
+    @staticmethod
+    def available() -> bool:
+        try:
+            return bool(psutil and psutil.sensors_temperatures())
+        except Exception:
+            return False
+
+    def state(self) -> str | None:
+        temps = psutil.sensors_temperatures()
+        chip = next((c for c in self.PREFER if c in temps), None) or next(iter(temps), None)
+        if not chip or not temps[chip]:
+            return None
+        entries = temps[chip]
+        pkg = next((e for e in entries if "package" in (e.label or "").lower() or "tctl" in (e.label or "").lower()),
+                   entries[0])
+        cur = pkg.current or 0
+        high = pkg.high or pkg.critical or 90
+        frac = cur / max(1.0, high)
+        return "critical" if frac >= 1.0 else "serious" if frac >= 0.9 else "fair" if frac >= 0.75 else "nominal"
+
+
 def _computer_name() -> str:
+    cmd = ["scutil", "--get", "ComputerName"] if IS_MAC else ["hostnamectl", "--pretty"]
     try:
-        out = subprocess.run(["scutil", "--get", "ComputerName"], capture_output=True, text=True, timeout=2).stdout
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=2).stdout
         name = _ascii(out)
         if name:
             return name[:24]
@@ -151,13 +187,64 @@ def _computer_name() -> str:
     return _ascii(socket.gethostname().split(".")[0])[:24]
 
 
+def _cpu_list(path: str) -> set[int]:
+    """Parse a sysfs cpu list like "0-7,16-23" into a set of cpu indices."""
+    out: set[int] = set()
+    try:
+        with open(path) as f:
+            txt = f.read().strip()
+    except OSError:
+        return out
+    for part in txt.split(","):
+        if not part:
+            continue
+        a, _, b = part.partition("-")
+        try:
+            lo, hi = int(a), int(b or a)
+        except ValueError:
+            continue
+        out.update(range(lo, hi + 1))
+    return out
+
+
 def _core_kinds(n: int) -> str:
-    # Apple Silicon: kernel CPU order lists efficiency cores (perflevel1) first, then performance cores.
-    p = _sysctl_int("hw.perflevel0.logicalcpu")
-    e = _sysctl_int("hw.perflevel1.logicalcpu")
-    if p and e and p + e == n:
-        return "E" * e + "P" * p
+    if IS_MAC:
+        # Apple Silicon: kernel CPU order lists efficiency cores (perflevel1) first, then performance cores.
+        p = _sysctl_int("hw.perflevel0.logicalcpu")
+        e = _sysctl_int("hw.perflevel1.logicalcpu")
+        if p and e and p + e == n:
+            return "E" * e + "P" * p
+        return ""
+    # Linux: Intel hybrid CPUs expose P/E cores in sysfs (absent on homogeneous CPUs -> unknown)
+    p = _cpu_list("/sys/devices/cpu_core/cpus")
+    e = _cpu_list("/sys/devices/cpu_atom/cpus")
+    if p and e and len(p) + len(e) == n:
+        return "".join("P" if i in p else "E" for i in range(n))
     return ""
+
+
+def _linux_mem_pressure() -> tuple[int | None, str | None]:
+    """PSI (/proc/pressure/memory): avg10 of "some" stalls as a 0-100 pressure, "full" avg10 for the level."""
+    try:
+        with open("/proc/pressure/memory") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None, None
+    vals = {}
+    for line in lines:
+        kind, _, rest = line.partition(" ")
+        for kv in rest.split():
+            k, _, v = kv.partition("=")
+            if k == "avg10":
+                try:
+                    vals[kind] = float(v)
+                except ValueError:
+                    pass
+    some, full = vals.get("some"), vals.get("full")
+    if some is None:
+        return None, None
+    level = "critical" if (full or 0) >= 10 else "warn" if some >= 10 else "normal"
+    return max(0, min(100, round(some))), level
 
 
 def _proc_name(comm: str) -> str:
@@ -184,14 +271,18 @@ class SystemProvider(Provider):
         self.kinds = _core_kinds(self.ncpu)
         self.node_is_claude: dict[int, bool] = {}
         self.visible: bool | None = False   # device shows the system screen? None = unknown (old firmware hello)
-        try:
-            self.mach = _Mach()
-        except Exception:
-            self.mach = None
-        try:
-            self.thermal = _Thermal()
-        except Exception:
-            self.thermal = None
+        self.mach = self.thermal = None
+        if IS_MAC:
+            try:
+                self.mach = _Mach()
+            except Exception:
+                self.mach = None
+            try:
+                self.thermal = _Thermal()
+            except Exception:
+                self.thermal = None
+        elif IS_LINUX:
+            self.thermal = _LinuxThermal() if _LinuxThermal.available() else None
         self.net_prev = None
         if self.ok:
             psutil.cpu_percent(percpu=True)
@@ -223,9 +314,19 @@ class SystemProvider(Provider):
         else:
             vm = psutil.virtual_memory()
             m.update(used=round((vm.total - vm.available) / mb))
+            cache = getattr(vm, "cached", 0) + getattr(vm, "buffers", 0)
+            if cache:
+                m["cache"] = round(cache / mb)
         sw = psutil.swap_memory()
         m["swap"] = round(sw.used / mb)
         m["swap_total"] = round(sw.total / mb)
+        if IS_LINUX:
+            pressure, level = _linux_mem_pressure()
+            if pressure is None:   # no PSI (old kernel): derive from used/total
+                pct = 100 * m["used"] / max(1, m["total"])
+                pressure, level = round(pct), "critical" if pct >= 95 else "warn" if pct >= 85 else "normal"
+            m["pressure"], m["level"] = pressure, level
+            return m
         lvl = _sysctl_int("kern.memorystatus_level")
         if lvl is not None:
             m["pressure"] = max(0, min(100, 100 - lvl))

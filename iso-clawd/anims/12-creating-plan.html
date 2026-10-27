@@ -190,8 +190,7 @@ Iso.player({
   draw(ctx, i) {
     const st = STEPS[Iso.seq(TL, i)][1];
     Iso.drawDesk(ctx);
-    // back props: mug at the back right, a couple of spare stickies on the desk
-    Iso.prop.mug(ctx, 180, 82, { frame: i });
+    // back props: a couple of spare stickies on the desk (the mug is drawn after Clawd: its spot is in front of him)
     Iso.prop.sticky(ctx, 98, 92, { color: 'blush' });
     Iso.prop.sticky(ctx, 105, 95, { color: 'violet' });
 
@@ -203,6 +202,7 @@ Iso.player({
       eyes: st.eyes, mouth: st.mouth || 'none', blush: !!st.blush,
       arms: st.arms, legs: st.legs || 'stand', squash: st.squash || 0, shake: st.shake || 0,
     });
+    Iso.prop.mug(ctx, SPOT.mug.x, SPOT.mug.y, { frame: i });   // the mug spot is in front of him
 
     // held things
     if (st.hold === 'marker') marker(ctx, a.hand.l, C.ink);

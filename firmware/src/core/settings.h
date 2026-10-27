@@ -16,6 +16,7 @@ struct Settings {
   // --- appended fields ---
   bool alert_errors = true;         // red flash + toast on tool_error
   bool alert_subagents = true;      // tiny violet chips on subagent start/stop
+  bool home_mirror = false;         // flip the isometric home scene horizontally
 };
 
 Settings &settings();

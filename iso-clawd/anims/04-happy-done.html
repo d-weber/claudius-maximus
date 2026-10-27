@@ -120,10 +120,10 @@ Iso.player({
   draw(ctx, i) {
     Iso.drawDesk(ctx);
 
-    // mug at the right, behind Clawd; it hops too
+    // the mug on its spot; it hops too
     const mz = MUG_Z[i];
-    Iso.prop.mug(ctx, SPOT.right.x + 6, SPOT.right.y - 2, { frame: i, steam: mz === 0, z: mz });
-    if (mz >= 5) Iso.fx.ticks(ctx, SPOT.right.x + 6, SPOT.right.y - 22 - mz, 'up', C.muted);
+    Iso.prop.mug(ctx, SPOT.mug.x, SPOT.mug.y, { frame: i, steam: mz === 0, z: mz });
+    if (mz >= 5) Iso.fx.ticks(ctx, SPOT.mug.x, SPOT.mug.y - 20 - mz, 'up', C.muted);
 
     const f = F[i];
     const a = drawClawdX(ctx, {

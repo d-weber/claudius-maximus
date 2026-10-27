@@ -96,6 +96,7 @@ Iso.player({
       eyes: f.eyes, mouth: f.mouth || 'none', arms: f.arms, legs: f.legs || 'stand',
       squash: f.squash || 0, shake: f.shake || 0, blush: !!f.blush,
     });
+    Iso.prop.mug(ctx, SPOT.mug.x, SPOT.mug.y, { frame: i });   // the mug spot is in front of him
 
     // FX
     if (f.spark) {

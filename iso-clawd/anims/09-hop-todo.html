@@ -100,6 +100,7 @@ Iso.player({
     // --- Clawd
     const pose = P[Iso.seq(TL, i)];
     const a = Iso.drawClawd(ctx, Object.assign({ x: SPOT.clawd.x, y: SPOT.clawd.y }, pose));
+    Iso.prop.mug(ctx, SPOT.mug.x, SPOT.mug.y, { frame: i });   // the mug spot is in front of him
 
     // --- landing dust ticks under the feet
     if (i === LAND) {

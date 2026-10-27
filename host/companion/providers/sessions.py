@@ -371,6 +371,8 @@ class SessionsProvider(Provider):
         if now - self.rest_poll_at >= REST_POLL_S or any(t.tail.pending for t in rest):
             self.rest_poll_at = now
             order.extend(rest)
+        else:
+            order.extend(t for t in rest if t.tail.mtime == 0)   # just discovered, never read: don't wait a cadence
         deadline = t0 + POLL_BUDGET_S
         for tr in order:
             while time.monotonic() < deadline:

@@ -1,8 +1,7 @@
-// HOME — Claudius, the spark companion, plus a glanceable summary of all agents.
+// HOME — Clawd at his desk (isometric scene, home_face.cpp) plus a glanceable summary of all agents.
 //   top bar:   clock + date | 5h budget mini bar
-//   centre:    animated character (home_face.cpp) reflecting the aggregate mood, speech bubble
+//   scene:     full-width isometric desk reflecting the aggregate mood, speech bubble (tap Clawd for news)
 //   stats:     working / need you / idle / helpers  (tap -> agents screen)
-//   card:      the most important session right now (waiting first) (tap -> detail)
 #include "screens.h"
 #include "../ui/theme.h"
 #include "../core/model.h"
@@ -11,12 +10,9 @@
 
 static lv_obj_t *lbl_clock, *lbl_date, *budget_box, *budget_bar, *budget_pct;
 static lv_obj_t *stats_row, *stat_num[4], *stat_cap[4];
-static lv_obj_t *card, *card_dot, *card_name, *card_meta, *card_text, *card_chev;
 static lv_timer_t *tmr;
 static bool visible = false, host_prev = false, greeted = false;
-static char focus_sid[16];
-static int n_wait_cached = 0, focus_rot = 0;
-static uint32_t focus_rot_ms = 0, last_glance = 0, last_slow = 0;
+static uint32_t last_glance = 0, last_slow = 0;
 static int tap_n = 0;
 
 static const lv_color_t STAT_COL[4] = {C_BUSY, C_WAITING, C_IDLE, C_SUBAGENT};
@@ -79,24 +75,6 @@ static void activity_line(JsonObjectConst s, char *out, size_t n) {
   else snprintf(out, n, "%s...", tool_verb(tool));
 }
 
-static void fmt_ago(uint32_t since, char *out, size_t n) {
-  uint32_t now = model_now();
-  if (!since || !now || since > now) { out[0] = 0; return; }
-  uint32_t d = now - since;
-  if (d < 60) snprintf(out, n, "%us", (unsigned)d);
-  else if (d < 3600) snprintf(out, n, "%um", (unsigned)(d / 60));
-  else snprintf(out, n, "%uh %um", (unsigned)(d / 3600), (unsigned)(d % 3600 / 60));
-}
-
-// Latest event text of `kind` for session `sid` (empty if none).
-static const char *last_event_text(const char *sid, const char *kind) {
-  for (size_t i = model_event_count(); i-- > 0;) {
-    JsonObjectConst e = model_event(i);
-    if (!strcmp(e["sid"] | "", sid) && !strcmp(e["kind"] | "", kind)) return e["text"] | "";
-  }
-  return "";
-}
-
 static void style_plain(lv_obj_t *o) {
   lv_obj_remove_style_all(o);
   lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
@@ -140,43 +118,21 @@ static void set_hidden(lv_obj_t *o, bool h) {
 }
 
 // ------------------------------------------------------------------ data -> UI
-static void card_set(lv_color_t col, const char *name, const char *meta, const char *txt, const lv_font_t *txt_font,
-                     bool alert, bool tappable) {
-  set_bg_col(card_dot, col);
-  set_text_col(card_name, col);
-  set_txt(card_name, name);
-  set_txt(card_meta, meta);
-  if (lv_obj_get_style_text_font(card_text, 0) != txt_font) {
-    lv_obj_set_style_text_font(card_text, txt_font, 0);
-    lv_obj_set_height(card_text, lv_font_get_line_height(txt_font));
-  }
-  set_txt(card_text, txt);
-  if (lv_obj_get_style_border_width(card, 0) != (alert ? 2 : 1)) {
-    lv_obj_set_style_border_color(card, alert ? C_WAITING : C_BORDER, 0);
-    lv_obj_set_style_border_width(card, alert ? 2 : 1, 0);
-    lv_obj_set_style_bg_color(card, alert ? lv_color_mix(C_WAITING, C_SURFACE, 28) : C_SURFACE, 0);
-  }
-  set_hidden(card_chev, !tappable);
-  if (lv_obj_get_style_width(card_text, 0) != (tappable ? 370 : 412)) lv_obj_set_width(card_text, tappable ? 370 : 412);
-}
-
 static void refresh(JsonObjectConst s) {
   bool host = model_host_connected();
   int busy = 0, wait = 0, idle = 0, help = 0, alive = 0;
-  JsonObjectConst f_wait[8];
-  JsonObjectConst f_busy, f_idle;
+  JsonObjectConst f_busy;
   for (JsonObjectConst x : s["sessions"].as<JsonArrayConst>()) {
     const char *st = x["status"] | "offline";
     if (!strcmp(st, "busy")) { busy++; if (f_busy.isNull()) f_busy = x; }
-    else if (!strcmp(st, "waiting")) { if (wait < 8) f_wait[wait] = x; wait++; }
-    else if (!strcmp(st, "idle")) { idle++; if (f_idle.isNull()) f_idle = x; }
+    else if (!strcmp(st, "waiting")) wait++;
+    else if (!strcmp(st, "idle")) idle++;
     else continue;
     alive++;
     for (JsonObjectConst a : x["subagents"].as<JsonArrayConst>())
       if (!strcmp(a["status"] | "", "busy")) help++;
   }
   if (help == 0) help = s["totals"]["subagents_active"] | 0;
-  n_wait_cached = wait;
 
   // character mood
   char cat = 0;
@@ -214,44 +170,6 @@ static void refresh(JsonObjectConst s) {
     set_hidden(budget_box, true);
   }
 
-  // focus card
-  char meta[24], line[112], name[64];
-  if (!host) {
-    focus_sid[0] = 0;
-    card_set(C_OFFLINE, LV_SYMBOL_USB "  Not connected", "", "Start the companion daemon on your Mac", F_BODY,
-             false, false);
-    return;
-  }
-  if (alive == 0) {
-    focus_sid[0] = 0;
-    card_set(C_DIM, "All quiet", "", "Start claude in a terminal to wake me", F_BODY, false, false);
-    return;
-  }
-  JsonObjectConst f;
-  if (wait) {
-    f = f_wait[focus_rot % (wait > 8 ? 8 : wait)];
-    snprintf(name, sizeof(name), "%s needs you", f["name"] | "?");
-    const char *q = last_event_text(f["id"] | "", "waiting");
-    snprintf(line, sizeof(line), "%s", *q ? q : "Waiting for your input");
-    if (wait > 1) snprintf(meta, sizeof(meta), "1 of %d", wait);
-    else fmt_ago(f["since"] | 0, meta, sizeof(meta));
-    strlcpy(focus_sid, f["id"] | "", sizeof(focus_sid));
-    card_set(C_WAITING, name, meta, line, F_TITLE, true, true);
-    return;
-  }
-  f = !f_busy.isNull() ? f_busy : f_idle;
-  strlcpy(focus_sid, f["id"] | "", sizeof(focus_sid));
-  strlcpy(name, f["name"] | "?", sizeof(name));
-  fmt_ago(f["since"] | 0, meta, sizeof(meta));
-  if (!f_busy.isNull()) {
-    activity_line(f, line, sizeof(line));
-    card_set(C_BUSY, name, meta, line, F_TITLE, false, true);
-  } else {
-    const char *done = last_event_text(f["id"] | "", "stop");
-    if (*done) snprintf(line, sizeof(line), "%s", done);
-    else snprintf(line, sizeof(line), "Ready for your next prompt");
-    card_set(C_IDLE, name, meta, line, F_TITLE, false, true);
-  }
 }
 
 static void update_clock() {
@@ -306,7 +224,7 @@ static void face_tapped() {
     for (JsonObjectConst x : s["sessions"].as<JsonArrayConst>()) {
       if (n >= 5) break;
       const char *st = x["status"] | "";
-      if (!strcmp(st, "waiting")) snprintf(lines[n++], 112, "%s is waiting for you. Tap the card below!", x["name"] | "?");
+      if (!strcmp(st, "waiting")) snprintf(lines[n++], 112, "%s is waiting for you. Swipe to Agents!", x["name"] | "?");
       else if (!strcmp(st, "busy") && nb < 3) {
         char act[96];
         activity_line(x, act, sizeof(act));
@@ -328,9 +246,6 @@ static void face_tapped() {
   tap_n++;
 }
 
-static void card_clicked(lv_event_t *) {
-  if (focus_sid[0]) detail_open(focus_sid);
-}
 static void stats_clicked(lv_event_t *) { ui_nav("agents"); }
 
 static void on_timer(lv_timer_t *) {
@@ -346,16 +261,11 @@ static void on_timer(lv_timer_t *) {
     if (host && !greeted) { greeted = true; greet(); }
     if (!host) greeted = false;
   }
-  if (n_wait_cached > 1 && now - focus_rot_ms > 4000) {
-    focus_rot_ms = now;
-    focus_rot++;
-    refresh(model_state());
-  }
 }
 
 // ------------------------------------------------------------------ ScreenDef
 static void create(lv_obj_t *p) {
-  home_face_create(p, 44, 242);
+  home_face_create(p, 54, 363);   // scene: logical 160 x 121 at 3x
   home_face_on_tap(face_tapped);
 
   // top bar
@@ -395,8 +305,8 @@ static void create(lv_obj_t *p) {
   // stats row
   stats_row = lv_obj_create(p);
   style_plain(stats_row);
-  lv_obj_set_size(stats_row, 448, 66);
-  lv_obj_set_pos(stats_row, 16, 288);
+  lv_obj_set_size(stats_row, 448, 58);
+  lv_obj_set_pos(stats_row, 16, 408);
   lv_obj_set_flex_flow(stats_row, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(stats_row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_add_flag(stats_row, LV_OBJ_FLAG_CLICKABLE);
@@ -404,10 +314,10 @@ static void create(lv_obj_t *p) {
   for (int i = 0; i < 4; i++) {
     lv_obj_t *c = lv_obj_create(stats_row);
     style_plain(c);
-    lv_obj_set_size(c, 104, 66);
+    lv_obj_set_size(c, 104, 58);
     lv_obj_clear_flag(c, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(c, LV_OBJ_FLAG_EVENT_BUBBLE);
-    stat_num[i] = mk_label(c, &lv_font_montserrat_36, C_DIM);
+    stat_num[i] = mk_label(c, &lv_font_montserrat_28, C_DIM);
     lv_label_set_text(stat_num[i], "0");
     lv_obj_align(stat_num[i], LV_ALIGN_TOP_MID, 0, 0);
     stat_cap[i] = mk_label(c, F_SMALL, C_DIM);
@@ -416,52 +326,16 @@ static void create(lv_obj_t *p) {
   }
   lv_obj_add_flag(stats_row, LV_OBJ_FLAG_HIDDEN);
 
-  // focus card
-  card = lv_obj_create(p);
-  style_plain(card);
-  lv_obj_set_size(card, 448, 86);
-  lv_obj_set_pos(card, 16, 362);
-  lv_obj_set_style_radius(card, 18, 0);
-  lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
-  lv_obj_set_style_bg_color(card, C_SURFACE, 0);
-  lv_obj_set_style_border_color(card, C_BORDER, 0);
-  lv_obj_set_style_border_width(card, 1, 0);
-  lv_obj_set_style_bg_color(card, C_SURFACE2, LV_STATE_PRESSED);
-  lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(card, card_clicked, LV_EVENT_CLICKED, nullptr);
-
-  card_dot = lv_obj_create(card);
-  style_plain(card_dot);
-  lv_obj_set_size(card_dot, 10, 10);
-  lv_obj_set_style_radius(card_dot, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_opa(card_dot, LV_OPA_COVER, 0);
-  lv_obj_set_pos(card_dot, 20, 20);
-  card_name = mk_label(card, F_BODY, C_MUTED);
-  set_single_line(card_name, 290);
-  lv_obj_set_pos(card_name, 38, 13);
-  card_meta = mk_label(card, F_SMALL, C_MUTED);
-  lv_obj_align(card_meta, LV_ALIGN_TOP_RIGHT, -44, 16);
-  card_chev = mk_label(card, F_BODY, C_DIM);
-  lv_label_set_text(card_chev, LV_SYMBOL_RIGHT);
-  lv_obj_align(card_chev, LV_ALIGN_RIGHT_MID, -16, 0);
-  card_text = mk_label(card, F_TITLE, C_TEXT);
-  set_single_line(card_text, 370);
-  lv_obj_set_pos(card_text, 20, 44);
-
-  card_set(C_OFFLINE, LV_SYMBOL_USB "  Not connected", "", "Start the companion daemon on your Mac", F_BODY, false,
-           false);
-
   tmr = lv_timer_create(on_timer, 36, nullptr);
   lv_timer_pause(tmr);
 }
 
 static void update(JsonObjectConst s) {
   if (model_host_connected() != host_prev) return;  // timer handles transitions (+ greeting)
-  // Skip when nothing home shows changed: sessions/totals/usage parts, the event log (card texts) and the
-  // second ("12s ago" meta). Unchanged values are filtered again per widget inside refresh().
-  static uint32_t seen[5] = {0, 0, 0, 0, 0};
-  uint32_t k[5] = {model_part_version("sessions"), model_part_version("totals"), model_part_version("usage"),
-                   (uint32_t)model_event_count(), model_now()};
+  // Skip when nothing home shows changed: the sessions/totals/usage parts. Unchanged values are filtered
+  // again per widget inside refresh().
+  static uint32_t seen[3] = {0, 0, 0};
+  uint32_t k[3] = {model_part_version("sessions"), model_part_version("totals"), model_part_version("usage")};
   if (!memcmp(k, seen, sizeof k)) return;
   memcpy(seen, k, sizeof k);
   refresh(s);

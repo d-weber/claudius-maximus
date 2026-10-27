@@ -46,18 +46,20 @@
  *=========================*/
 
 /*1: use custom malloc/free, 0: use the built-in `lv_mem_alloc()` and `lv_mem_free()`*/
-#define LV_MEM_CUSTOM 1
+/* 0: LVGL's own TLSF allocator on a pool in PSRAM. The IDF heap (heap_caps_*) takes a spinlock with interrupts
+ * disabled for every call, and LVGL allocates constantly while rendering: that held interrupts off on the LVGL
+ * core for 30-90 us at a time, which delayed the panel's vsync ISR (the RGB driver restarts the DMA there) and
+ * shifted frames sideways (measured 2026-10-16, perf: vs_n10 / lcd_log). LVGL's allocator takes no locks. */
+#define LV_MEM_CUSTOM 0
 #if LV_MEM_CUSTOM == 0
     /*Size of the memory available for `lv_mem_alloc()` in bytes (>= 2kB)*/
-    #define LV_MEM_SIZE (48U * 1024U)          /*[bytes]*/
+    #define LV_MEM_SIZE (2U * 1024U * 1024U)   /*[bytes] pool in PSRAM; ~150 KB used by all screens (perf: lv_mem_used_kb)*/
 
     /*Set an address for the memory pool instead of allocating it as a normal array. Can be in external SRAM too.*/
     #define LV_MEM_ADR 0     /*0: unused*/
     /*Instead of an address give a memory allocator that will be called to get a memory pool for LVGL. E.g. my_malloc*/
-    #if LV_MEM_ADR == 0
-        #undef LV_MEM_POOL_INCLUDE
-        #undef LV_MEM_POOL_ALLOC
-    #endif
+    #define LV_MEM_POOL_INCLUDE "lv_psram_alloc.h"
+    #define LV_MEM_POOL_ALLOC lv_psram_pool
 
 #else       /*LV_MEM_CUSTOM*/
     #define LV_MEM_CUSTOM_INCLUDE "lv_psram_alloc.h"   /*Header for the dynamic memory function*/

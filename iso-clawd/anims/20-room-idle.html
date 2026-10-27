@@ -1,0 +1,133 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>20 Room idle</title>
+<script src="../lib/iso.js"></script>
+<script src="../lib/room.js"></script>
+<script src="../lib/room/layout.js"></script>
+<script src="../lib/room/light.js"></script>
+<script src="../lib/room/walls.js"></script>
+<script src="../lib/room/window.js"></script>
+<script src="../lib/room/shelf.js"></script>
+<script src="../lib/room/desk.js"></script>
+<script src="../lib/room/lamp.js"></script>
+<script src="../lib/room/monitor.js"></script>
+<script src="../lib/room/clawd.js"></script>
+<script src="../lib/room/chair.js"></script>
+</head>
+<body>
+<script>
+// IDLE in the square office (160x160 logical at 3x, framed like mocks/r_final). 120 frames @ 10 fps = 12 s, six beats so
+// it doesn't feel like a 4 s loop: calm -> watches the window (a bird crosses) -> stretch & yawn -> sips the mug ->
+// hums & taps, glances at the monitor screensaver -> looks up at the shelf, double blink, back to calm.
+// Calm segment: frames 0..19. URL params as in 00-room-sheet (?light, ?t, ?room, ?chrome).
+const { C } = Iso;
+const P = Room.params();
+const RP = Room.P;
+
+// pose fields: eye, g (gazeX), gy, mouth, arms, sq (squash override), blush, tags. Clawd faces down-right, so the
+// window is "right/up" (g +1, gy -1), the monitor and the shelf are "left" (g -1).
+const TL = [
+  // 0..19 calm
+  [{}, 8], [{ eye: 'blink' }, 1], [{}, 11],
+  // 20..39 the window
+  [{ g: 1, gy: -1 }, 4], [{ g: 1, gy: -1, mouth: 'smile' }, 12], [{ g: 1, gy: -1, eye: 'blink' }, 1], [{ g: 1, gy: -1, mouth: 'smile' }, 3],
+  // 40..55 stretch & yawn
+  [{ arms: 'high', sq: -2, eye: 'closed', mouth: 'o' }, 2], [{ arms: 'high', sq: -4, eye: 'closed', mouth: 'o', yawn: true }, 6],
+  [{ arms: 'high', sq: -2, eye: 'closed' }, 2], [{ arms: 'out', sq: 2, eye: 'happy', mouth: 'smile' }, 2], [{ sq: 0, eye: 'happy', mouth: 'smile' }, 4],
+  // 56..75 sip (the mug is front-right: screen-right hand)
+  [{ g: 1, gy: 1, arms: { l: 'out', r: 'forward' }, reach: true }, 2], [{ eye: 'closed', arms: { l: 'out', r: 'forward' }, sip: true }, 8],
+  [{ eye: 'happy', mouth: 'smile', blush: true, arms: { l: 'out', r: 'forward' }, sip: true }, 3], [{ g: 1, gy: 1, arms: { l: 'out', r: 'forward' }, reach: true }, 2],
+  [{ eye: 'happy', mouth: 'smile', blush: true }, 5],
+  // 76..95 hum & tap, then the monitor
+  [{ tap: true, mouth: 'smile' }, 10], [{ g: -1, gy: 0, mouth: 'smile' }, 8], [{ g: -1, gy: 0, eye: 'blink' }, 1], [{ g: -1, gy: 0 }, 1],
+  // 96..119 the shelf, settle, double blink
+  [{ g: -1, gy: -2 }, 6], [{ g: -1, gy: -2, mouth: 'o' }, 4], [{ g: 0, gy: -1 }, 3], [{}, 6], [{ eye: 'blink' }, 1], [{}, 1], [{ eye: 'blink' }, 1], [{}, 2],
+];
+const FRAMES = Iso.seq.len(TL);          // 120
+const BREATH = [[0, 5], [1, 5]];
+
+function heldMug(ctx, x, y, i, steam) {
+  const SH = Iso.SHADE;
+  Iso.sprite(ctx, x - 4, y - 5, ['.tttttt..', 'tcccccct.', 'llllrrrhh', 'llllrrr.h', 'llllrrr.h', 'llllrrrhh', 'llllrrr..', '.lllrr...'],
+    { t: C.paper, c: C.woodRight, l: SH.paper.left, r: SH.paper.right, h: SH.paper.right });
+  if (steam) {
+    const f = i % 4, wig = [0, 1, 0, -1];
+    for (let k = 0; k < 3; k++) {
+      Iso.px(ctx, x - 2 + wig[(f + k) % 4], y - 7 - k * 2, k ? C.dim : C.muted);
+      Iso.px(ctx, x + 1 + wig[(f + k + 2) % 4], y - 8 - k * 2, k ? C.dim : C.muted);
+    }
+  }
+}
+
+// a bird crossing the window while Clawd watches (frames 22..38), 2 wing frames. It flies across the UPPER panes (sky) of the
+// window in the right wall (Room.WIN, face coords u from the corner / v from the wall top: screen x = B.x + u,
+// y = wall top + u/2 + v) and is clipped to that glass, so it passes behind the centre post and never over the frame.
+function bird(ctx, i) {
+  const k = i - 22;
+  if (k < 0 || k > 16) return;
+  // post / rail as lib/room/window.js paints them (post 3 cols at 53 % across, rail at 26 % down the glass, which ends 4 rows above v1)
+  const Wn = Room.WIN, top = Room.B.y - Room.WALL_H, post = Math.round(Wn.u0 + (Wn.u1 - Wn.u0) * 0.53), rail = Wn.v0 + Math.round((Wn.v1 - 4 - Wn.v0) * 0.26);
+  const pt = (u, v) => [Room.B.x + u, top + (u >> 1) + v];
+  ctx.save(); ctx.beginPath();
+  for (const [ua, ub] of [[Wn.u0 + 1, post], [post + 3, Wn.u1]]) {           // the two upper panes (glass between the post and the frame)
+    const q = [pt(ua, Wn.v0), pt(ub, Wn.v0), pt(ub, rail), pt(ua, rail)];
+    ctx.moveTo(...q[0]); q.slice(1).forEach((p) => ctx.lineTo(...p)); ctx.closePath();
+  }
+  ctx.clip();
+  const u = Wn.u0 - 4 + k * 3, v = Wn.v0 + 7 + ((k * 3) % 7 < 4 ? 0 : 1) - (k > 8 ? (k - 8) >> 1 : 0);   // in from the left edge, rising a little
+  const [x, y] = pt(u, v);
+  Iso.sprite(ctx, x - 2, y - 1, k & 1 ? ['#...#', '.#.#.', '..#..'] : ['..#..', '.#.#.', '#...#'], { '#': '#2A2F3A' });
+  ctx.restore();
+}
+
+// monitor screensaver: a bouncing block with a trail
+function screensaver(p, A, f) {
+  const px = (t) => Iso.pingpong(A.w - 2, t), py = (t) => Iso.pingpong(A.h - 2, ((t * 2) % (2 * (A.h - 2))) >> 1);
+  p.rect(A.u + px(f - 2), A.v + py(f - 2), 2, 1, C.blueDark);
+  p.rect(A.u + px(f), A.v + py(f), 2, 2, C.blueLight);
+}
+
+Room.player({
+  name: '20-room-idle',
+  fps: 10,
+  frames: FRAMES,
+  loop: true,
+  notes: 'IDLE, 120 frames @ 10 fps (12 s). Sessions open, nothing busy. Six beats: calm breathing (frames 0..19, the calm ' +
+    'segment); he watches the window and a bird crosses it; a big stretch and yawn; he sips the mug and blushes; ' +
+    'he hums with foot taps, then glances at the monitor screensaver; he looks up at the shelf, settles and double-blinks. ' +
+    'Room and light from <code>?room=</code>, <code>?light=</code> or the clock (<code>?t=HH</code>); <code>?chrome=1</code> previews the LVGL overlays.',
+  draw(ctx, i) {
+    const L = Room.draw(ctx, P.room, P.light);
+    Room.chair(ctx);
+    const p = Iso.seq(TL, i);
+    const sq = Room.SEAT_SQUASH + (p.sq !== undefined ? p.sq : Iso.seq(BREATH, i));   // tall seated body + beat squash
+    const o = {
+      x: RP.clawd.x, y: RP.clawd.y, facing: 'left',
+      eyes: { shape: p.eye || 'open', gazeX: p.g || 0, gazeY: p.gy || 0 },
+      mouth: p.mouth || 'none', blush: !!p.blush, arms: p.arms || 'out',
+      legs: p.tap && i % 3 === 0 ? 'dangleB' : 'dangle', z: Room.SEAT_Z, squash: sq,   // seated on the chair, legs dangling; the hum taps swing a foot
+    };
+    const a = Room.clawd(ctx, o);
+    Room.deskBack(ctx, L, { monitor: screensaver, frame: i });
+
+    // mug: on its spot, in hand, or at the mouth
+    if (p.sip) heldMug(ctx, a.mouth.x + 1, a.mouth.y + 1, i, true);
+    else if (p.reach) heldMug(ctx, RP.mug.x, RP.mug.y - 4, i, false);   // lifted off / set back on its spot (Room.P.mug)
+    Room.deskFront(ctx, i, { mug: !(p.sip || p.reach) });
+
+    // FX
+    bird(ctx, i);
+    if (p.yawn) { const k = i - 42; Iso.fx.ticks(ctx, a.mouth.x + 8, a.mouth.y - 2 - (k >> 1), 'right', C.muted); }
+    if (i === 52 || i === 53) Iso.fx.sparkle(ctx, a.head.x + 16, a.head.y - 2, 1, C.amber);
+    if (p.tap) {
+      const k = Math.floor((i - 76) / 3);
+      Room.unlit(ctx, () => Iso.sprite(ctx, a.head.x + 18 + k, a.head.y - 2 - k * 2, ['..##', '..#.#', '..#', '###', '###'], { '#': k > 2 ? C.muted : C.violetDark }));   // readable on the sky and on the wall; self-lit like the Iso.fx
+    }
+    if (i >= 102 && i <= 105) Iso.fx.dots(ctx, a.head.x - 14, a.head.y - 6, Math.min(3, i - 101), C.muted);
+  },
+});
+</script>
+</body>
+</html>

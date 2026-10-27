@@ -37,7 +37,7 @@ function globeSpeed(i) {
 function globeFrame(i) { let f = 0; for (let j = 0; j <= i; j++) f += globeSpeed(j); return f; }
 
 const BROWSER = { x: 70, y: 74 };
-const GLOBE = { x: 162, y: 88 };
+const GLOBE = { x: 174, y: 80 };
 
 // ---- custom big browser window (upright panel facing down-right, toward Clawd) ----
 // state: {loading:bool, progress:0..30, results:0..3, newest:-1|idx, frame}
@@ -132,6 +132,7 @@ Iso.player({
   draw(ctx, i) {
     const b = beat(i), k = local(i);
     Iso.drawDesk(ctx);
+    Iso.prop.mug(ctx, SPOT.mug.x, SPOT.mug.y, { frame: i });
 
     // ---- browser (behind Clawd) ----
     let jolt = 0, st = { loading: true, progress: 0, results: 0, newest: -1, frame: i };

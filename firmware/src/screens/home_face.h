@@ -34,3 +34,7 @@ bool home_face_bubble_visible();
 void home_face_on_tap(void (*cb)());
 void home_face_tick();            // call at ~25-30 fps while visible
 void home_face_resume();          // call when becoming visible (resets frame clock)
+// Dev/QA: force an animation by name ("" = release), a frame (-1 = play), helpers count and grey tint.
+void home_face_debug(const char *anim, int frame, int helpers, bool grey);
+void home_face_debug_mirror(int m);     // QA: 0/1 overrides Settings.home_mirror, -1 follows it
+void home_face_status(char *buf, size_t n);   // JSON object: current animation, frame, pacing (perf report)

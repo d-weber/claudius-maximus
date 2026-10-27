@@ -1,6 +1,40 @@
 # Isometric Clawd — animation prototypes
 
-Review-only prototypes of the home-screen Clawd redrawn as 2:1 isometric pixel art. This is not firmware. See `BRIEF.md` for the design brief.
+Prototypes of the home-screen Clawd redrawn as 2:1 isometric pixel art, and the source of truth for the firmware's
+home screen: `lib/iso.js` is ported 1:1 to `firmware/src/screens/iso/iso.cpp` and each `anims/NN-name.html` to
+`anim_NN_name.cpp` (`firmware/src/screens/iso/README.md`). `tools/iso_qa.py` diffs a page against the device pixel
+for pixel, so change the page first, then the port. See `BRIEF.md` for the design brief.
+
+## The square office (`lib/room.js`, pages 00-room-sheet, 20-22)
+
+The home screen redesign (Oct 2026): a cut-away isometric cube room filling the whole 480×480 screen (logical **160×160**
+at 3x, like the firmware home face, so Clawd is as big as in the reference mocks). `lib/room.js` loads after `iso.js` and adds `window.Room`:
+
+- `Room.draw(ctx, cfg, light)`: floor + two walls + fixed decor (shelf) in flat base colours, cached. `cfg` is a name from
+  `Room.CFG` (`office` = plaster walls, a 2×2 window in the right wall, the shelf; `brick`; `bare`) or an object.
+- **Lighting is a light map**, applied over the finished frame by `Room.applyLight(ctx, light)` (the player does it):
+  per preset, every pixel gets a multiplier + an additive glow from ambient colour, the window beam cast into the room,
+  a halo on the wall around the panes, corner/floor-junction shadow, the lamp pool and the monitor glow (which also lights
+  Clawd). The room art is never edited, so the room stays user-configurable. `Room.lightFor(hour)` maps the clock to
+  `morning | day | sunset | dusk | night`. The firmware would bake the map to 8-bit tables once per preset.
+- **The chrome is not pixel art**: `Room.chromeOverlay` draws the clock, 5H/7D bars and the translucent counter strip at
+  device resolution with a real font and real alpha on an overlay canvas (the player adds it; `?chrome=0` hides it).
+  `tools/iso_gif.py --chrome` does the same with Pillow.
+- `Room.deskBack(ctx, light, {monitor, frame})` / `Room.deskFront(ctx, frame, {mug, button})`: the desk set around Clawd
+  (desk across the bottom from the left wall, tall lamp far left, big monitor, red button in front, mug front-right).
+  `Room.P.*` holds the screen points: `lamp monitor clawd button mug helperR`.
+- `Room.clawd(ctx, opts)` = `Iso.drawClawd` + `Room.bevel` (the chosen finish: lighter rim on the top face's back edges + a gloss cluster);
+  
+- `Room.player(cfg)`: `Iso.player` at 160×160 shown at 3x. URL params on every room page: `?light=`, `?t=HH` (clock), `?room=`,
+  `?chrome=1`, and `?grid=COLS` (all frames in one canvas, used by `tools/iso_gif.py` to make review GIFs).
+
+Geometry: ONE file, `lib/room/layout.js` (loaded right after `room.js`, before every other `lib/room/*.js`), sets the
+whole layout: `Room.B` (floor back corner = world origin), `Room.A` / `A_R` / `WALL_H`, `Room.WIN` (window glass in the right
+wall's face coords), `Room.SHELF` {z, y0, len}, `Room.DESK_W` / `DESK_Z` / `DESK_H`, `Room.SEAT_Z` and every `Room.P`
+anchor (clawd, helperR, lamp, lampHead, monitor, screen, keyboard, button, mug), each with the mock measurement it comes
+from. The item files only paint; to move something, edit layout.js. Clawd SITS at the desk (desk drawn first, then Clawd with `legs:'sit'` and `squash: Room.SEAT_SQUASH` for the taller
+body of the reference), facing left toward the monitor. The scene is split into one file per item under `lib/room/` (light,
+walls, window, shelf, desk, lamp, monitor, clawd); `tools/room_item.py <item>` crops the mock and the render side by side.
 
 ## Open it
 
@@ -46,6 +80,7 @@ iso-clawd/
 | `frontLeft` | 100, 88 | after |
 | `frontRight` | 148, 92 | after |
 | `front` | 128, 100 | after |
+| `mug` | 150, 90 | after (in front of Clawd if he stands near it) |
 
 - `Iso.deskPoint(u, v)` returns the screen point at fractions `u` (along x, back → right corner) and `v` (along y, back → left corner) of the default desk.
 - **Draw order is yours (painter's algorithm).** Draw the desk first, then props behind Clawd, then Clawd, then props in front of him, then FX. Nothing sorts across separate calls.
@@ -112,7 +147,7 @@ Returned anchors (screen px) for placing held props and FX:
 - `bbox` `{x, y, w, h}`.
 - `facePainter`: paint extra things on the face, such as glasses, a glow or tears.
 
-The full face is 32 cols × 28 rows. Eyes are at u 4..9 and 22..27, v 5..16. Mouth and blush sit on row v 18. Anything you paint via `facePainter` lands on top of the arms.
+The full face is 32 cols × 28 rows. Eyes are 6×9 at u 6..11 and 20..25, v 8..16 (gaze shifts them by 2 cols / ±2 rows). Blush cheeks are 6×2 patches one row under the eyes, at u 2..7 and 24..29 (centred on cx ∓ 11). The mouth is centred on the face starting at row v 19 and moves with the gaze, so the whole face looks one way (clamped 2 rows above the bottom; at `squash` ≥ 4 `laugh` and `o` switch to compact variants). Blush defaults to the red tint's light shade (`#EE8680`; `blushColor` overrides). Everything on the face is sheared along the face slope; glyphs are designed in face texels and start on even columns so the 2:1 steps stay clean (see the comment above `EYES` in iso.js). The mini face is 16×12: eyes 2×4 at u 2..3 and 12..13, v 3..6, mouth on row v 8. Anything you paint via `facePainter` lands on top of the arms.
 
 Size reference (full, facing left, `z` 0): the body is 32 px face width × 28 px tall, 6 units deep. Legs are 6 px. The overall sprite is ~44 px wide (60 with arms) and ~55 px tall. The mini is FW 8, D 3, H 12, legs 3.
 
@@ -138,7 +173,7 @@ Clawd facing left matches a laptop facing `'upRight'` placed in front-left of hi
 | `book` | `color` (SHADE name or obj), `open, z` | closed 6×8×3; open 10×7 |
 | `notepad` | `lines, z` | 5×7×2, amber header |
 | `pencil` | `dir:'x'\|'y', len` | lying flat, centre-anchored. Usable as a held item. |
-| `mug` | `frame, steam, color, z` | 4×4×8. Steam has a 4-frame cycle. |
+| `mug` | `frame, steam, color, z` | 4×4×8. Steam has a 4-frame cycle. **Always at `SPOT.mug`**: the mug is the one prop that stays put from animation to animation (writing-code picks it up to sip, delegating's rookie bonks it there). |
 | `magnifier` | `handle:'dr'\|'dl'` | 2D sprite, `(x, y)` = lens centre. Meant to be held at `hand.*`. |
 | `sticky` | `color, plane:'top'\|'L'\|'R', z, mark` | 3×3 note. On a plane it is upright. |
 | `terminal` | `plane:'L'\|'R', len:14, h:18, z:10, lines:[[indent, len, color]...], reveal, cursor, frame` | floating window. `(x, y)` = point under its bottom-centre. `reveal` = columns typed so far. Returns `{painter, area}`. |
