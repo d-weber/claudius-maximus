@@ -28,6 +28,23 @@ def _fix_std_streams() -> None:
             setattr(sys, name, open(os.devnull, mode))
 
 
+def _restore_child_env() -> None:
+    """PyInstaller's bootloader points LD_LIBRARY_PATH (Linux) / DYLD_LIBRARY_PATH (macOS) at the bundle so the
+    frozen Python finds its own libraries, and every child process inherits that: `systemctl` then loads the
+    bundled libcrypto and dies with "version OPENSSL_3.4.0 not found" (seen on the 0.3.0 AppImage: the first run
+    never retired the systemd service), xdg-open/kdotool/hostnamectl are at the same risk. The bootloader keeps
+    the original value in *_ORIG; our own libraries are already loaded, so put the user's environment back for
+    the children (os.environ only affects processes we start)."""
+    if not getattr(sys, "frozen", False):
+        return
+    for var in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH"):
+        orig = os.environ.pop(var + "_ORIG", None)
+        if orig is not None:
+            os.environ[var] = orig
+        elif var in os.environ:
+            del os.environ[var]
+
+
 def _hook_fast_path() -> None:
     """`hook` / `statusline`: what Claude Code runs on every event. Straight to companion.hookclient, before
     _fix_std_streams (it would replace a missing stdin with os.devnull, hiding Claude Code's pipe from the
@@ -46,6 +63,7 @@ def _hook_fast_path() -> None:
 
 
 def run() -> int:
+    _restore_child_env()
     if len(sys.argv) > 1 and sys.argv[1] in ("hook", "statusline"):
         _hook_fast_path()
     if len(sys.argv) == 1:
