@@ -851,7 +851,8 @@ class StatuslineChainTest(TempHome):
             self.assertEqual(os.path.normcase(os.path.realpath(found)), os.path.normcase(os.path.realpath(bash)))
         with mock.patch.object(hookclient, "IS_WINDOWS", True), mock.patch("shutil.which", return_value=None):
             self.assertEqual(hookclient.chain_argv("x"), ("x", True))   # no Git Bash: cmd via shell=True
-        self.assertEqual(hookclient.chain_argv("x"), ("x", True))       # POSIX: /bin/sh as before
+        with mock.patch.object(hookclient, "IS_WINDOWS", False):
+            self.assertEqual(hookclient.chain_argv("x"), ("x", True))   # POSIX: /bin/sh as before
 
     def test_chain_subprocess_flags_on_windows(self):
         with open(os.path.join(self.state, "statusline-chain.json"), "w", encoding="utf-8") as f:

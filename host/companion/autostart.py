@@ -66,6 +66,18 @@ def mac_unstable_location(path: str | None = None) -> str:
     return ""
 
 
+def _win_profile_dir() -> str | None:
+    """The account's profile folder from the shell (independent of HOME/USERPROFILE overrides)."""
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(1024)
+        if ctypes.windll.shell32.SHGetFolderPathW(None, 40, None, 0, buf) == 0:   # CSIDL_PROFILE
+            return buf.value or None
+    except Exception:
+        pass
+    return None
+
+
 def _uid() -> int:
     return os.getuid() if hasattr(os, "getuid") else 0
 
@@ -74,7 +86,7 @@ def _real_home() -> bool:
     """False when HOME points somewhere else than the account's home (tests): never touch launchctl/systemctl."""
     try:
         if sys.platform == "win32":
-            real = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+            real = _win_profile_dir() or os.environ.get("USERPROFILE") or os.path.expanduser("~")
         else:
             import pwd
             real = pwd.getpwuid(os.getuid()).pw_dir

@@ -284,15 +284,15 @@ static void create(lv_obj_t *p) {
 
   lbl_clock = mk_label(hud, F_TITLE, C_TEXT);
   lv_label_set_text(lbl_clock, "--:--");
-  lv_obj_set_pos(lbl_clock, 14, 5);
+  lv_obj_set_pos(lbl_clock, 12, 3);
   lbl_date = mk_label(hud, F_SMALL, C_MUTED);
-  lv_obj_set_pos(lbl_date, 15, 35);
+  lv_obj_set_pos(lbl_date, 13, 29);
 
   // stats row
   stats_row = lv_obj_create(hud);
   style_plain(stats_row);
-  lv_obj_set_size(stats_row, 250, HUD_H);
-  lv_obj_set_pos(stats_row, 106, 0);
+  lv_obj_set_size(stats_row, 268, 44);   // keep the bottom 12 px clear: the tileview's page dots live there
+  lv_obj_set_pos(stats_row, 100, 0);
   lv_obj_set_flex_flow(stats_row, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(stats_row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_add_flag(stats_row, LV_OBJ_FLAG_CLICKABLE);
@@ -300,32 +300,32 @@ static void create(lv_obj_t *p) {
   for (int i = 0; i < 4; i++) {
     lv_obj_t *c = lv_obj_create(stats_row);
     style_plain(c);
-    lv_obj_set_size(c, 60, HUD_H);
+    lv_obj_set_size(c, 66, 44);
     lv_obj_clear_flag(c, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(c, LV_OBJ_FLAG_EVENT_BUBBLE);
-    stat_num[i] = mk_label(c, &lv_font_montserrat_24, C_DIM);
+    stat_num[i] = mk_label(c, F_BODY, C_DIM);
     lv_label_set_text(stat_num[i], "0");
-    lv_obj_align(stat_num[i], LV_ALIGN_TOP_MID, 0, 3);
+    lv_obj_align(stat_num[i], LV_ALIGN_TOP_MID, 0, 4);
     stat_cap[i] = mk_label(c, F_SMALL, C_DIM);
     lv_label_set_text(stat_cap[i], STAT_CAP[i]);
-    lv_obj_align(stat_cap[i], LV_ALIGN_BOTTOM_MID, 0, -4);
+    lv_obj_align(stat_cap[i], LV_ALIGN_TOP_MID, 0, 25);
   }
   lv_obj_add_flag(stats_row, LV_OBJ_FLAG_HIDDEN);
 
   // budget
   budget_box = lv_obj_create(hud);
   style_plain(budget_box);
-  lv_obj_set_size(budget_box, 110, HUD_H);
-  lv_obj_set_pos(budget_box, 362, 0);
+  lv_obj_set_size(budget_box, 100, 44);
+  lv_obj_set_pos(budget_box, 370, 0);
   lv_obj_clear_flag(budget_box, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_t *l5 = mk_label(budget_box, F_SMALL, C_MUTED);
   lv_label_set_text(l5, "5h");
-  lv_obj_set_pos(l5, 0, 8);
+  lv_obj_set_pos(l5, 0, 6);
   budget_pct = mk_label(budget_box, F_SMALL, C_TEXT);
-  lv_obj_align(budget_pct, LV_ALIGN_TOP_RIGHT, 0, 8);
+  lv_obj_align(budget_pct, LV_ALIGN_TOP_RIGHT, 0, 6);
   budget_bar = lv_bar_create(budget_box);
-  lv_obj_set_size(budget_bar, 110, 8);
-  lv_obj_set_pos(budget_bar, 0, 36);
+  lv_obj_set_size(budget_bar, 100, 8);
+  lv_obj_set_pos(budget_bar, 0, 30);
   lv_bar_set_range(budget_bar, 0, 100);
   lv_obj_set_style_bg_color(budget_bar, lv_color_hex(0x3A3546), 0);
   lv_obj_set_style_bg_opa(budget_bar, LV_OPA_COVER, 0);
