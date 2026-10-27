@@ -75,4 +75,4 @@ jobs:
       - name: Install PlatformIO
         run: python -m pip install "platformio>=6.1"
       - name: Build both boards
-        run: pio run -d firmware -e companion -e companion_v4
+        run: pio run -d firmware -e companion

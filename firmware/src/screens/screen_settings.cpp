@@ -11,7 +11,6 @@
 #include <esp_heap_caps.h>
 #include <stdarg.h>
 #include <Wire.h>
-#include "WS_CH32_IO.h"
 
 #include "../core/version.h"
 
@@ -412,10 +411,6 @@ static void on_event(JsonObjectConst ev) {
   if (ev["scroll"].is<int>()) lv_obj_scroll_to_y(cont, ev["scroll"].as<int>(), LV_ANIM_OFF);
   if (ev["log"] | 0) {
     Settings &s = settings();
-    uint8_t pwm = 0xEE;
-    bool pwm_ok = WS_CH32_IO::readRegister(Wire, WS_CH32_IO::REG_PWM, &pwm);
-    Link.printf("{\"t\":\"log\",\"msg\":\"ch32 pwm reg read ok=%d val=%u (expect %u)\"}\n", pwm_ok, pwm,
-                  (unsigned)((100 - hal_get_brightness()) * 255 / 100));
     Link.printf("{\"t\":\"log\",\"msg\":\"settings bri=%u dim=%u dim_after=%u saver=%u wait=%d done=%d err=%d sub=%d "
                   "night=%d %u-%u hw_bl=%u heap=%u largest=%u psram=%u\"}\n",
                   s.brightness, s.dim_brightness, s.dim_after_s, s.saver_after_s, s.alert_waiting, s.alert_done,

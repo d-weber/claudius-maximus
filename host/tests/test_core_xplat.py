@@ -677,8 +677,8 @@ class CliTest(TempHome):
         from companion.__main__ import build_parser
         a = build_parser().parse_args(["run", "--demo", "--dry-run", "--seconds", "2", "-v"])
         self.assertEqual((a.command, a.demo, a.dry_run, a.seconds, a.verbose), ("run", True, True, 2.0, True))
-        a = build_parser().parse_args(["flash", "--board", "v4", "--erase"])
-        self.assertEqual((a.board, a.erase, a.port), ("v4", True, None))
+        a = build_parser().parse_args(["flash", "--board", "4b", "--erase"])
+        self.assertEqual((a.board, a.erase, a.port), ("4b", True, None))
         a = build_parser().parse_args(["autostart"])
         self.assertEqual(a.action, "status")
 

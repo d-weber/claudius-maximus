@@ -75,8 +75,8 @@ class DetectTest(unittest.TestCase):
 class BoardsAndVersionsTest(unittest.TestCase):
     def test_board_mapping(self):
         self.assertEqual(flasher.BOARD_IDS["ESP32-S3-Touch-LCD-4B"], "4b")
-        self.assertEqual(flasher.board_id("ESP32-S3-Touch-LCD-4 V4"), "v4")
-        self.assertEqual(flasher.board_id("V4"), "v4")
+        self.assertEqual(flasher.board_id("4B"), "4b")
+        self.assertIsNone(flasher.board_id("ESP32-S3-Touch-LCD-4 V4"))
         self.assertIsNone(flasher.board_id("something else"))
 
     def test_version_tuple(self):
@@ -95,24 +95,22 @@ class BoardsAndVersionsTest(unittest.TestCase):
                 self.assertEqual(flasher.needs_update("0.10.0", "4b"), (False, "up to date"))
                 self.assertEqual(flasher.needs_update(None, None), (True, "install 0.3.0"))
                 self.assertEqual(flasher.needs_update("0.2.9", None)[0], True)
-                self.assertFalse(flasher.needs_update("0.1.0", "ESP32-S3-Touch-LCD-4 V4")[0])   # none bundled
                 self.assertFalse(flasher.needs_update("0.1.0", "Mystery board")[0])
 
 
 class ManifestTest(unittest.TestCase):
     def test_load_and_bundled(self):
         with tempfile.TemporaryDirectory() as t:
-            write_bundle(Path(t), "4b")
-            write_bundle(Path(t), "v4", "0.3.1")
+            write_bundle(Path(t), "4b", "0.3.1")
             (Path(t) / "junk").mkdir()
             with mock.patch.object(flasher, "firmware_dirs", return_value=[Path(t)]):
                 b = flasher.bundled()
-            self.assertEqual(sorted(b), ["4b", "v4"])
+            self.assertEqual(sorted(b), ["4b"])
             m = b["4b"]
             self.assertEqual(m.parts[0], (0, "bootloader.bin"))
             self.assertEqual(m.files[-1], (0x10000, Path(t) / "4b" / "firmware.bin"))
             self.assertEqual(m.size, 100 + 200 + 300 + 400)
-            self.assertEqual(b["v4"].fw_version, "0.3.1")
+            self.assertEqual(m.fw_version, "0.3.1")
 
     def test_incomplete_bundle_ignored(self):
         with tempfile.TemporaryDirectory() as t:
@@ -211,7 +209,7 @@ class FlashTest(unittest.TestCase):
 
     def test_flash_errors(self):
         with self.assertRaises(flasher.FlashError):
-            flasher.flash("v4", lock=False)              # nothing bundled for v4
+            flasher.flash("v4", lock=False)              # the old board is not supported any more
         with self.assertRaises(flasher.FlashError):
             flasher.flash("nope", lock=False)
         with mock.patch.object(flasher.list_ports, "comports", return_value=PORTS), \

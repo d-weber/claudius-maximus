@@ -53,7 +53,7 @@ Quick check of any build: `<binary> status` must print the daemon/device report,
 
 - `.github/workflows/ci.yml` (every push and PR): unit tests on Ubuntu, macOS and Windows (Python 3.12), a
   PyInstaller smoke build on each (runs `status` and `hook` with the frozen binary), and both firmware builds
-  (`pio run -e companion -e companion_v4`).
+  (`pio run -e companion`).
 - `.github/workflows/release.yml` (tags `v*`, or run by hand from the Actions tab): builds the firmware bundle,
   the app for Windows x64, macOS arm64, macOS x64 and Linux x64 with that firmware inside, the installers, and
   publishes a GitHub Release with auto-generated notes. Run by hand on a branch, it only uploads the artifacts.
