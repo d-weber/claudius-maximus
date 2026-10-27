@@ -6,10 +6,13 @@
 #include "model.h"
 #include "hal.h"
 #include "board.h"
+#include "version.h"
 #include "perf.h"
 #include "../ui/ui.h"
 
 #include <driver/usb_serial_jtag.h>
+#include <esp_system.h>
+#include <soc/rtc_cntl_reg.h>
 #include <stdarg.h>
 
 LinkSerial Link;
@@ -71,7 +74,6 @@ void LinkSerial::flush(uint32_t timeout_ms) {
   if (usj_ready) usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(timeout_ms));
 }
 
-#define FW_VERSION "0.2.0"
 static char *buf;
 static size_t len = 0;
 static bool overflow = false;            // current line exceeded CAP: drop it up to the next '\n'
@@ -197,6 +199,17 @@ static void dispatch(const char *line, size_t n) {
         if (!img_buf) img_buf = (uint8_t *)heap_caps_malloc(n, MALLOC_CAP_SPIRAM);
         img_need = n; img_got = 0; img_last_ms = millis();
       }
+    }
+    if (doc["dl"]) {
+      // {"t":"cmd","dl":1}: reboot into the ROM serial download mode (the desktop app's flasher uses it when the
+      // DTR/RTS reset sequence does not reach the chip on a platform). The ROM loader then talks over the same
+      // USB-Serial-JTAG port (re-enumerates, same name on Linux); esptool connects with --before no-reset and
+      // must leave with --after watchdog-reset (an RTS pulse is ignored while DTR is asserted). Flush first so
+      // the ack line gets out.
+      Link.print("{\"t\":\"log\",\"msg\":\"rebooting into download mode\"}\n");
+      Link.flush(200);
+      REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+      esp_restart();
     }
     if (perf_req) { link_report(); perf_report(); }
   }

@@ -1,0 +1,170 @@
+# Release: build the firmware images, the desktop app for each OS with those images bundled, and publish a GitHub
+# Release on tags v* (tag must equal v + host/companion/version.py). workflow_dispatch builds everything and keeps
+# the artifacts but publishes nothing unless it runs on a v* tag.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    outputs:
+      app_version: ${{ steps.ver.outputs.app }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Versions
+        id: ver
+        run: |
+          echo "app=$(python packaging/check_version.py)" >> "$GITHUB_OUTPUT"
+          # Fail fast (before ~20 min of builds) when the tag does not match the app version.
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then python packaging/check_version.py "$GITHUB_REF"; fi
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('firmware/platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+      - name: Install
+        run: python -m pip install -e host "platformio>=6.1"
+      - name: Build and bundle the firmware
+        run: python tools/fw_bundle.py --board all --out host/companion/firmware
+      - name: Zip each board
+        run: |
+          mkdir -p fwzip
+          for dir in host/companion/firmware/*/; do
+            board="$(basename "$dir")"
+            fwver="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["fw_version"])' "$dir/manifest.json")"
+            (cd "$dir" && zip -r "$GITHUB_WORKSPACE/fwzip/firmware-$board-$fwver.zip" .)
+          done
+          ls -la fwzip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-bundle
+          # <board>/{bootloader,partitions,boot_app0,firmware}.bin + manifest.json, relative to firmware/
+          path: host/companion/firmware/*/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-firmware-zips
+          path: fwzip/*.zip
+          if-no-files-found: error
+
+  app:
+    needs: firmware
+    name: app (${{ matrix.os }}-${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, os: windows, arch: x64 }
+          - { runner: macos-14, os: macos, arch: arm64 }
+          # Intel macOS: GitHub retired the macos-13 image; macos-15-intel is its x64 replacement.
+          - { runner: macos-15-intel, os: macos, arch: x64 }
+          # Oldest supported Ubuntu = oldest glibc, so the AppImage/tar.gz runs on most distributions.
+          - { runner: ubuntu-22.04, os: linux, arch: x64 }
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.firmware.outputs.app_version }}
+      BASE: ClaudiusMaximus-${{ needs.firmware.outputs.app_version }}-${{ matrix.os }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware-bundle
+          path: host/companion/firmware
+      - name: Check the bundled firmware
+        run: ls -la host/companion/firmware/*/ && ls host/companion/firmware/*/manifest.json
+      - name: Install
+        run: python -m pip install -e host "pyinstaller>=6.10"
+      - name: Icons
+        run: python packaging/make_icons.py
+      - name: PyInstaller build
+        run: pyinstaller --noconfirm packaging/claudius-maximus.spec
+      - name: Smoke test
+        run: |
+          case "$RUNNER_OS" in
+            Windows) BIN=dist/ClaudiusMaximus/ClaudiusMaximus.exe ;;
+            macOS)   BIN="dist/Claudius Maximus.app/Contents/MacOS/claudius-maximus" ;;
+            *)       BIN=dist/claudius-maximus/claudius-maximus ;;
+          esac
+          set +e; "$BIN" status > status.txt 2>&1; rc=$?; set -e
+          cat status.txt
+          [ "$rc" -le 1 ] && grep -q "daemon" status.txt
+          echo '{"hook_event_name":"Stop","session_id":"ci"}' | "$BIN" hook
+
+      - name: Package (Windows installer)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc "/DAppVersion=$env:VERSION" "/DArch=${{ matrix.arch }}" `
+            "/DDistDir=$env:GITHUB_WORKSPACE\dist\ClaudiusMaximus" "/DOutputDir=$env:GITHUB_WORKSPACE\out" `
+            packaging\windows\installer.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem out
+
+      - name: Package (macOS dmg)
+        if: matrix.os == 'macos'
+        run: bash packaging/macos/make_dmg.sh "dist/Claudius Maximus.app" "out/$BASE.dmg"
+
+      - name: Install appimagetool
+        if: matrix.os == 'linux'
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL -o "$RUNNER_TEMP/bin/appimagetool" \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$RUNNER_TEMP/bin/appimagetool"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Package (AppImage + tar.gz)
+        if: matrix.os == 'linux'
+        env:
+          REQUIRE_APPIMAGE: "1"
+          APPIMAGE_EXTRACT_AND_RUN: "1"   # no FUSE on the runners
+        run: bash packaging/linux/make_appimage.sh dist/claudius-maximus out "$VERSION" "${{ matrix.arch }}"
+
+      - name: Check artifact names
+        run: |
+          ls -la out
+          ls out | grep -E "^$BASE\.(exe|dmg|AppImage|tar\.gz)$"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    needs: [firmware, app]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches companion.version.__version__
+        run: python3 packaging/check_version.py "$GITHUB_REF"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+      - run: ls -la release
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

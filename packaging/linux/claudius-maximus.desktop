@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Claudius Maximus
+GenericName=Claude Code desk companion
+Comment=Tray app for the Claudius Maximus desk screen: daemon, status and firmware updates
+Exec=claudius-maximus app
+Icon=claudius-maximus
+Terminal=false
+Categories=Utility;
+Keywords=claude;companion;esp32;
+StartupNotify=false
+X-AppImage-Version=@VERSION@

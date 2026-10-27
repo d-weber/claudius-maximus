@@ -1,20 +1,21 @@
 """USB-serial JSON-lines link to the device (see PROTOCOL.md).
 
 Device sharing: during development several tools use the one physical device. Everything that opens the
-serial port takes an exclusive flock on <root>/.devlock (see tools/dev.py `device_lock`). `DeviceLink` can
+serial port takes an exclusive lock on <root>/.devlock (companion/locking.py: flock / msvcrt) (see tools/dev.py `device_lock`). `DeviceLink` can
 do the same non-blockingly (`lock_path=`): `connect()` fails (and is retried later by the caller) while
 someone else holds the lock, and `close()` always releases it. tools/dev.py constructs DeviceLink() without
 a lock_path because it already holds the lock itself.
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import time
 
 import serial
 from serial.tools import list_ports
+
+from . import locking
 
 ESPRESSIF_VID = 0x303A
 MAX_LINE = 64 * 1024  # drop runaway garbage lines
@@ -34,6 +35,23 @@ def find_port() -> str | None:
     return None
 
 
+def read_lock_holder(path) -> str:
+    """Holder text of a lock file ("daemon pid=N", "<dev> <what> pid=N"). locking.write_holder prefixes a
+    space because on Windows byte 0 is the locked byte and can't be read while held: read from byte 1 there."""
+    if not path:
+        return ""
+    try:
+        with open(path, "rb") as f:
+            try:
+                data = f.read(4096)
+            except OSError:
+                f.seek(1)
+                data = f.read(4096)
+        return data.decode("utf-8", "replace").strip()
+    except OSError:
+        return ""
+
+
 class DeviceLink:
     def __init__(self, port: str | None = None, lock_path: str | os.PathLike | None = None):
         self.port_name = port
@@ -51,30 +69,21 @@ class DeviceLink:
         if self._lock_fd is not None:
             return True
         try:
-            fd = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+            fd = locking.open_lock_file(self.lock_path)
         except OSError as e:
             self.last_error = f"lock open: {e}"
             return True  # can't even create the lock file: don't let that block the product
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        if not locking.try_lock(fd):
             os.close(fd)
             self.last_error = "device lock held by another tool"
             return False
-        try:
-            os.ftruncate(fd, 0)
-            os.write(fd, f"daemon pid={os.getpid()}\n".encode())
-        except OSError:
-            pass
+        locking.write_holder(fd, f"daemon pid={os.getpid()}\n")
         self._lock_fd = fd
         return True
 
     def _release_lock(self):
         if self._lock_fd is not None:
-            try:
-                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
+            locking.unlock(self._lock_fd)
             try:
                 os.close(self._lock_fd)
             except OSError:
@@ -83,11 +92,7 @@ class DeviceLink:
 
     def lock_holder(self) -> str:
         """Best effort: what the lock file says about its current holder."""
-        try:
-            with open(self.lock_path or "", "r") as f:
-                return f.read().strip()
-        except OSError:
-            return ""
+        return read_lock_holder(self.lock_path)
 
     # -- port ----------------------------------------------------------------------------------
     def connect(self) -> bool:

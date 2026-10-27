@@ -37,6 +37,11 @@ default). Typical payload ~1.2 KB.
       "batt": {"pct": 100, "plug": 1, "mins": -1},     # omitted on desktops; mins=-1 unknown/charging
       "thermal": "nominal"            # nominal | fair | serious | critical (NSProcessInfo; omitted if unknown)
     }
+
+Windows: everything comes from psutil (no subprocess is ever spawned): per-core CPU, memory (used = total -
+available, pressure derived from used/total), swap (page file), load = psutil.getloadavg() (an emulation that
+reads 0 for the first ~5 s), top processes via psutil.process_iter, battery, computer name = hostname (else %COMPUTERNAME%).
+No core kinds, no thermal state.
 """
 from __future__ import annotations
 
@@ -70,11 +75,19 @@ _SKIP_NIC = ("lo", "utun", "awdl", "llw", "bridge", "gif", "stf", "anpi", "ap", 
 
 IS_MAC = sys.platform == "darwin"
 IS_LINUX = sys.platform.startswith("linux")
-try:
-    _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
-    _HAS_SYSCTL = hasattr(_libc, "sysctlbyname")   # macOS / BSD only
-except OSError:
-    _libc, _HAS_SYSCTL = None, False
+IS_WINDOWS = sys.platform == "win32"
+_libc, _HAS_SYSCTL = None, False
+if not IS_WINDOWS:   # find_library("c") is None on Windows and CDLL(None) raises TypeError there
+    try:
+        _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        _HAS_SYSCTL = hasattr(_libc, "sysctlbyname")   # macOS / BSD only
+    except OSError:
+        _libc, _HAS_SYSCTL = None, False
+
+# Windows adapter names ("Ethernet", "Wi-Fi", "vEthernet (WSL)", "Loopback Pseudo-Interface 1", ...): skip the
+# virtual ones, matched case-insensitively anywhere in the name.
+_SKIP_NIC_WIN = ("loopback", "vethernet", "isatap", "teredo", "6to4", "pseudo", "bluetooth", "vpn", "tap-",
+                 "wsl", "hyper-v", "virtualbox", "vmware", "tailscale", "wireguard", "zerotier", "npcap")
 
 
 def _ascii(s: str) -> str:
@@ -175,7 +188,18 @@ class _LinuxThermal:
         return "critical" if frac >= 1.0 else "serious" if frac >= 0.9 else "fair" if frac >= 0.75 else "nominal"
 
 
+def _skip_nic(nic: str) -> bool:
+    if IS_WINDOWS:
+        low = nic.lower()
+        return any(k in low for k in _SKIP_NIC_WIN)
+    return nic.startswith(_SKIP_NIC)
+
+
 def _computer_name() -> str:
+    if IS_WINDOWS:
+        # %COMPUTERNAME% is the NetBIOS name (upper case); the hostname keeps the user's casing.
+        name = _ascii(socket.gethostname().split(".")[0]) or _ascii(os.environ.get("COMPUTERNAME", ""))
+        return name[:24]
     cmd = ["scutil", "--get", "ComputerName"] if IS_MAC else ["hostnamectl", "--pretty"]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=2).stdout
@@ -208,6 +232,8 @@ def _cpu_list(path: str) -> set[int]:
 
 
 def _core_kinds(n: int) -> str:
+    if IS_WINDOWS:
+        return ""   # P/E topology needs GetLogicalProcessorInformationEx (EfficiencyClass); not worth it here
     if IS_MAC:
         # Apple Silicon: kernel CPU order lists efficiency cores (perflevel1) first, then performance cores.
         p = _sysctl_int("hw.perflevel0.logicalcpu")
@@ -292,7 +318,7 @@ class SystemProvider(Provider):
     def _net_bytes(self) -> tuple[int, int]:
         rx = tx = 0
         for nic, c in psutil.net_io_counters(pernic=True).items():
-            if nic.startswith(_SKIP_NIC):
+            if _skip_nic(nic):
                 continue
             rx += c.bytes_recv
             tx += c.bytes_sent
@@ -320,8 +346,8 @@ class SystemProvider(Provider):
         sw = psutil.swap_memory()
         m["swap"] = round(sw.used / mb)
         m["swap_total"] = round(sw.total / mb)
-        if IS_LINUX:
-            pressure, level = _linux_mem_pressure()
+        if IS_LINUX or IS_WINDOWS:
+            pressure, level = _linux_mem_pressure() if IS_LINUX else (None, None)
             if pressure is None:   # no PSI (old kernel): derive from used/total
                 pct = 100 * m["used"] / max(1, m["total"])
                 pressure, level = round(pct), "critical" if pct >= 95 else "warn" if pct >= 85 else "normal"
@@ -338,23 +364,46 @@ class SystemProvider(Provider):
         if pid not in self.node_is_claude:
             try:
                 cmd = " ".join(psutil.Process(pid).cmdline())
-                self.node_is_claude[pid] = "claude" in cmd.lower() and ("claude-code" in cmd or "/claude" in cmd)
+                self.node_is_claude[pid] = "claude" in cmd.lower() and ("claude-code" in cmd or "/claude" in cmd
+                                                                        or (IS_WINDOWS and "\\claude" in cmd))
             except Exception:
                 self.node_is_claude[pid] = False
         return self.node_is_claude[pid]
 
-    def _sample_procs(self) -> None:
-        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pcpu=,rss=,comm="],
-                             capture_output=True, text=True, timeout=3).stdout
+    @staticmethod
+    def _proc_rows_windows() -> list[tuple[int, int, float, int, str]]:
+        """(pid, ppid, cpu %, rss KB, name) like `ps`, from psutil. cpu_percent is measured since the previous
+        call on the same (cached) Process object, so the first table after start reads 0 for everyone; it can
+        exceed 100 like ps (one core = 100). Pid 0 ("System Idle Process") would show the idle time: skipped."""
         rows = []
-        for line in out.splitlines():
-            parts = line.split(None, 4)
-            if len(parts) < 5:
+        for p in psutil.process_iter(["pid", "ppid", "name", "memory_info", "cpu_percent"]):
+            i = p.info
+            pid = i.get("pid") or 0
+            if pid <= 0:
                 continue
-            try:
-                rows.append((int(parts[0]), int(parts[1]), float(parts[2]), int(parts[3]), parts[4]))
-            except ValueError:
-                continue
+            name = i.get("name") or "?"
+            if name.lower().endswith(".exe"):
+                name = name[:-4]
+            mi = i.get("memory_info")
+            rows.append((pid, i.get("ppid") or 0, float(i.get("cpu_percent") or 0.0),
+                         (mi.rss // 1024) if mi is not None else 0, name))
+        return rows
+
+    def _sample_procs(self) -> None:
+        if IS_WINDOWS:
+            rows = self._proc_rows_windows()
+        else:
+            out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pcpu=,rss=,comm="],
+                                 capture_output=True, text=True, timeout=3).stdout
+            rows = []
+            for line in out.splitlines():
+                parts = line.split(None, 4)
+                if len(parts) < 5:
+                    continue
+                try:
+                    rows.append((int(parts[0]), int(parts[1]), float(parts[2]), int(parts[3]), parts[4]))
+                except ValueError:
+                    continue
         children: dict[int, list[int]] = {}
         alive = set()
         roots = []
@@ -362,6 +411,8 @@ class SystemProvider(Provider):
             alive.add(pid)
             children.setdefault(ppid, []).append(pid)
             base = comm.rsplit("/", 1)[-1]
+            if IS_WINDOWS:
+                base = base.lower()
             if base == "claude" or (base == "node" and self._is_claude_node(pid)):
                 roots.append(pid)
         self.node_is_claude = {p: v for p, v in self.node_is_claude.items() if p in alive}
@@ -394,10 +445,16 @@ class SystemProvider(Provider):
         self.hist.append(total)
         d: dict = {"host": self.host, "ncpu": len(cores), "cpu": total, "cores": [round(c) for c in cores],
                    "kinds": self.kinds if len(self.kinds) == len(cores) else "", "hist": list(self.hist)}
-        try:
-            d["load"] = [round(x, 1) for x in os.getloadavg()]
-        except OSError:
-            pass
+        if IS_WINDOWS:
+            try:
+                d["load"] = [round(x, 1) for x in psutil.getloadavg()]   # emulated (no load average on Windows)
+            except Exception:
+                pass
+        else:
+            try:
+                d["load"] = [round(x, 1) for x in os.getloadavg()]
+            except OSError:
+                pass
         try:
             d["mem"] = self._memory()
             if d["mem"].get("total"):
@@ -419,7 +476,10 @@ class SystemProvider(Provider):
         except Exception:
             log.debug("net sample failed", exc_info=True)
         try:
-            du = psutil.disk_usage("/System/Volumes/Data" if os.path.isdir("/System/Volumes/Data") else "/")
+            if IS_WINDOWS:
+                du = psutil.disk_usage((os.environ.get("SystemDrive") or "C:") + "\\")
+            else:
+                du = psutil.disk_usage("/System/Volumes/Data" if os.path.isdir("/System/Volumes/Data") else "/")
             gb = 1e9
             used = du.total - du.free
             d["disk"] = {"used": round(used / gb), "total": round(du.total / gb), "pct": round(100 * used / du.total)}

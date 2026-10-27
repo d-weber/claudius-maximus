@@ -2,3 +2,4 @@
 pyserial>=3.5
 psutil>=5.9   # host system metrics (providers/system.py)
 pillow>=10     # dev only: tools/dev.py show (PNG mock-ups on the device)
+esptool>=5.0,<6   # firmware flashing (companion/flasher.py)

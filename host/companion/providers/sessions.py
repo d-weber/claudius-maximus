@@ -9,7 +9,8 @@ Sources
                                      and `claude -p`): pid, sessionId, cwd, name/nameSource, kind, startedAt and
                                      -- for the REPL -- status busy|idle|waiting (+ waitingFor: "permission
                                      prompt" | "input needed" | "dialog open" | ...) with statusUpdatedAt (ms).
-                                     The file is deleted on exit; we also check pid liveness (os.kill(pid, 0)).
+                                     The file is deleted on exit; we also check pid liveness (os.kill(pid, 0);
+                                     psutil / OpenProcess on Windows, where os.kill would terminate the process).
 ~/.claude/projects/<slug>/<sid>.jsonl            transcript (see companion/sessions_transcript.py)
 ~/.claude/projects/<slug>/<sid>/subagents/agent-<id>.jsonl (+ .meta.json)   subagent transcripts
 
@@ -44,10 +45,11 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 
 from .base import Provider
-from ..sessions_text import ascii_text, model_label, tilde
+from ..sessions_text import ascii_text, folder_name, model_label, tilde
 from ..sessions_transcript import Transcript
 
 log = logging.getLogger("companion.sessions")
@@ -63,13 +65,41 @@ REST_POLL_S = 2.0           # poll transcripts of non-live sessions this often
 POLL_BUDGET_S = 0.12        # max parse time per poll (startup catch-up spreads over several polls)
 EVENT_MAX_AGE_S = 90        # don't emit events for records older than this (late catch-up)
 
+IS_WINDOWS = sys.platform == "win32"
+
 
 def claude_dir() -> str:
     return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
 
 
 def cwd_slug(cwd: str) -> str:
+    """Claude Code's project dir name: every non-alphanumeric char becomes "-" (also on Windows, where
+    C:\\Users\\x\\proj -> C--Users-x-proj)."""
     return re.sub(r"[^A-Za-z0-9]", "-", cwd or "")
+
+
+def _win_pid_alive(pid: int) -> bool:
+    """Windows liveness. Never os.kill(pid, 0): there it calls TerminateProcess(pid, 0)."""
+    try:
+        import psutil
+        return psutil.pid_exists(pid)
+    except ImportError:
+        pass
+    try:
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.restype = ctypes.c_void_p
+        h = k32.OpenProcess(0x1000, False, pid)      # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return ctypes.get_last_error() == 5      # ERROR_ACCESS_DENIED: exists, not ours
+        try:
+            code = ctypes.c_ulong(0)
+            ok = k32.GetExitCodeProcess(ctypes.c_void_p(h), ctypes.byref(code))
+            return bool(ok) and code.value == 259    # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(ctypes.c_void_p(h))
+    except Exception:
+        return False
 
 
 def pid_alive(pid) -> bool:
@@ -79,6 +109,8 @@ def pid_alive(pid) -> bool:
         return False
     if pid <= 0:
         return False
+    if IS_WINDOWS:
+        return _win_pid_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -129,7 +161,7 @@ class _Session:
         r = self.reg
         if r.get("name") and r.get("nameSource") in ("user", "peer"):
             return ascii_text(r["name"], 32)
-        return ascii_text(os.path.basename((self.cwd or "").rstrip("/")) or self.short, 32)
+        return ascii_text(folder_name(self.cwd) or self.short, 32)
 
 
 class SessionsProvider(Provider):
@@ -562,7 +594,7 @@ class SessionsProvider(Provider):
             ts = max([int(s.subs[a].tr.activity.get("ts") or 0) for a in s.subs
                       if a[:8] in {x["id"] for x in busy_subs}] + [activity.get("ts") or 0])
             activity = {"tool": "Agent", "detail": f"{n} subagent{'s' if n > 1 else ''} working", "ts": ts}
-        project = ascii_text(os.path.basename((s.cwd or "").rstrip("/")), 32)
+        project = ascii_text(folder_name(s.cwd), 32)
         out = {
             "id": s.short, "name": s.name, "project": project or s.short, "cwd": ascii_text(tilde(s.cwd), 80),
             "title": ascii_text((tr.custom_title or tr.title) if tr else "", 60),

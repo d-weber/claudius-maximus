@@ -53,8 +53,11 @@ from .base import Provider
 log = logging.getLogger("companion.usage")
 
 HOME = os.path.expanduser("~")
-PROJECTS_GLOB = os.path.join(HOME, ".claude", "projects", "**", "*.jsonl")
-STATS_CACHE = os.path.join(HOME, ".claude", "stats-cache.json")
+# Claude Code's config dir: $CLAUDE_CONFIG_DIR, else ~/.claude (%USERPROFILE%\.claude on Windows), like
+# providers/sessions.claude_dir().
+CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
+PROJECTS_GLOB = os.path.join(CLAUDE_DIR, "projects", "**", "*.jsonl")
+STATS_CACHE = os.path.join(CLAUDE_DIR, "stats-cache.json")
 # statusLine tee written by host/hooks/cm_statusline.py (format documented at the top of providers/hooks.py).
 CLAUDIUS_HOME = os.environ.get("CLAUDIUS_HOME") or os.path.join(HOME, ".claudius-maximus")
 RATE_LIMIT_FILES = [
@@ -147,7 +150,7 @@ class UsageProvider(Provider):
     # ------------------------------------------------------------------ ingest
     def _load_stats_cache(self):
         try:
-            with open(STATS_CACHE) as f:
+            with open(STATS_CACHE, encoding="utf-8") as f:
                 d = json.load(f)
             for row in d.get("dailyActivity", []):
                 if row.get("messageCount", 0) > 0 and row.get("date"):
@@ -390,7 +393,7 @@ class UsageProvider(Provider):
                 if st.st_mtime == self._rl_mtime.get(p):
                     d = self._rl_doc[p]
                 else:
-                    with open(p) as f:
+                    with open(p, encoding="utf-8") as f:
                         d = json.load(f)
                     self._rl_mtime[p], self._rl_doc[p] = st.st_mtime, d
             except Exception:
