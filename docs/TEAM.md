@@ -4,7 +4,7 @@
 > "Perf round ownership" table below, which overrides the original table for this round.
 
 
-We are building **Claudius Maximus**: a 4" 480×480 touch screen (Waveshare ESP32-S3-Touch-LCD-4 V4) that
+We are building **Claudius Maximus**: a 4" 480×480 touch screen (Waveshare ESP32-S3-Touch-LCD-4B, or the older ESP32-S3-Touch-LCD-4 V4; see firmware/src/core/board.h) that
 sits on a developer's desk and mirrors what their Claude Code agents are doing — a friendly, glanceable
 companion. Audience: developers running several agents/subagents in parallel. It must be *useful at a
 glance from 1 m away* (who's working, who needs me, what are they doing, how much budget is left) and

@@ -9,14 +9,24 @@
 #include <esp_timer.h>
 #include <rom/ets_sys.h>
 #include <TouchDrvGT911.hpp>
+#include "board.h"
+#if CM_BOARD_V4
 #include "WS_CH32_IO.h"
+#endif
 #include "perf.h"
 
 // ST7701 is configured over a bit-banged 3-wire SPI (Arduino_GFX bus + init table); pixels go through the
 // ESP32-S3 RGB LCD peripheral, driven directly with esp_lcd so the panel config (bounce buffers) is ours.
+#if CM_BOARD_4B
+// 4B: CS/SCL/SDA and the panel reset are pins of the TCA9554 expander, bit-banged over I2C (init only)
+static Arduino_XCA9554SWSPI *expander = new Arduino_XCA9554SWSPI(BOARD_EXIO_LCD_RST, BOARD_EXIO_LCD_CS, BOARD_EXIO_LCD_SCL,
+                                                                 BOARD_EXIO_LCD_SDA, &Wire, BOARD_EXPANDER_ADDR);
+static Arduino_DataBus *bus = expander;
+#else
 static Arduino_DataBus *bus = new Arduino_SWSPI(GFX_NOT_DEFINED, 42, 2, 1, GFX_NOT_DEFINED);
+#endif
 static esp_lcd_panel_handle_t panel;
-static uint16_t *fb;  // 480x480 RGB565 in PSRAM, panel orientation (= UI rotated by 180 degrees)
+static uint16_t *fb;  // 480x480 RGB565 in PSRAM, panel orientation (= the UI rotated by 180 degrees if HAL_ROT180)
 
 // Scan-out: the GDMA reads the PSRAM framebuffer directly (no bounce buffer). Bounce buffers (an ISR memcpy of
 // the whole 460 KB framebuffer into SRAM every refresh) cost 25-40 % of the LVGL core and 77 KB of RAM, and with
@@ -116,7 +126,9 @@ static bool IRAM_ATTR lcd_on_vsync(esp_lcd_panel_handle_t, const esp_lcd_rgb_pan
 }
 
 static void panel_init() {
-  bus->begin();
+#if CM_BOARD_V4
+  bus->begin();            // 4B: begun in hal_init (the expander also resets the touch controller)
+#endif
   bus->sendCommand(0x01);  // software reset
   delay(120);
   bus->batchOperation(st7701_type1_init_operations, sizeof(st7701_type1_init_operations));
@@ -138,12 +150,12 @@ static void panel_init() {
   cfg.bounce_buffer_size_px = HAL_BOUNCE_PX;
   cfg.sram_trans_align = 8;
   cfg.psram_trans_align = 64;
-  cfg.hsync_gpio_num = 38;
-  cfg.vsync_gpio_num = 39;
-  cfg.de_gpio_num = 40;
-  cfg.pclk_gpio_num = 41;
+  cfg.hsync_gpio_num = BOARD_LCD_HSYNC;
+  cfg.vsync_gpio_num = BOARD_LCD_VSYNC;
+  cfg.de_gpio_num = BOARD_LCD_DE;
+  cfg.pclk_gpio_num = BOARD_LCD_PCLK;
   cfg.disp_gpio_num = GPIO_NUM_NC;
-  const int data_pins[16] = {5, 45, 48, 47, 21, 14, 13, 12, 11, 10, 9, 46, 3, 8, 18, 17};  // B0-4 G0-5 R0-4
+  const int data_pins[16] = BOARD_LCD_DATA;  // B0-4 G0-5 R0-4
   for (int i = 0; i < 16; i++) cfg.data_gpio_nums[i] = data_pins[i];
   cfg.flags.fb_in_psram = 1;
   ESP_ERROR_CHECK(esp_lcd_new_rgb_panel(&cfg, &panel));
@@ -158,21 +170,26 @@ static void panel_init() {
   fb = (uint16_t *)p;
 }
 
-// Copy an LVGL band into the framebuffer rotated by 180 degrees, HAL_BLIT_ROWS rows at a time: each chunk is
-// written back from the data cache right away (small bursts) and, if configured, followed by a pause that
-// gives the LCD DMA exclusive PSRAM access to refill its FIFO. With bounce buffers the copy to the panel is
-// the driver's own CPU memcpy through the shared cache, so the write-back is skipped.
-static void fb_blit_rot180(const lv_area_t *a, const uint16_t *src) {
+// Copy an LVGL band into the framebuffer (rotated by 180 degrees if HAL_ROT180), HAL_BLIT_ROWS rows at a time:
+// each chunk is written back from the data cache right away (small bursts) and, if configured, followed by a
+// pause that gives the LCD DMA exclusive PSRAM access to refill its FIFO. With bounce buffers the copy to the
+// panel is the driver's own CPU memcpy through the shared cache, so the write-back is skipped.
+static void fb_blit(const lv_area_t *a, const uint16_t *src) {
   const int w = a->x2 - a->x1 + 1;
   for (int y0 = a->y1; y0 <= a->y2; y0 += HAL_BLIT_ROWS) {
     int y1 = y0 + HAL_BLIT_ROWS - 1;
     if (y1 > a->y2) y1 = a->y2;
     for (int y = y0; y <= y1; y++) {
+#if HAL_ROT180
       uint16_t *d = fb + (479 - y) * 480 + (479 - a->x1);
       for (int i = 0; i < w; i++) *d-- = *src++;
+#else
+      memcpy(fb + y * 480 + a->x1, src, (size_t)w * 2);
+      src += w;
+#endif
     }
 #if HAL_BOUNCE_PX == 0
-    uint8_t *start = (uint8_t *)(fb + (479 - y1) * 480);
+    uint8_t *start = (uint8_t *)(fb + (HAL_ROT180 ? 479 - y1 : y0) * 480);
     size_t len = (size_t)(y1 - y0 + 1) * 480 * 2;
     esp_cache_msync(start, len, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
 #endif
@@ -201,7 +218,7 @@ static void flush_task(void *) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     uint32_t t0 = perf_now_us();
     const lv_area_t *a = &flush_area;
-    fb_blit_rot180(a, (const uint16_t *)&flush_px->full);
+    fb_blit(a, (const uint16_t *)&flush_px->full);
     perf_add(PERF_FLUSH, perf_now_us() - t0);
     lv_disp_flush_ready(&disp_drv);
   }
@@ -217,8 +234,9 @@ static void flush_wait() {
   while (disp_drv.draw_buf && disp_drv.draw_buf->flushing) taskYIELD();
 }
 
-// GT911 has no INT line on V4, so it must be polled. The I2C transactions (~0.3 ms every 10 ms) run in a
-// task on core 0; touch_cb (LVGL, core 1) only reads the latest sample.
+// The GT911 INT line does not reach the ESP32 on either board (V4: not wired; 4B: on the expander), so it
+// is polled. The I2C transactions (~0.3 ms every 10 ms) run in a task on core 0; touch_cb (LVGL, core 1)
+// only reads the latest sample.
 //
 // The controller rescans at its own rate (5 + N ms, N = register 0x8056) and sets bit 7 of the status register
 // 0x814E when a new scan is ready; the host clears the register after reading it. SensorLib's getPoint() ignores
@@ -286,8 +304,13 @@ static void touch_task(void *) {
         int x = b[0] | (b[1] << 8), y = b[2] | (b[3] << 8);
         if (x < 480 && y < 480) {
           finger = true;
+#if HAL_ROT180
           lx = (int16_t)(479 - x);
           ly = (int16_t)(479 - y);
+#else
+          lx = (int16_t)x;
+          ly = (int16_t)y;
+#endif
         }
       }
     }
@@ -315,18 +338,44 @@ static void touch_cb(lv_indev_drv_t *, lv_indev_data_t *data) {
   data->state = (s & 0x80000000u) ? LV_INDEV_STATE_PR : LV_INDEV_STATE_REL;
 }
 
+#if CM_BOARD_V4
 // The CH32 helper keeps its outputs latched across ESP32 resets (it is only reset by power-cycling),
 // so a glitched I2C write during reflashing can leave the buzzer on. Re-assert the safe output state
 // periodically: power/LCD/touch enabled, buzzer off. We never use the buzzer.
 static void ch32_guard_cb(lv_timer_t *) {
   WS_CH32_IO::writeRegister(Wire, WS_CH32_IO::REG_OUTPUT, WS_CH32_IO::OUT_DISPLAY_ON, WS_CH32_IO::I2C_ADDRESS, 1);
 }
+#endif
+
+// Bring up the I2C bus, the IO expander and whatever the board needs before the panel and touch init.
+static void board_init() {
+#if CM_BOARD_V4
+  WS_CH32_IO::begin(Wire, BOARD_I2C_SDA, BOARD_I2C_SCL, 400000, nullptr);   // display power + resets + backlight
+#else
+  Wire.begin(BOARD_I2C_SDA, BOARD_I2C_SCL);
+  Wire.setClock(400000);
+  bus->begin();   // finds the TCA9554, pulses the panel reset (EXIO7), drives CS/SCL/SDA high
+  // GT911 reset with INT held low: the controller boots at 0x5D (Waveshare BSP sequence); INT is then
+  // released as an input (it is not routed to the ESP32: the touch task polls)
+  expander->pinMode(BOARD_EXIO_TP_INT, OUTPUT);
+  expander->digitalWrite(BOARD_EXIO_TP_INT, LOW);
+  expander->pinMode(BOARD_EXIO_TP_RST, OUTPUT);
+  expander->digitalWrite(BOARD_EXIO_TP_RST, LOW);
+  delay(20);
+  expander->digitalWrite(BOARD_EXIO_TP_RST, HIGH);
+  delay(120);
+  expander->pinMode(BOARD_EXIO_TP_INT, INPUT);
+  // backlight: AP3032 boost driver, PWM fed into its feedback node (duty 0 = full brightness, max = off),
+  // same 5 kHz / 10 bit as the Waveshare BSP. Left floating at boot the panel is at full brightness.
+  ledcAttach(BOARD_BL_PIN, 5000, 10);
+#endif
+}
 
 void hal_init() {
-  WS_CH32_IO::begin(Wire, 15, 7, 400000, nullptr);
+  board_init();
   for (uint8_t addr : {0x5D, 0x14}) {
     touch.setPins(-1, -1);
-    if (touch.begin(Wire, addr, 15, 7)) { touch_ok = true; gt_addr = addr; break; }
+    if (touch.begin(Wire, addr, BOARD_I2C_SDA, BOARD_I2C_SCL)) { touch_ok = true; gt_addr = addr; break; }
   }
   if (touch_ok) {
     touch.setMaxTouchPoint(1);
@@ -358,15 +407,21 @@ void hal_init() {
   lv_indev_drv_register(&id);
   last_touch = millis();
   hal_set_brightness(100);
+#if CM_BOARD_V4
   ch32_guard_cb(nullptr);
   lv_timer_create(ch32_guard_cb, 3000, nullptr);
+#endif
 }
 
 void hal_set_brightness(uint8_t pct) {
   if (pct > 100) pct = 100;
   brightness = pct;
+#if CM_BOARD_V4
   // CH32 PWM is inverted: 0 = full brightness, 255 = off
   WS_CH32_IO::setPwm(Wire, (uint8_t)((100 - pct) * 255 / 100));
+#else
+  ledcWrite(BOARD_BL_PIN, (uint32_t)(100 - pct) * 1023 / 100);   // inverted, see board_init
+#endif
 }
 
 uint8_t hal_get_brightness() { return brightness; }
@@ -399,10 +454,11 @@ const char *hal_touch_ic() { return gt_id; }
 uint8_t hal_touch_rate_ms() { return (uint8_t)(5 + gt_rate); }
 
 void hal_send_screenshot() {
-  // Framebuffer is stored in panel orientation; display rotation 2 = 180°, host un-rotates.
+  // Framebuffer is stored in panel orientation; "rot" tells the host how much to un-rotate it.
   flush_wait();
   const size_t len = 480 * 480 * 2;
-  Link.printf("{\"t\":\"shot\",\"w\":480,\"h\":480,\"fmt\":\"rgb565le\",\"rot\":180,\"len\":%u}\n", (unsigned)len);
+  Link.printf("{\"t\":\"shot\",\"w\":480,\"h\":480,\"fmt\":\"rgb565le\",\"rot\":%d,\"len\":%u}\n", HAL_ROT180 ? 180 : 0,
+              (unsigned)len);
   const uint8_t *p = (const uint8_t *)fb;
   for (size_t off = 0; off < len; off += 4096) {
     size_t chunk = min((size_t)4096, len - off);
