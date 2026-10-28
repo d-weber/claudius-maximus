@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -126,6 +127,31 @@ class LockingTest(TempHome):
             finally:
                 locking.unlock(fd)
                 os.close(fd)
+
+    def test_claim_device_creates_missing_dir(self):
+        """#11: in a frozen app the lock lives in the state dir, which only the daemon creates; `flash` before
+        the first daemon start must make it rather than crash with FileNotFoundError."""
+        d = os.path.join(self.tmp, "fresh", ".claudius-maximus")
+        lock = os.path.join(d, ".devlock")
+        with mock.patch.object(daemon_mod, "DEVLOCK", daemon_mod.Path(lock)):
+            with daemon_mod.claim_device("flash", timeout=1):
+                self.assertTrue(os.path.isdir(d))
+                self.assertEqual(read_lock_holder(lock), f"flash pid={os.getpid()}")
+            self.assertFalse(os.path.exists(os.path.join(d, f".devwant.{os.getpid()}")))
+        if POSIX and os.geteuid() != 0:
+            self.assertEqual(os.stat(d).st_mode & 0o777, 0o700)
+
+    def test_claim_device_unwritable_dir_raises_oserror(self):
+        """The lock file cannot be created: OSError, not TimeoutError (so `flash` can say what is wrong)."""
+        blocker = os.path.join(self.tmp, "afile")
+        with open(blocker, "w"):
+            pass
+        lock = os.path.join(blocker, "sub", ".devlock")   # a regular file in the path: makedirs/open both fail
+        with mock.patch.object(daemon_mod, "DEVLOCK", daemon_mod.Path(lock)):
+            with self.assertRaises(OSError) as cm:
+                with daemon_mod.claim_device("flash", timeout=1):
+                    pass
+        self.assertNotIsInstance(cm.exception, TimeoutError)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -952,6 +978,87 @@ class AutostartStatusExitTest(TempHome):
         with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
             self.assertEqual(main(["autostart", "status"]), 0)
         self.assertIn("disabled", out.getvalue())
+
+
+class StatusCommandTest(TempHome):
+    """#12: `status` reports the app's start-at-login entry; the headless service of a script install is only
+    mentioned when it is actually installed, under a label that says what it is."""
+
+    def status(self, *args):
+        from companion.__main__ import main
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            rc = main(["status", *args])
+        return rc, out.getvalue()
+
+    def test_start_at_login_follows_autostart(self):
+        with mock.patch.object(autostart, "is_enabled", return_value=False), \
+                mock.patch("companion.hostos.service_installed", return_value=False), \
+                mock.patch("companion.link.find_port", return_value=None):
+            rc, out = self.status()
+            self.assertEqual(rc, 1)   # no daemon running
+            self.assertIn("start at login : no\n", out)
+            self.assertNotIn("launch agent", out)
+            self.assertNotIn("systemd unit", out)
+            self.assertNotIn("headless", out)
+        with mock.patch.object(autostart, "is_enabled", return_value=True), \
+                mock.patch("companion.hostos.service_installed", return_value=False), \
+                mock.patch("companion.link.find_port", return_value=None):
+            rc, out = self.status()
+            self.assertIn("start at login : yes\n", out)
+            self.assertNotIn("headless", out)
+
+    def test_headless_service_named_when_installed(self):
+        with mock.patch.object(autostart, "is_enabled", return_value=False), \
+                mock.patch("companion.hostos.service_installed", return_value=True), \
+                mock.patch("companion.hostos.service_name", return_value="launch agent"), \
+                mock.patch("companion.hostos.service_path", return_value="/x/com.claudius-maximus.daemon.plist"), \
+                mock.patch("companion.link.find_port", return_value=None):
+            rc, out = self.status()
+            self.assertIn("start at login : no\n", out)
+            self.assertIn("headless daemon: launch agent installed (/x/com.claudius-maximus.daemon.plist)\n", out)
+
+    def test_json_keeps_old_keys_and_adds_autostart(self):
+        with mock.patch.object(autostart, "is_enabled", return_value=True), \
+                mock.patch("companion.hostos.service_installed", return_value=False), \
+                mock.patch("companion.link.find_port", return_value=None):
+            rc, out = self.status("--json")
+        rep = json.loads(out)
+        self.assertTrue(rep["autostart"])
+        self.assertFalse(rep["launch_agent"])
+        self.assertIn("service", rep)
+        self.assertIn("service_path", rep)
+        self.assertFalse(rep["daemon_running"])
+
+
+class FlashCommandTest(TempHome):
+    def test_flash_reports_unwritable_lock_dir_without_traceback(self):
+        """#11: a lock file that cannot be created is a one-line `flash failed:` on stderr and exit 1."""
+        from companion.__main__ import main
+        blocker = os.path.join(self.tmp, "afile")
+        with open(blocker, "w"):
+            pass
+        lock = daemon_mod.Path(blocker) / "sub" / ".devlock"
+        flash = mock.Mock(side_effect=AssertionError("flash() must not run without the lock"))
+        with mock.patch.object(daemon_mod, "DEVLOCK", lock), mock.patch("companion.flasher.flash", flash), \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(main(["flash"]), 1)
+        self.assertIn("flash failed: cannot create the device lock", err.getvalue())
+        self.assertIn(str(lock), err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+
+    def test_flash_runs_when_state_dir_missing(self):
+        """#11 end to end at the CLI: fresh machine, no state dir yet, flash proceeds."""
+        from companion.__main__ import main
+        d = os.path.join(self.tmp, "fresh", ".claudius-maximus")
+        lock = daemon_mod.Path(d) / ".devlock"
+        res = types.SimpleNamespace(board="4b", fw_version="0.4.0", port="/dev/x", seconds=10.0, link_port="/dev/x")
+        with mock.patch.object(daemon_mod, "DEVLOCK", lock), \
+                mock.patch("companion.flasher.flash", return_value=res), \
+                mock.patch("companion.flasher.detect", return_value=[]), \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(main(["flash"]), 0)
+        self.assertTrue(os.path.isdir(d))
+        self.assertIn("flashed 4b fw 0.4.0", err.getvalue())
 
 
 if __name__ == "__main__":

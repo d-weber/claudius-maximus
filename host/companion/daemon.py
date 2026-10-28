@@ -75,7 +75,14 @@ def dev_wants_device(now: float) -> bool:
 def claim_device(what: str, timeout: float = 30.0):
     """For a separate process that needs the serial port (`claudius-maximus flash`): ask any running daemon to
     step aside (.devwant.<pid> marker, honoured within a tick) and hold the device lock meanwhile, exactly like
-    tools/dev.py device_lock. Raises TimeoutError if the lock can't be had within `timeout` seconds."""
+    tools/dev.py device_lock. Raises TimeoutError if the lock can't be had within `timeout` seconds, OSError if
+    the lock file cannot be created (unwritable state dir).
+    In a frozen app DEVLOCK lives in the state dir, which only the daemon creates: `flash` on a fresh machine
+    (or right after tools/uninstall.sh) runs before any daemon ever started, so make it here too (#11)."""
+    try:
+        os.makedirs(DEVLOCK.parent, mode=0o700, exist_ok=True)
+    except OSError:
+        pass   # open_lock_file below reports the real error
     want = DEVLOCK.parent / f".devwant.{os.getpid()}"
     try:
         want.touch()
