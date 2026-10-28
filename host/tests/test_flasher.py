@@ -71,6 +71,25 @@ class DetectTest(unittest.TestCase):
             with self.assertRaises(flasher.FlashError):
                 flasher.pick_port(None)
 
+    def test_pick_port_several_boards_needs_a_choice(self):
+        """Two ESP32-S3 boards: never guess which one to overwrite. The stored choice (companion/ports.py)
+        resolves it, by USB serial first (the name may have changed)."""
+        two = PORTS + [info("/dev/ttyACM2", 0x303A, 0x1001, "CC:DD", "USB JTAG/serial debug unit")]
+        with mock.patch.object(flasher.list_ports, "comports", return_value=two), \
+                mock.patch("companion.ports.selection", return_value=(None, None)):
+            with self.assertRaises(flasher.FlashError) as cm:
+                flasher.pick_port(None)
+            self.assertIn("2 boards are connected", str(cm.exception))
+            self.assertEqual(flasher.pick_port("/dev/ttyACM2").serial, "CC:DD")   # explicit (the daemon's port)
+        with mock.patch.object(flasher.list_ports, "comports", return_value=two), \
+                mock.patch("companion.ports.selection", return_value=("/dev/ttyACM9", "CC:DD")):
+            self.assertEqual(flasher.pick_port(None).device, "/dev/ttyACM2")      # serial wins over the old name
+        with mock.patch.object(flasher.list_ports, "comports", return_value=two), \
+                mock.patch("companion.ports.selection", return_value=("/dev/ttyACM9", None)):
+            with self.assertRaises(flasher.FlashError) as cm:
+                flasher.pick_port(None)
+            self.assertIn("not connected", str(cm.exception))
+
 
 class BoardsAndVersionsTest(unittest.TestCase):
     def test_board_mapping(self):

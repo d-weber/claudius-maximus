@@ -35,6 +35,46 @@ def find_port() -> str | None:
     return None
 
 
+def probe_hello(device: str, timeout: float = 1.5) -> dict | None:
+    """Is a Claudius Maximus firmware on this port? Open it the way connect() does (no DTR/RTS toggling, so the
+    open itself does not reset the chip), ask for a hello and wait up to `timeout` s for the answer. Returns the
+    hello dict, or None (no answer, port busy, not a serial port...). Used when several ESP32-S3 boards are
+    plugged in (companion/ports.py); never while the daemon holds the port."""
+    try:
+        s = serial.Serial()
+        s.port, s.baudrate, s.timeout, s.write_timeout = device, 115200, 0.1, 1
+        s.open()
+    except (serial.SerialException, OSError, ValueError):
+        return None
+    try:
+        s.write(b'{"t":"cmd","hello":1}\n')
+        buf, deadline = b"", time.time() + timeout
+        while time.time() < deadline:
+            chunk = s.read(4096)
+            if chunk:
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    line = line.strip()
+                    if line.startswith(b"{"):
+                        try:
+                            m = json.loads(line)
+                        except ValueError:
+                            continue
+                        if isinstance(m, dict) and m.get("t") == "hello":
+                            return m
+                if len(buf) > MAX_LINE:
+                    buf = b""
+        return None
+    except (serial.SerialException, OSError, ValueError):
+        return None
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
 def read_lock_holder(path) -> str:
     """Holder text of a lock file ("daemon pid=N", "<dev> <what> pid=N"). locking.write_holder prefixes a
     space because on Windows byte 0 is the locked byte and can't be read while held: read from byte 1 there."""

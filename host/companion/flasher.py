@@ -462,16 +462,29 @@ def device_lock(timeout: float = 30.0):
 
 
 def pick_port(port: str | None) -> Port:
+    """The port to flash: `port` if given (the daemon's connected port, or --port), else the user's choice
+    (companion/ports.py), else the only ESP32-S3 native port, else the only CH343 UART port. With several
+    candidates and no choice it refuses rather than guess which board to overwrite."""
+    from . import ports as portsel
     ports = detect()
     if port:
         for p in ports:
             if p.device == port:
                 return p
         return Port(device=port, kind="other", vid=0, pid=0, serial=None, description="")
+    device, serial = portsel.selection()
+    if device:
+        p = portsel.resolve(ports, device, serial)
+        if p is None:
+            raise FlashError(f"The chosen port {device} is not connected (Device port in the menu to change it).")
+        return p
     for kind in ("native", "uart"):
-        for p in ports:
-            if p.kind == kind:
-                return p
+        cands = [p for p in ports if p.kind == kind]
+        if len(cands) == 1:
+            return cands[0]
+        if len(cands) > 1:
+            raise FlashError(f"{len(cands)} boards are connected ({', '.join(p.device for p in cands)}): choose "
+                             "the port first (Device port in the menu, or `claudius-maximus port <name>`).")
     raise FlashError("No board found: plug it in with a USB data cable (on the 4B use the USB-OTG port).")
 
 

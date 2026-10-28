@@ -68,6 +68,9 @@ class FakeApp:
     def quit(self):
         self.calls.append(("quit",))
 
+    def set_port(self, device):
+        self.calls.append(("port", device))
+
 
 def pixels(img):
     b = img.convert("RGBA").tobytes()
@@ -139,7 +142,7 @@ class MenuModelTest(unittest.TestCase):
     def test_no_device(self):
         items = appmod.build_menu(STATES["no_device"], FakeApp())
         self.assertEqual(labels(items), ["Device: not found", "Sessions: none", "---", "Flash firmware…",
-                                         "Start at login", "Install Claude Code hooks", "Open log",
+                                         "Device port", "Start at login", "Install Claude Code hooks", "Open log",
                                          "Open claude.ai usage", "---", "Quit"])
         self.assertFalse(items[0].enabled)
         fl = find(items, "Flash firmware…")
@@ -199,6 +202,37 @@ class MenuModelTest(unittest.TestCase):
         self.assertFalse(find(appmod.build_menu(st, FakeApp()), "Update firmware").enabled)
         self.assertIn("Another daemon owns the device (status only)", appmod.tooltip_lines(st))
 
+    def test_port_submenu(self):
+        """Device port ▸ Automatic + one entry per port; the check mark follows the stored choice; clicking an
+        entry calls app.set_port(device); the daemon's knowledge (ours / firmware) shows in the labels."""
+        app = FakeApp()
+        other = {"device": "/dev/ttyACM2", "kind": "native", "vid": 0x303A, "pid": 0x1001, "serial": "CC"}
+        ours = dict(NATIVE, fw="0.4.1", ours=True, connected=True)
+        st = dict(STATES["up_to_date"], ports=[ours, other, UART], port_choice="auto")
+        sub = find(appmod.build_menu(st, app), "Device port")
+        self.assertEqual(sub.label, "Device port")
+        self.assertEqual(labels(sub.children), ["Automatic (the board that answers)", "---",
+                                                 "/dev/ttyACM0 · ESP32-S3 · Claudius Maximus fw 0.4.1",
+                                                 "/dev/ttyACM2 · ESP32-S3", "/dev/ttyACM1 · USB-TO-UART (CH343)"])
+        self.assertEqual([c.checked for c in sub.children if not c.separator], [True, False, False, False])
+        sub.children[3].action()
+        self.assertEqual(app.calls[-1], ("port", "/dev/ttyACM2"))
+        sub.children[0].action()
+        self.assertEqual(app.calls[-1], ("port", None))
+        st["port_choice"] = "/dev/ttyACM2"
+        sub = find(appmod.build_menu(st, app), "Device port")
+        self.assertEqual(sub.label, "Device port: /dev/ttyACM2")
+        self.assertEqual([c.checked for c in sub.children if not c.separator], [False, False, True, False])
+
+    def test_device_line_several_boards(self):
+        two = [NATIVE, dict(NATIVE, device="/dev/ttyACM2")]
+        st = {"connected": False, "ports": two, "port_choice": "auto", "sessions": [],
+              "device_error": "2 ESP32-S3 boards on USB and none runs the Claudius Maximus firmware: choose the port"}
+        self.assertEqual(appmod.device_line(st), "Device: 2 boards on USB, choose the port below")
+        st = {"connected": False, "ports": [NATIVE], "port_choice": "/dev/ttyACM7", "sessions": [],
+              "device_error": "the chosen port /dev/ttyACM7 is not connected (Device port in the menu to change it)"}
+        self.assertEqual(appmod.device_line(st), "Device: chosen port /dev/ttyACM7 not connected")
+
     def test_board_id(self):
         self.assertEqual(appmod.board_id("ESP32-S3-Touch-LCD-4B"), "4b")
         self.assertIsNone(appmod.board_id("ESP32-S3-Touch-LCD-4 V4"))
@@ -234,6 +268,7 @@ class AppTest(unittest.TestCase):
 
         def flash(board, progress=None, log=None, **kw):
             events.append(("flash", board))
+            events.append(("port", kw.get("port")))
             progress(50, "writing")
             progress(100, "done")
             return types.SimpleNamespace(fw_version="0.3.0")
@@ -242,11 +277,13 @@ class AppTest(unittest.TestCase):
         app = appmod.App(types.SimpleNamespace(no_setup=True), backend=backend, start_daemon=False)
         app.daemon = FakeDaemon()
         app.status = lambda: {"connected": True, "ports": []}
+        app._last_status = {"connected": True, "port": "/dev/ttyACM0", "ports": []}
         import companion
         with mock.patch.dict(sys.modules, {"companion.flasher": fake_flasher}), \
                 mock.patch.object(companion, "flasher", fake_flasher, create=True):
             app._flash_worker("4b")
-        self.assertEqual(events, [("pause", "flashing"), ("flash", "4b"), ("resume",)])
+        # the daemon's own port is flashed (several boards may be plugged in)
+        self.assertEqual(events, [("pause", "flashing"), ("flash", "4b"), ("port", "/dev/ttyACM0"), ("resume",)])
         self.assertFalse(app.flash_state["active"])
         titles = [c.args[0] for c in backend.notify.call_args_list]
         self.assertEqual(titles, ["Flashing firmware", "Firmware installed"])
@@ -272,6 +309,23 @@ class AppTest(unittest.TestCase):
         self.assertEqual(events, ["resume"])
         self.assertEqual(backend.notify.call_args_list[-1].args, ("Flashing failed", "No board on USB"))
         self.assertEqual(appmod.tray_state({"flash": app.flash_state}), "error")
+
+    def test_set_port_via_daemon_or_settings(self):
+        backend = mock.Mock()
+        app = appmod.App(types.SimpleNamespace(no_setup=True), backend=backend, start_daemon=False)
+        d = mock.Mock()
+        d.set_port.return_value = "device port: /dev/ttyACM2"
+        app.daemon = d
+        app.refresh_soon = lambda: None
+        self.assertTrue(app.set_port("/dev/ttyACM2"))
+        d.set_port.assert_called_once_with("/dev/ttyACM2")
+        self.assertEqual(backend.notify.call_args.args, ("Device port", "Device port: /dev/ttyACM2"))
+        app.daemon = None    # observer: write the choice for the daemon that owns the device
+        from companion import ports as portsel
+        self.assertTrue(app.set_port("COM7"))
+        self.assertEqual(portsel.selection(), ("COM7", None))
+        self.assertTrue(app.set_port(None))
+        self.assertEqual(portsel.selection(), (None, None))
 
     def test_flash_without_daemon_refuses(self):
         backend = mock.Mock()

@@ -221,9 +221,14 @@ error). Plan usage is not drawn in the icon (the device and the `Plan:` menu lin
 
 Menu (top to bottom), refreshed every 2 s: device line (`Device: connected on COM5 · fw 0.3.0 (4B)` / `Device:
 not found` / `Device: found on X, not answering` / `Device: busy on X (holder)` / `Board on USB-TO-UART port: move
-the cable to USB-OTG` / `Flashing firmware: N%`); `Sessions: 2 (1 working, 1 needs you)`; `Plan: 5h 42% · 7d 12%`
+the cable to USB-OTG` / `Device: 2 boards on USB, choose the port below` / `Device: chosen port X not connected` /
+`Flashing firmware: N%`); `Sessions: 2 (1 working, 1 needs you)`; `Plan: 5h 42% · 7d 12%`
 (when known); separator; one of `Update firmware (0.2.0 → 0.3.0)…` (connected, older fw), `Install firmware…`
-(a board port seen but no hello for 10 s) or `Flash firmware…`; `Start at login` (check);
+(a board port seen but no hello for 10 s) or `Flash firmware…`; `Device port` ▸ `Automatic (the board that
+answers)` / one check entry per USB serial port (`/dev/ttyACM0 · ESP32-S3 · Claudius Maximus fw 0.4.1`), see
+`companion/ports.py`: with several ESP32-S3 boards the daemon probes each for a hello and takes the one that
+answers, a board that answers nothing has to be chosen here (settings.json `port` / `port_serial`), and the
+flasher uses the daemon's port; `Start at login` (check);
 `Claude Code hooks: installed` / `Install Claude Code hooks`; `Open log`; `Open claude.ai usage`; separator;
 `Quit`.
 

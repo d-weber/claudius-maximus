@@ -73,7 +73,12 @@ Then:
 
 The tray icon's badge tells you the state at a glance: grey means no device, green connected, orange flashing
 or update available, red error. The menu shows the device, your sessions and plan limits, and lets you reflash,
-toggle start at login or open the log.
+pick the USB port, toggle start at login or open the log.
+
+**Several ESP32 boards on your USB?** The app asks each ESP32-S3 port for a hello and uses the one that answers
+as Claudius Maximus. A board that does not answer (blank, or running another project) is never picked by itself:
+choose it under **Device port** in the menu (or `claudius-maximus port <name>`), then **Install firmware…**.
+Flashing always uses the port the app talks to.
 
 ### Linux: serial port access
 
