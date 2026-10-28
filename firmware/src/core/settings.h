@@ -1,7 +1,7 @@
 #pragma once
 // Persistent user settings (NVS). Owned by alerts-settings; read by anyone.
 // Existing fields are stable (ambient.cpp etc. read them). New fields are appended at the end.
-#include <Arduino.h>
+#include "sys.h"
 
 struct Settings {
   uint8_t brightness = 80;          // active backlight %

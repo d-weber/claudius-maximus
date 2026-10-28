@@ -1,0 +1,5 @@
+# Managed components (IDF component registry); downloaded into firmware/managed_components at build time.
+dependencies:
+  idf: ">=5.5"
+  lvgl/lvgl: "8.4.0"
+  bblanchon/arduinojson: "^7.2.0"

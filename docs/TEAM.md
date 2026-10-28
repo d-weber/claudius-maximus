@@ -15,7 +15,7 @@ Only the **LCD + touch** are used. Do not use buzzer, SD, RTC, IMU, RS485, CAN.
 ## Layout
 ```
 PROTOCOL.md                  host⇄device JSON-lines protocol (source of truth for data)
-firmware/                    PlatformIO, Arduino-ESP32 3.x, LVGL 8.4.0, ArduinoJson 7
+firmware/                    PlatformIO + ESP-IDF 5.5 (no Arduino core), LVGL 8.4.0, ArduinoJson 7
   src/core/                  hal (display/touch/backlight/screenshot), model (state store), link (serial), settings
   src/ui/ui.{h,cpp}          tileview screen manager + page dots   (lead-owned)
   src/ui/theme.h             palette, fonts, status_color()          (lead-owned)
@@ -81,7 +81,7 @@ framebuffer — **Read the PNG to look at your work.** Iterate visually; check l
 - Don't commit to git; the lead does that.
 
 ## Firmware guidelines
-- LVGL 8.4 API (lv_obj_*, lv_label_*, lv_anim_*, lv_timer_*). Everything runs on the Arduino loop thread — no extra tasks touching LVGL.
+- LVGL 8.4 API (lv_obj_*, lv_label_*, lv_anim_*, lv_timer_*). Everything runs on the main loop task (core 1, main.cpp) — no extra tasks touching LVGL.
 - Screen API: see src/ui/ui.h `ScreenDef`. `update(state)` is called on new state only while your tile is visible (and on show).
   `on_event(ev)` always. Pause your lv_timers / animations in `on_show(false)` to save CPU.
 - Read JSON defensively: `s["name"] | "?"`, `s["tokens"]["out"] | 0`. Don't hold JsonObjectConst across calls (the doc is replaced).

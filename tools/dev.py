@@ -94,10 +94,11 @@ LASTFLASH = FW / ".pio" / "lastflash.json"   # what is (probably) on the device:
 
 
 def fw_tree_hash(fw: Path = FW) -> str:
-    """Short hash of the firmware sources (src/, include/, lib/, platformio.ini) = identity of a build."""
+    """Short hash of the firmware sources (src/, include/, lib/, platformio.ini, CMakeLists.txt, sdkconfig.defaults,
+    partitions.csv) = identity of a build."""
     import hashlib
     h = hashlib.sha1()
-    files = [fw / "platformio.ini"]
+    files = [fw / n for n in ("platformio.ini", "CMakeLists.txt", "sdkconfig.defaults", "partitions.csv")]
     for d in ("src", "include", "lib"):
         files += sorted(p for p in (fw / d).rglob("*") if p.is_file())
     for p in files:
@@ -121,7 +122,20 @@ def pio_bin() -> str:
     return str(cand) if cand.exists() else "pio"
 
 
+def drop_stale_sdkconfig(fw: Path = FW) -> None:
+    """ESP-IDF applies sdkconfig.defaults only when generating sdkconfig.<env>; an existing one keeps its old values
+    even after the defaults change. Remove any that is older than the defaults so the next build regenerates it."""
+    defaults = fw / "sdkconfig.defaults"
+    if not defaults.is_file():
+        return
+    for p in fw.glob("sdkconfig.*"):
+        if p.name != "sdkconfig.defaults" and p.is_file() and p.stat().st_mtime < defaults.stat().st_mtime:
+            print(f"[dev] {p.name} is older than sdkconfig.defaults: regenerating it", file=sys.stderr)
+            p.unlink()
+
+
 def pio(*args: str) -> int:
+    drop_stale_sdkconfig()
     env = dict(os.environ, PLATFORMIO_BUILD_DIR=str(build_dir()))
     return subprocess.call([pio_bin(), "run", *args], cwd=FW, env=env)
 

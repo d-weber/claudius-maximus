@@ -6,7 +6,7 @@ Everything that is not needed to install and use the device. The user-facing gui
 
 ```
 PROTOCOL.md                 host ⇄ device protocol (source of truth for data)
-firmware/                   PlatformIO, Arduino-ESP32 3.x, LVGL 8.4, ArduinoJson 7
+firmware/                   PlatformIO + ESP-IDF 5.5 (no Arduino core), LVGL 8.4, ArduinoJson 7 (both from the IDF component registry)
   src/core/                 display/touch HAL, state model, serial link, settings, perf probe
   src/ui/                   tile manager, theme (palette, fonts, status colours)
   src/screens/              one file per screen; room/ = Clawd's Studio (the home screen's pixel-art room and its

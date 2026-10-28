@@ -313,5 +313,5 @@ library. The schematic is at
 ## Knobs that exist in the firmware
 
 `firmware/src/core/hal.cpp`: `HAL_PCLK_HZ` (12 MHz), `HAL_BLIT_ROWS` (4), `HAL_BLIT_PAUSE_US` (0),
-`HAL_BOUNCE_PX` (0, bounce buffers off), porches (hsync 8/50/10, vsync 8/20/10), `psram_trans_align` 64.
+`HAL_BOUNCE_PX` (0, bounce buffers off), porches (hsync 8/50/10, vsync 8/20/10), `dma_burst_size` 64 (IDF 5.5 name of `psram_trans_align`).
 `LAYOUT_PAD=<n>` (probe only) inserts n NOPs in flash to shift the code layout.

@@ -1,4 +1,8 @@
 .pio/
+# ESP-IDF (PlatformIO writes the resolved sdkconfig.<env> and the registry components into firmware/)
+firmware/sdkconfig.*
+!firmware/sdkconfig.defaults
+firmware/managed_components/
 .venv/
 __pycache__/
 backup/*.bin
