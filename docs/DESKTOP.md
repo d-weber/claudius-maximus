@@ -216,8 +216,8 @@ extension). Common interface in `tray/base.py`: `run()`, `set_icon(image)`, `set
 `notify(title, body)`, `stop()`. Menu actions run off the tray thread.
 
 Icon (`tray/icon.py`): `render_app_icon(size)` (Clawd, also the application icon: `packaging/make_icons.py`)
-and `render_tray_icon(size, status)` with a badge (grey none, green ok, orange update / flashing, red error) and
-the 5-hour / 7-day bars when `rate_limits` is known.
+and `render_tray_icon(size, status)`: Clawd with a badge (grey none, green ok, orange update / flashing, red
+error). Plan usage is not drawn in the icon (the device and the `Plan:` menu line show it).
 
 Menu (top to bottom), refreshed every 2 s: device line (`Device: connected on COM5 · fw 0.3.0 (4B)` / `Device:
 not found` / `Device: found on X, not answering` / `Device: busy on X (holder)` / `Board on USB-TO-UART port: move
