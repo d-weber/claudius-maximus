@@ -248,6 +248,9 @@ JSON parse of a state ≈ 5.6 ms (≈ 6/s). Flush (copy to PSRAM framebuffer) �
   (9.4 ms per 60-line band, 64-byte bursts, vs 0.9 ms for the cached CPU blit). perf `--cycle` changes page every
   1.2 s. `HAL_BLIT_ROWS` (4) chunks the blit's cache write-back; `HAL_BLIT_PAUSE_US`, `HAL_PCLK_HZ`, `HAL_BOUNCE_PX`
   remain as experiment knobs.
+- **scan-out-on-demand** (2026-10-28, later) — the stalls below came back with unrelated code changes; root cause and fix in
+  [SCANOUT.md](SCANOUT.md): the driver's restart-in-vsync of a running DMA channel; scan-out now runs in
+  refresh-on-demand mode (0 lost frames under loads that lost 45-140/min before).
 - **scan-out-stalls** (2026-10-28) — `999` underruns with Clawd's Studio: 10-40/min visible, 2-4/min hidden,
   0 on the pre-room firmware. Device bisect with synthetic bursts: register-only compute harmless, a `.bss` word
   hammered per tick up to 30/2 min, layout dependent. **KEPT — the `Director` state is allocated in PSRAM**
