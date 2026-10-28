@@ -1,0 +1,232 @@
+# Scan-out underruns (the "flicker" on the home screen)
+
+Status as of 2026-10-28 evening: mechanism understood, triggers identified, no root fix yet; a measured-good build is on the device. This page is
+the record of what the glitch is, how to measure it, what was tried, and what is known. Short version in
+[PERF.md](PERF.md) under "scan-out-stalls"; the measurement notes of the first round are in [STATUS.md](STATUS.md).
+
+## What you see
+
+A one-frame horizontal jump of the whole image, a few times a minute, on the home screen (Clawd's Studio), most
+noticeable when the room is quiet (the companion app not running: grey Clawd asleep). The image snaps back on the
+next frame. It is not a rendering glitch: screenshots of the framebuffer taken while it happens are fine.
+
+## What it is
+
+The ESP32-S3 scans the 480×480 RGB panel straight out of a framebuffer in PSRAM: the GDMA reads PSRAM through the
+cache and feeds the LCD_CAM peripheral at the pixel clock (12 MHz here, 42.3 frames/s). If the DMA falls behind
+the pixel clock for long enough, the panel clocks out stale data and the frame shifts. The driver option
+`CONFIG_LCD_RGB_RESTART_IN_VSYNC` (on in the Arduino core) restarts the DMA at the next vsync, so the shift lasts
+one frame instead of staying permanent. That restart is the jump.
+
+The probe in `firmware/src/core/hal.cpp` registers the panel's `on_frame_buf_complete` (DMA end of frame) and
+`on_vsync` callbacks and times them. Normally the frame completes a steady 465 µs before vsync. A vsync that
+arrives with no frame-complete since the previous one is logged as a `999` and counted in `lcd_underruns`.
+Frames that completed late but still before vsync are counted by how late (`lcd_n10`, `lcd_n30`, `lcd_n100`).
+
+## How to measure
+
+Hold the USB port open and send nothing (the demo stream of `tools/dev.py perf` is about three times real load
+and masks the quiet-room case), then read the counters after a fixed window:
+
+```python
+# scratch script: hold the port, reset the window, wait, read
+link = dev.open_link()
+link.send({"t": "cmd", "nav": "home"})
+time.sleep(8)
+dev.read_perf(link)          # resets the per-window counters
+time.sleep(120)
+p = dev.read_perf(link)      # p["lcd_underruns"], p["lcd_n10"], p["vs_n10"], p["lcd_log"]
+```
+
+A 120 s window is the unit of comparison. The two `999` entries right after boot are panel initialisation and are
+ignored. The companion app and the headless service must not be running (they hold the port and stream state).
+
+`lcd_log` entries read `stall/late/p<phase>/+ms`: stall in µs or `999`, vsync lateness in µs, the main loop's
+phase at that moment (0 idle, 1 link, 2 tick, 3 lvgl, 4 flush, 5 parse, +10 when another task was running on
+that core), and the time since the previous entry.
+
+## Timeline
+
+| Date | Build | Underruns per 120 s, quiet room | Notes |
+|---|---|---|---|
+| 2026-10-28 early | Clawd's Studio first firmware | 10-40 per minute visible | Director state in internal `.bss` |
+| 2026-10-28 | e340ec9, Director allocated in PSRAM | 0 in every window | Taken as the fix |
+| 2026-10-28 | 49725f3 (main), screensaver drift removed | 3, 3, 6, 7 | Only firmware change since e340ec9 is 14 lines in `fx/ambient.cpp` |
+
+## What was established on 2026-10-28 (second round)
+
+1. **e340ec9 measures 0 and main measures 3 to 7**, each repeated, same device, same protocol, quiet room, host
+   silent. The only firmware difference is the screensaver edit, which cannot touch the LCD path.
+2. **RAM layout is not the variable.** main's build has 8 bytes less `.bss` than e340ec9, so the internal heap
+   starts 8 bytes lower. Padding main's `.bss` back to the identical `.bss` size and `_heap_start` still gave
+   7 underruns. The remaining difference between the two binaries is the code and rodata layout in flash.
+3. **Both LCD callbacks run on core 1** (the LVGL core), and vsync lateness stays under 10 µs even on the `999`
+   frames. So interrupt latency does not explain a missing frame-complete: the DMA genuinely did not finish the
+   frame in time, by at least 465 µs.
+4. **Partial stalls never occur.** Across every window, `lcd_n10` and `lcd_n30` stayed 0: the DMA is either on
+   time or more than 465 µs late. Bandwidth contention would give a spread of small stalls. An all-or-nothing
+   pattern points at something that blocks the external memory path outright for a while, such as the cache being
+   unavailable, rather than at steady competition for PSRAM.
+5. **The glitch happens while the main loop is idle.** Almost every `999` is logged in phase 0 or 10, that is
+   during `delay()` at the bottom of the loop with the idle task (or the touch poll on core 0) running. The room
+   renders at about 2.7 frames/s in the quiet state and the LVGL and flush phases are not where it happens.
+6. **Layout sensitivity is real and fine-grained.** Adding the probe code itself (a few hundred bytes) moved main
+   from 3-7 back to 0. A sweep over code padding is recorded below.
+7. **Disabling the GT911 touch poll gave 0**, but that build also changed the layout, so on its own it proves
+   nothing. The runtime toggle (`dev_touch` event, same binary) settles it; see the sweep.
+
+## Layout sweep
+
+Same source, `-DLAYOUT_PAD=<n>` NOPs inserted in flash, 60 s windows, quiet room, host silent. "Poll" is the GT911
+touch poll over I2C on core 0, switched at runtime inside the same binary (`dev_touch` event).
+
+| Padding | Poll on | Poll off | Poll on again | Where the `999`s fell |
+|---|---|---|---|---|
+| 0 | 0 | | | |
+| 32 | 7 | 0 | 8 | idle, 3-30 s apart |
+| 64 | 1 | 0 | 0 | |
+| 128 | 1 | 5 | 2 | LVGL phase, clusters 2.5 s apart |
+| 256 | 0 | | | |
+| 512 | 3 | 0 | 2 | idle |
+| 1024 | 1 | 1 | 0 | |
+| 2048 | 1 | 7 | | LVGL phase, clusters 2.5 s apart |
+| 4096 | 0 | | | |
+
+Two separate triggers, both layout dependent at 32-byte granularity: the touch poll (pads 32 and 512: off takes
+it to 0 and on brings it back) and the room's own animation step (pads 128 and 2048: clusters at the ~2.5 s cadence
+with the poll off).
+
+## Toggle matrix (one binary, pad 128 of a later build, 12 per 60 s baseline)
+
+Runtime switches (`dev_probe` event) in the same binary:
+
+| Switch | Underruns / 60 s |
+|---|---|
+| baseline, poll on | 9 (8 when repeated at the end) |
+| poll off | 1 |
+| poll off + core 0 reads 64 KB of flash rodata continuously | 0 |
+| poll off + core 0 copies 64 KB PSRAM to PSRAM continuously | 45 |
+| poll on, blit without the cache writeback | 9 |
+| poll on, no framebuffer writes at all | 12 |
+| poll on, main loop spins instead of `delay()` | 24 |
+
+What this rules out: flash traffic (the SPI0-sharing explanation from the Espressif README does not apply here),
+the framebuffer blit and its writeback (removing them changes nothing). What it rules in: CPU traffic to PSRAM.
+A PSRAM memcpy multiplies the rate by five, and the Director state, the one hot thing the room keeps in PSRAM,
+is still written every animation tick when the blit is off.
+
+What the driver does (ESP-IDF `esp_lcd_panel_rgb.c`, with `CONFIG_LCD_RGB_RESTART_IN_VSYNC`): at every vsync it
+resets and restarts the GDMA from the start of the framebuffer, unconditionally, with the comment "reset the GDMA
+channel every VBlank to stop permanent desyncs from happening" and "this fix can lead to single-frame desyncs
+itself". So a `999` is a frame whose DMA, started at vsync, did not reach the end of the buffer within the frame
+period, and the next vsync throws it away. Since the probe never sees a frame that is late by 10 to 465 µs, the
+DMA does not merely fall behind: a FIFO dry-out stops it for the rest of the frame.
+
+## Synthetic load matrices (layout independent)
+
+A probe task on core 0 generates one kind of traffic at a time while the room idles; `dev_probe` switches it at
+runtime. Build of 2026-10-28 evening, pad 0, which happened to stall on its own (8, 13 and 5 per 60 s at baseline
+with the poll on).
+
+| Load | Underruns / 60 s |
+|---|---|
+| none, poll on (three windows) | 8, 13, 5 |
+| none, poll off | 1 |
+| flash rodata read stream (64 KB, every 32 B) | 0 |
+| PSRAM read stream (64 KB, every 32 B) | 0 |
+| PSRAM write stream (64 KB, one byte per 32 B line) | 140 |
+| PSRAM write stream + `esp_cache_msync` of the 64 KB after each pass | 625 |
+| PSRAM write stream + `Cache_WriteBack_All()` every 1 ms | 6 |
+| PSRAM memcpy 64 KB to 64 KB | 45, 46 |
+| `Cache_WriteBack_All()` every 1 ms alone, poll on | 5 |
+
+Reading PSRAM or flash through the cache, however hard, does not starve the LCD DMA. Writing PSRAM does: each
+written line is a dirty line, and dirty lines are written back when the shared 32 KB data cache evicts them,
+interleaved with the fills that caused the eviction. That mix of reads and writes on the PSRAM is what the DMA
+loses against. A large address-range writeback (`esp_cache_msync` over 64 KB) is the worst case: the cache walks
+2048 line addresses with the DMA waiting. A whole-cache writeback every millisecond keeps the synthetic stream's
+dirty set small enough to be harmless, but does not change the natural rate, so the natural stalls are not simply
+"too many dirty lines".
+
+Size of the hot PSRAM state in the quiet room: the Director is 2,312 bytes (72 lines), written every animation
+tick. The framebuffer blit writes PSRAM too, chunked and written back at once per 4 rows; removing it entirely did
+not change the natural rate, so it is not the natural trigger either.
+
+## Director placement and animation (one binary, pad 64, 60 s windows, poll on)
+
+The Director can be moved between PSRAM and internal RAM at runtime (`dev_probe {"dirloc":1}`, state copied
+across), and the animation can be paused (`mode` bit 512: `home_face_tick` returns at once, nothing is rendered).
+
+| State | Underruns / 60 s |
+|---|---|
+| Director in PSRAM | 7, then 13, then 7 |
+| Director in internal RAM | 7, then 7 |
+| Director in PSRAM, animation paused (static screen) | 6 |
+
+Neither the Director's placement nor the animation matters for the natural stalls. On a completely static screen
+the touch poll alone keeps producing them, at a rate set by the code layout. The 28 Oct "Director in PSRAM" fix
+therefore worked by moving code, not by moving data; the same is true of this page's probe builds, whose rates
+jumped between 0 and 13 per minute as code was added.
+
+## Pixel clock, I2C speed (one binary, pad 224, 60 s windows, poll on)
+
+`esp_lcd_rgb_panel_set_pclk` at runtime; the probe's reference gap re-calibrates after each change, so only the
+underrun count is comparable.
+
+| Setting | Underruns / 60 s |
+|---|---|
+| 12 MHz (baseline, twice) | 6, 3 |
+| 10 MHz | 3 |
+| 11 MHz | 1 |
+| 13 MHz | 6 |
+| 14 MHz | 7 |
+| 12 MHz, I2C bus at 100 kHz instead of 400 kHz | 6 |
+
+A lower pixel clock helps a little, in line with a FIFO-margin model, but does not remove the stalls, and 10 MHz
+already means 35 frames/s. A slower I2C bus changes nothing, so it is the poll's transactions, not their duration.
+
+## Where this stands (2026-10-28, end of day)
+
+- Mechanism: the LCD DMA's PSRAM reads lose a few microseconds to other PSRAM traffic, the FIFO runs dry, the
+  driver drops the frame at the next vsync. PSRAM writes (dirty-line writebacks) are the heavy hitter; a 100 Hz
+  GT911 poll over I2C on core 0 is enough to trigger it on a static screen, at a rate that depends on the code
+  layout at 32-byte granularity. Reads, flash, the blit, the Director's placement and the animation are not it.
+- No root fix yet. The candidates, in order of expected payoff: bounce buffers (the DMA reads internal SRAM, so
+  PSRAM hiccups only delay a CPU copy that has milliseconds of slack; rejected once for CPU cost and page-change
+  flicker, worth a second look with a larger buffer), XIP from PSRAM (`CONFIG_SPIRAM_FETCH_INSTRUCTIONS` and
+  `CONFIG_SPIRAM_RODATA`, needs an ESP-IDF build with the Arduino component instead of the precompiled core), a
+  slower idle poll (fewer triggers, not zero), and understanding why an I2C transaction perturbs PSRAM at all.
+- Device as left: the probe build at `LAYOUT_PAD=0` (main plus the probe hooks, all switches at their defaults),
+  which measured 0 underruns in 120 s. Any rebuild is a new draw; measure before trusting it.
+- Probe tooling to keep or strip: `dev_touch` / `dev_probe` events, `LAYOUT_PAD`, the `fc_core` / `vs_core` /
+  `late_eof` / `poll` / `pmode` perf fields, the matrix script in the session scratchpad.
+
+## What Espressif says
+
+From the ESP-IDF RGB LCD documentation and the `rgb_panel` example README ([docs](https://docs.espressif.com/projects/esp-idf/en/release-v5.5/esp32s3/api-reference/peripherals/lcd/rgb_lcd.html),
+[README](https://github.com/espressif/esp-idf/blob/v5.2/examples/peripherals/lcd/rgb_panel/README.md)):
+
+- "The PSRAM shares the same SPI bus with the main flash", so flash traffic (instruction cache misses, rodata,
+  a filesystem, OTA, NVS) competes with the LCD DMA.
+- For screen drift: lower the pixel clock; adjust `pclk_active_neg` and the porches; "Enable
+  `CONFIG_SPIRAM_FETCH_INSTRUCTIONS` and `CONFIG_SPIRAM_RODATA`, which can save some bandwidth of SPI0 from being
+  consumed by ICache".
+- Bounce buffers raise the achievable pixel clock but add CPU load, and the LCD "CANNOT function if the external
+  memory cache is disabled", for example during flash writes.
+- `CONFIG_LCD_RGB_RESTART_IN_VSYNC` restarts the DMA at vsync after a desync; "you may still notice flickering".
+
+The Arduino core this firmware builds on (pioarduino 55.03.31, precompiled IDF) does **not** set
+`CONFIG_SPIRAM_FETCH_INSTRUCTIONS` or `CONFIG_SPIRAM_RODATA`: all code and constants are fetched from flash
+through the same cache the LCD DMA depends on. It does set `CONFIG_LCD_RGB_RESTART_IN_VSYNC`, flash 80 MHz QIO,
+PSRAM 80 MHz octal, 16 KB instruction cache (8-way, 32-byte lines), 32 KB data cache.
+
+The Waveshare wiki for the board ([ESP32-S3-Touch-LCD-4B](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-4B))
+gives no panel timing, no sdkconfig advice and lists no known display issues; its demos use the Arduino GFX
+library. The schematic is at
+[ESP32-S3-Touch-LCD-4B.pdf](https://files.waveshare.com/wiki/ESP32-S3-Touch-LCD-4B/ESP32-S3-Touch-LCD-4B.pdf).
+
+## Knobs that exist in the firmware
+
+`firmware/src/core/hal.cpp`: `HAL_PCLK_HZ` (12 MHz), `HAL_BLIT_ROWS` (4), `HAL_BLIT_PAUSE_US` (0),
+`HAL_BOUNCE_PX` (0, bounce buffers off), porches (hsync 8/50/10, vsync 8/20/10), `psram_trans_align` 64.
+`LAYOUT_PAD=<n>` (probe only) inserts n NOPs in flash to shift the code layout.

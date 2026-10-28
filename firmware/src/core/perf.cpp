@@ -94,8 +94,10 @@ void perf_report() {
   hal_lcd_vsync_stats(&lmax, &v10, &v30);
   char al[160];
   hal_lcd_anomaly_log(al, sizeof(al));
+  char px[120];
+  hal_lcd_probe_extra(px, sizeof(px));
   o += ",\"vs_late_max\":" + String(lmax) + ",\"vs_n10\":" + String(v10) + ",\"vs_n30\":" + String(v30)
-       + ",\"lcd_log\":" + String(al);
+       + ",\"lcd_log\":" + String(al) + String(px);
   frames0 = frames; under0 = under;
   char hs[160];
   home_face_status(hs, sizeof hs);

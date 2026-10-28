@@ -4,6 +4,8 @@
 #include "../screens/screens.h"
 #include "../fx/alerts.h"
 #include "../fx/ambient.h"
+#include "../core/hal.h"
+#include "../screens/home_face.h"
 
 static const ScreenDef *SCREENS[] = {
     &screen_home, &screen_agents, &screen_feed, &screen_usage, &screen_system, &screen_orbit, &screen_settings,
@@ -109,6 +111,14 @@ void ui_dispatch_event(JsonObjectConst ev) {
   detail_on_event(ev);
   alerts_on_event(ev);
   ambient_on_event(ev);
+  if (!strcmp(ev["kind"] | "", "dev_touch")) hal_touch_set_poll((ev["poll"] | 1) != 0);   // PROBE
+  if (!strcmp(ev["kind"] | "", "dev_probe")) {                                              // PROBE
+    hal_probe_set(ev["mode"] | 0);
+    if (!ev["dirloc"].isNull()) home_face_probe_dirloc((ev["dirloc"] | 0) != 0);
+    if (!ev["poll_ms"].isNull()) hal_probe_poll_ms(ev["poll_ms"] | 10);
+    if (!ev["i2c_hz"].isNull()) hal_probe_i2c_hz(ev["i2c_hz"] | 400000);
+    if (!ev["pclk"].isNull()) hal_probe_pclk(ev["pclk"] | 0);
+  }
 }
 
 void ui_demo_alert(const char *kind) { alerts_demo(kind); }

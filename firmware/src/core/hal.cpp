@@ -67,10 +67,57 @@ static volatile int32_t lcd_log[8][4];     // last anomalies: (stall, vsync late
 static volatile int64_t lcd_log_t;
 
 static volatile uint32_t lcd_log_n;
+// PROBE: which core each LCD callback runs on, and when a frame-complete that was missing at vsync finally
+// arrives (us after that vsync; a value well under the frame period = the previous frame's EOF came late)
+static volatile int lcd_fc_core = -1, lcd_vs_core = -1;
+static volatile bool touch_poll_on = true;   // PROBE: dev_touch event toggles the I2C poll without changing the binary
+void hal_touch_set_poll(bool on) { touch_poll_on = on; }
+// PROBE: synthetic load toggles (dev_probe event): 1 flash stream, 2 psram stream, 4 skip msync, 8 skip blit, 16 busy idle
+static volatile int probe_mode = 0;
+static volatile int probe_poll_ms = 10;   // PROBE: touch poll period
+void hal_probe_set(int m) { probe_mode = m; }
+void hal_probe_poll_ms(int ms) { probe_poll_ms = ms < 1 ? 1 : ms; }
+void hal_probe_i2c_hz(int hz) { Wire.setClock(hz); }
+int hal_probe_mode() { return probe_mode; }
+static const uint8_t probe_table[65536] = {1, 2, 3};   // 64 KB of rodata in flash to stream through the cache
+static volatile uint32_t probe_sink;
+extern "C" void Cache_WriteBack_All(void);
+// 32: write back the whole data cache every 1 ms (keeps dirty PSRAM lines near zero)
+// 64: PSRAM read-only stream   128: PSRAM write-only stream
+static void probe_task(void *) {
+  uint8_t *pa = (uint8_t *)heap_caps_malloc(65536, MALLOC_CAP_SPIRAM), *pb = (uint8_t *)heap_caps_malloc(65536, MALLOC_CAP_SPIRAM);
+  for (;;) {
+    int m = probe_mode;
+    if (m & 1) { uint32_t acc = 0; for (size_t i = 0; i < sizeof probe_table; i += 32) acc += probe_table[i]; probe_sink = acc; }
+    if (m & 2) { memcpy(pa, pb, 65536); probe_sink = pa[12345]; }
+    if (m & 64) { uint32_t acc = 0; for (size_t i = 0; i < 65536; i += 32) acc += pb[i]; probe_sink = acc; }
+    if (m & 128) { for (size_t i = 0; i < 65536; i += 32) pa[i] = (uint8_t)i; probe_sink = pa[32]; }
+    // 256: write stream followed by an immediate, bounded writeback of what was written (the blit's discipline)
+    if (m & 256) { for (size_t i = 0; i < 65536; i += 32) pa[i] = (uint8_t)i; esp_cache_msync(pa, 65536, ESP_CACHE_MSYNC_FLAG_DIR_C2M); probe_sink = pa[32]; }
+    if (m & 32) Cache_WriteBack_All();
+    if (!(m & (3 | 64 | 128 | 256))) vTaskDelay(pdMS_TO_TICKS((m & 32) ? 1 : 10));
+    else vTaskDelay(1);
+  }
+}
+#ifndef LAYOUT_PAD
+#define LAYOUT_PAD 0   // -DLAYOUT_PAD=<n> inserts n NOPs in flash to shift the code layout (docs/SCANOUT.md)
+#endif
+#define LP_STR2(x) #x
+#define LP_STR(x) LP_STR2(x)
+extern "C" void __attribute__((noinline)) layout_pad_fn() { asm volatile(".rept " LP_STR(LAYOUT_PAD) "\n nop\n .endr"); }
+static volatile bool lcd_fc_late_pending;
+static volatile int32_t lcd_late_eof[8];
+static volatile uint32_t lcd_late_eof_n;
 
 static bool IRAM_ATTR lcd_on_frame_complete(esp_lcd_panel_handle_t, const esp_lcd_rgb_panel_event_data_t *, void *) {
   lcd_fc_t = esp_timer_get_time();
   lcd_fc_seen = true;
+  lcd_fc_core = xPortGetCoreID();
+  if (lcd_fc_late_pending) {
+    lcd_fc_late_pending = false;
+    lcd_late_eof[lcd_late_eof_n & 7] = (int32_t)(lcd_fc_t - lcd_vs_prev);
+    lcd_late_eof_n++;
+  }
   return false;
 }
 
@@ -89,11 +136,13 @@ static bool IRAM_ATTR lcd_on_vsync(esp_lcd_panel_handle_t, const esp_lcd_rgb_pan
     if (late > 30) lcd_vs_n30++;
   }
   lcd_vs_prev = now;
+  lcd_vs_core = xPortGetCoreID();
   int32_t stall = 0;
   if (!lcd_fc_seen) {
     lcd_underruns++;
     lcd_n100++;
     stall = 999;   // no frame-complete at all: the DMA did not finish this frame before the restart
+    lcd_fc_late_pending = true;
   } else {
     lcd_fc_seen = false;
     int32_t d = (int32_t)(now - lcd_fc_t);
@@ -166,6 +215,7 @@ static void panel_init() {
 // pause that gives the LCD DMA exclusive PSRAM access to refill its FIFO. With bounce buffers the copy to the
 // panel is the driver's own CPU memcpy through the shared cache, so the write-back is skipped.
 static void fb_blit(const lv_area_t *a, const uint16_t *src) {
+  if (probe_mode & 8) return;   // PROBE: skip the blit entirely
   const int w = a->x2 - a->x1 + 1;
   for (int y0 = a->y1; y0 <= a->y2; y0 += HAL_BLIT_ROWS) {
     int y1 = y0 + HAL_BLIT_ROWS - 1;
@@ -182,7 +232,7 @@ static void fb_blit(const lv_area_t *a, const uint16_t *src) {
 #if HAL_BOUNCE_PX == 0
     uint8_t *start = (uint8_t *)(fb + (HAL_ROT180 ? 479 - y1 : y0) * 480);
     size_t len = (size_t)(y1 - y0 + 1) * 480 * 2;
-    esp_cache_msync(start, len, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    if (!(probe_mode & 4)) esp_cache_msync(start, len, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);   // PROBE: 4 skips
 #endif
 #if HAL_BLIT_PAUSE_US > 0
     esp_rom_delay_us(HAL_BLIT_PAUSE_US);
@@ -269,7 +319,8 @@ static void touch_task(void *) {
   uint32_t fresh_ms = 0;             // millis() of the last fresh scan
   const uint32_t hold_ms = 4u * (5u + gt_rate);
   for (;;) {
-    vTaskDelayUntil(&wake, pdMS_TO_TICKS(10));
+    vTaskDelayUntil(&wake, pdMS_TO_TICKS(probe_poll_ms));
+    if (!touch_poll_on) continue;   // PROBE
     touch_polls++;
     uint8_t st = 0;
     bool ok = gt_read(0x814E, &st, 1);
@@ -362,6 +413,7 @@ void hal_init() {
     gt_read(0x8056, &gt_rate, 1);
     xTaskCreatePinnedToCore(touch_task, "touch", 3072, nullptr, 5, nullptr, 0);
   }
+  xTaskCreatePinnedToCore(probe_task, "probe", 3072, nullptr, 4, nullptr, 0);   // PROBE
 
   panel_init();
   lv_init();
@@ -409,6 +461,15 @@ void hal_lcd_stall_stats(int32_t *smax, uint32_t *n10, uint32_t *n30, uint32_t *
 void hal_lcd_vsync_stats(int32_t *lmax, uint32_t *n10, uint32_t *n30) {  // and reset
   *lmax = lcd_vs_late_max; *n10 = lcd_vs_n10; *n30 = lcd_vs_n30;
   lcd_vs_late_max = 0; lcd_vs_n10 = lcd_vs_n30 = 0;
+}
+void hal_probe_pclk(int hz) { if (panel && hz > 0) esp_lcd_rgb_panel_set_pclk(panel, (uint32_t)hz); }   // PROBE
+void hal_lcd_probe_extra(char *buf, size_t n) {   // ",\"fc_core\":1,\"vs_core\":1,\"late_eof\":[us,...]"
+  if (n == 1) layout_pad_fn();   // keep the pad linked (never true)
+  size_t o = snprintf(buf, n, ",\"fc_core\":%d,\"vs_core\":%d,\"poll\":%d,\"pmode\":%d,\"late_eof\":[", lcd_fc_core, lcd_vs_core, (int)touch_poll_on, probe_mode);
+  uint32_t cnt = lcd_late_eof_n, from = cnt > 8 ? cnt - 8 : 0;
+  for (uint32_t i = from; i < cnt && o < n - 16; i++)
+    o += snprintf(buf + o, n - o, "%s%ld", i > from ? "," : "", (long)lcd_late_eof[i & 7]);
+  snprintf(buf + o, n - o, "]");
 }
 void hal_lcd_anomaly_log(char *buf, size_t n) {   // JSON array "stall/late" of the last anomalies, oldest first
   size_t o = snprintf(buf, n, "[");
