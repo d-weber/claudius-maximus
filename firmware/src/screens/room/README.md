@@ -26,3 +26,7 @@ python3 tools/room_sim.py day --seconds 1800     # scripted session: activity lo
 python3 tools/room_sim.py clock                  # 24 h of lighting, one frame per 20 min
 ```
 On the device: `tools/dev.py send '{"t":"cmd","anim":"wait"}'` forces a task (`""` releases), then `dev.py shot`.
+
+The `Director` instance is allocated in PSRAM by `home_face.cpp` (not a static in `.bss`): hot per-tick state in
+internal RAM collided with the LCD scan-out DMA and made frames jump (docs/STATUS.md, "Scan-out stalls"). Keep it
+that way, and check `lcd_underruns` in a `perf` window after changes to what runs every tick.

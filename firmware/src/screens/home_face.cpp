@@ -28,7 +28,11 @@ static void (*tap_cb)() = nullptr;
 static Idx *canvas, *prev_canvas;
 static bool first = true, mirrored = false;
 static uint32_t n_full = 0, n_band = 0, n_face_inv = 0;   // publish statistics (perf report)
-static Director dir;
+// The director's state lives in PSRAM, on purpose. In internal RAM (.bss) it sat in a region the LCD scan-out DMA
+// also depends on, and the CPU hammering it every tick starved the DMA: 10-40 missed frames per minute
+// (perf lcd_underruns, a sideways jump on the panel), zero with the state in PSRAM. Measured 2026-10-28, see
+// docs/STATUS.md "Scan-out stalls". Keep any other hot per-frame state out of .bss too.
+static Director &dir = *(Director *)heap_caps_calloc(1, sizeof(Director), MALLOC_CAP_SPIRAM);
 static uint32_t last_ms = 0, acc_ms = 0;
 static bool dbg_forced = false;
 static int dbg_helpers = -1;

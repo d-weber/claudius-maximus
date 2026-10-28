@@ -71,8 +71,24 @@ Reported: the image jumped sideways for a frame now and then, and swipes mostly 
    behind and the frame desyncs vertically); GDMA memcpy into the framebuffer (9 ms per band vs 0.9 ms CPU).
 3. Also: LVGL now uses its own TLSF pool in PSRAM (`LV_MEM_CUSTOM 0`, 2 MB) instead of the IDF heap, whose
    spinlock masks interrupts on every call (not the cause above, but removes that class of latency).
-Residual: a frame whose DMA does not finish before the restart (`lcd_underruns`, logged as `999`) still shows up
-0-5 times per 30 s in some runs and 0 in others, with the CPU side unaffected; cause unknown, watch by eye.
+Residual: a frame whose DMA does not finish before the restart (`lcd_underruns`, logged as `999`) still showed up
+0-5 times per 30 s in some runs and 0 in others, with the CPU side unaffected. See "Scan-out stalls" below.
+
+## Scan-out stalls — 2026-10-28
+Clawd's Studio (the new home, `screens/room/`) made the `999` stalls regular: 10-40 per minute with the room
+visible, 2-4 per minute on any other screen, CPU under 5 %, no host traffic. Bisected on the device against the
+pre-room firmware (0 in the same windows) with synthetic loads in the home tick: a 0.8 ms compute burst that only
+touches registers is harmless (1 per 2 min), the same burst hammering one `.bss` word gives up to 30 per 2 min,
+and the rate swung with the link layout (an extra 29 KB in IRAM or a 29 KB pad in `.bss` changed it 0 -> 28).
+The engine's `Director` struct (1.5 KB, read and written hundreds of times per tick) sat in `.bss`; allocating it
+in PSRAM instead gives 0 stalls in every window (room visible in code / wait / idle, hidden, 120 s each), and
+nothing else was needed: IRAM placement of the engine, a 4x longer vertical front porch and moving the canvases
+did not matter once the state was in PSRAM (canvases in PSRAM with the state still internal was the worst case,
+80 per 2 min). Why that region of internal SRAM collides with the scan-out DMA is not documented (the DMA's
+descriptor chain is elsewhere); the empirical rule is: hot per-frame state goes through the cache (PSRAM), not into
+`.bss`, and `lcd_underruns` over a 120 s window is the regression check. Not the cause: flash writes (a wrapper on
+`spi_flash_disable_interrupts_caches_and_other_cpu` counted 106 at boot, none after), flash cache-miss bursts (a
+64 KB-per-tick rodata reader gave 44 per minute, but the real engine barely touches flash), host traffic.
 
 ## Isometric home — 2026-10-16
 The home screen is the isometric desk (iso-clawd/ ported to C++: `firmware/src/screens/iso/`), full width at 3x

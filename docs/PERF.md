@@ -248,3 +248,10 @@ JSON parse of a state ≈ 5.6 ms (≈ 6/s). Flush (copy to PSRAM framebuffer) �
   (9.4 ms per 60-line band, 64-byte bursts, vs 0.9 ms for the cached CPU blit). perf `--cycle` changes page every
   1.2 s. `HAL_BLIT_ROWS` (4) chunks the blit's cache write-back; `HAL_BLIT_PAUSE_US`, `HAL_PCLK_HZ`, `HAL_BOUNCE_PX`
   remain as experiment knobs.
+- **scan-out-stalls** (2026-10-28) — `999` underruns with Clawd's Studio: 10-40/min visible, 2-4/min hidden,
+  0 on the pre-room firmware. Device bisect with synthetic bursts: register-only compute harmless, a `.bss` word
+  hammered per tick up to 30/2 min, layout dependent. **KEPT — the `Director` state is allocated in PSRAM**
+  (`home_face.cpp`): 0 in every 120 s window (code / wait / idle visible, hidden). Rejected as unnecessary: engine in
+  IRAM (+29 KB), `vsync_front_porch` 10 -> 40, canvases in PSRAM (worse while the state was internal). Measured with
+  raw-serial perf windows: port held open, nothing sent, no demo stream (`tools/dev.py perf` with the daemon's demo
+  stream is 3x busier than real life).
