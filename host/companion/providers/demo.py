@@ -34,9 +34,10 @@ TODOS = ["Read codebase", "Write tests", "Implement feature", "Fix lint", "Run t
 
 
 class DemoProvider(Provider):
-    def __init__(self, n_sessions: int = 4, seed: int = 7, speed: float = 1.0):
+    def __init__(self, n_sessions: int = 4, seed: int = 7, speed: float = 1.0, calm: bool = False):
         self.rng = random.Random(seed)
         self.speed = speed
+        self.calm = calm  # never put a session in the waiting state (no "needs you" alerts / edge glow)
         self.events: list[dict] = []
         now = int(time.time())
         self.sessions = []
@@ -45,7 +46,7 @@ class DemoProvider(Provider):
             self.sessions.append({
                 "id": f"{self.rng.getrandbits(32):08x}",
                 "name": proj, "project": proj, "cwd": f"~/projects/{proj}", "title": title,
-                "status": ["busy", "busy", "waiting", "idle", "busy"][i % 5],
+                "status": ["busy", "busy", "busy" if calm else "waiting", "idle", "busy"][i % 5],
                 "since": now - self.rng.randint(5, 300),
                 "started": now - self.rng.randint(600, 7200),
                 "model": ["opus-5.5", "opus-5.5", "sonnet-5.5", "opus-5.5", "haiku-5.5"][i % 5],
@@ -102,7 +103,7 @@ class DemoProvider(Provider):
                          "cost": 0.0, "model": "opus-5.5", "ctx_pct": 3}
                     s["subagents"].append(a)
                     self._ev("subagent_start", s, agent=a["id"], text=detail)
-            elif r < 0.80:
+            elif r < 0.80 and not self.calm:
                 s["status"], s["since"] = "waiting", t
                 s["waiting"] = f"Allow Bash: {self.rng.choice(TOOLS[2][1])}?"
                 self._ev("waiting", s, text=s["waiting"])
