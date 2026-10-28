@@ -218,7 +218,7 @@ def _install_linux(path: str, version: str) -> str:
     if not current:
         raise UpdateError("not running from an AppImage")
     folder = os.path.dirname(os.path.abspath(current))
-    dest = os.path.join(folder, asset_name(version) or os.path.basename(path))
+    dest = os.path.join(folder, asset_name(version, "linux") or os.path.basename(path))
     try:
         if os.path.abspath(dest) == os.path.abspath(path):
             pass
