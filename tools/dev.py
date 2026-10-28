@@ -12,6 +12,8 @@ it takes an exclusive lock (.devlock). Builds use a per-developer build dir so t
       --alert KIND              trigger alerts_demo(KIND) before the shot
       --seconds N               seconds of demo data to stream before the shot (default 4)
       --nodemo                  don't stream demo data
+      --calm                    demo sessions never wait on you (no "needs you" glow; for docs shots)
+      --settle N                freeze the demo for N s before the shot so toasts fade (docs shots: 4)
   perf [--screen ID] [--seconds N] [--nodemo] [--detail] [--cycle]
                                 measure fps / frame time / cpu% / heap on a screen (locked)
   demo [--seconds N]            stream demo data to the device (locked)
@@ -153,14 +155,17 @@ def open_link() -> DeviceLink:
     sys.exit("device not found")
 
 
-def stream_demo(link: DeviceLink, seconds: float, demo: DemoProvider | None = None) -> DemoProvider:
-    demo = demo or DemoProvider(speed=3.0)
+def stream_demo(link: DeviceLink, seconds: float, demo: DemoProvider | None = None, calm: bool = False,
+                freeze: bool = False) -> DemoProvider:
+    """Stream demo data for `seconds`. With freeze=True the demo stops evolving (no new events: toasts fade out)
+    but the snapshot keeps going out so the device still sees the host."""
+    demo = demo or DemoProvider(speed=3.0, calm=calm)
     if not hasattr(demo, "_extras"):
         demo._extras = extra_providers()
     t_end = time.time() + seconds
     while time.time() < t_end:
         now = time.time()
-        for p in [demo, *demo._extras]:
+        for p in ([] if freeze else [demo]) + list(demo._extras):
             p.poll(now)
         for e in demo.drain_events():
             link.send(e)
@@ -197,13 +202,15 @@ def cmd_shot(a) -> int:
         link = open_link()
         demo = None
         if not a.nodemo:
-            demo = stream_demo(link, 0.5)
+            demo = stream_demo(link, 0.5, calm=getattr(a, "calm", False))
         if a.screen:
             link.send({"t": "cmd", "nav": a.screen})
         if a.detail and demo:
             link.send({"t": "cmd", "open": "detail", "sid": demo.sessions[0]["id"]})
         if not a.nodemo:
             stream_demo(link, a.seconds, demo)
+            if a.settle:
+                stream_demo(link, a.settle, demo, freeze=True)
         if a.alert:
             link.send({"t": "cmd", "demo_alert": a.alert})
             time.sleep(a.alert_wait)
@@ -347,6 +354,8 @@ def main() -> int:
     s.add_argument("--alert-wait", type=float, default=0.8)
     s.add_argument("--seconds", type=float, default=4)
     s.add_argument("--nodemo", action="store_true")
+    s.add_argument("--calm", action="store_true")
+    s.add_argument("--settle", type=float, default=0, help="seconds of frozen demo before the shot (toasts fade)")
     s.set_defaults(f=cmd_shot)
     pf = sub.add_parser("perf")
     pf.add_argument("--screen")
