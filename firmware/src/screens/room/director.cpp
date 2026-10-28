@@ -27,9 +27,24 @@ static const StationDef ST[ST_COUNT] = {
     {49, {{49, 53}, {0, 0}}, 1, RIGHTV, 0},   // ST_UNDERDESK
     {54, {{54, 53}, {0, 0}}, 1, RIGHTV, 0},   // ST_DRAWER
 };
-struct MiniDef { int8_t hx, x, y; View view; int8_t slot; };
-static const MiniDef MST[] = {{70, 70, 47, BACK, 0}, {9, 9, 50, FRONT, 1}, {104, 104, 55, BACK, 2}, {60, 60, 42, BACK, 7}, {36, 36, 42, BACK, 6}};
-static const int N_MST = 5;
+struct MiniDef { int8_t hx, x, y; View view; int8_t slot; int8_t vx, vy; };   // vx/vy: optional waypoint between the hallway and the spot
+static const MiniDef MST[] = {
+    {70, 70, 47, BACK, 0, -1, -1},    // desk, left of Clawd
+    {9, 9, 50, FRONT, 1, -1, -1},     // bookshelf
+    {104, 104, 55, BACK, 2, -1, -1},  // server rack
+    {60, 60, 42, BACK, 7, -1, -1},    // whiteboard
+    {36, 36, 42, BACK, 6, -1, -1},    // window
+    {46, 46, 77, FRONT, 3, -1, -1},   // rug
+    {88, 88, 97, RIGHTV, 8, -1, -1},  // by the plant
+    {40, 40, 101, FRONT, 9, -1, -1},  // by the door mat
+    {40, 14, 101, FRONT, 10, 40, 101}, // foot of the bed (walks round the bed)
+    // overflow spots on the open floor (a crowd of helpers)
+    {44, 44, 90, FRONT, 11, -1, -1},  {58, 58, 90, FRONT, 12, -1, -1},  {72, 72, 90, FRONT, 13, -1, -1},
+    {86, 86, 88, FRONT, 14, -1, -1},  {40, 30, 90, FRONT, 15, 40, 90},  {72, 72, 101, FRONT, 16, -1, -1},
+    {86, 86, 101, FRONT, 17, -1, -1}, {40, 28, 101, FRONT, 18, 40, 101}, {96, 96, 70, LEFTV, 19, -1, -1},
+    {98, 98, 80, LEFTV, 20, -1, -1},  {40, 30, 80, RIGHTV, 21, 40, 80},
+};
+static const int N_MST = 20;
 
 struct FidDef { const char *name; int len; uint16_t mask; int weight; };
 #define M(t) (1u << (t))
@@ -87,7 +102,7 @@ void Director::setInput(const Input &i) {
   Input prev = in;
   if (forced) { in.tod = i.tod; in.yday = i.yday; in.helpers = i.helpers; in.todoTotal = i.todoTotal; in.todoDone = i.todoDone; return; }
   in = i;
-  if (in.helpers > 3) in.helpers = 3;
+  if (in.helpers > MAX_MINIS) in.helpers = MAX_MINIS;
   if (in.mood != prev.mood || in.tool != prev.tool) chooseTask();
 }
 
@@ -406,29 +421,30 @@ void Director::stepTaskLoop() {
 
 // ---------------------------------------------------------------- helpers
 void Director::stepMinis() {
-  int want = in.helpers > 3 ? 3 : in.helpers;
+  int want = in.helpers > MAX_MINIS ? MAX_MINIS : in.helpers;
   if (task == TASK_SLEEP || task == TASK_OFFLINE) want = 0;
   auto slotFree = [&](int slot, int self) {
     if (ST[station].slot == slot || ST[taskStation].slot == slot) return false;
-    for (int k = 0; k < 3; k++) if (k != self && minis[k].state && minis[k].st >= 0 && MST[minis[k].st].slot == slot) return false;
+    for (int k = 0; k < MAX_MINIS; k++) if (k != self && minis[k].state && minis[k].st >= 0 && MST[minis[k].st].slot == slot) return false;
     return true;
   };
   auto planMini = [&](Mini &m, int st, bool fromDoor) {
     m.pathN = 0;
     auto add = [&](int x, int y) { if (m.pathN < 6) { m.path[m.pathN][0] = x; m.path[m.pathN][1] = y; m.pathN++; } };
-    if (!fromDoor && m.st >= 0) add(MST[m.st].hx, HALL);
+    if (!fromDoor && m.st >= 0) { if (MST[m.st].vx >= 0) add(MST[m.st].vx, MST[m.st].vy); add(MST[m.st].hx, HALL); }
     if (fromDoor) add(56, HALL);
-    if (st >= 0) { add(MST[st].hx, HALL); add(MST[st].x, MST[st].y); }
+    if (st >= 0) { add(MST[st].hx, HALL); if (MST[st].vx >= 0) add(MST[st].vx, MST[st].vy); add(MST[st].x, MST[st].y); }
     else { add(56, HALL); add(56, 98); }
     m.pathI = 0; m.st = st;
   };
   auto pickStation = [&](int self) {
-    int order[N_MST] = {0, 1, 2, 3, 4};
+    int order[N_MST];
+    for (int k = 0; k < N_MST; k++) order[k] = k;
     for (int k = N_MST - 1; k > 0; k--) { int j = rng.range(0, k); int t = order[k]; order[k] = order[j]; order[j] = t; }
     for (int k = 0; k < N_MST; k++) if (slotFree(MST[order[k]].slot, self)) return order[k];
     return -1;
   };
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < MAX_MINIS; i++) {
     Mini &m = minis[i];
     if (i < want && m.state == 0) {
       int st = pickStation(i);
@@ -456,7 +472,7 @@ void Director::stepMinis() {
     }
   }
   shownHelpers = 0;
-  for (int i = 0; i < 3; i++) if (minis[i].state) shownHelpers++;
+  for (int i = 0; i < MAX_MINIS; i++) if (minis[i].state) shownHelpers++;
 }
 
 // ---------------------------------------------------------------- ambient
@@ -730,8 +746,8 @@ void Director::drawClawdNow(Canvas &c) {
 
 void Director::drawSprites(Canvas &c) {
   // painter's order by feet y: minis, Clawd, the plant
-  struct D { int key, kind, idx; } d[5]; int n = 0;
-  for (int i = 0; i < 3; i++) if (minis[i].state) d[n++] = {(int)minis[i].y, 1, i};
+  struct D { int key, kind, idx; } d[MAX_MINIS + 2]; int n = 0;
+  for (int i = 0; i < MAX_MINIS; i++) if (minis[i].state) d[n++] = {(int)minis[i].y, 1, i};
   if (!inBed) d[n++] = {cy + 11, 0, 0};
   d[n++] = {97, 2, 0};
   for (int i = 1; i < n; i++) { D t = d[i]; int j = i - 1; while (j >= 0 && d[j].key > t.key) { d[j + 1] = d[j]; j--; } d[j + 1] = t; }
@@ -753,7 +769,7 @@ void Director::drawFx(Canvas &c) {
     if (sleepEyes == 0) drawZzz(c, 24 + sleepShift, 56, (int)tick);
   }
   if (task == TASK_DELEGATE && !walking && reactId < 0) {
-    for (int i = 0; i < 3; i++) if (minis[i].state == 2) drawDash(c, cx + 9, cy + 2, (int)minis[i].x + 5, (int)minis[i].y - 4, (int)tick, QY);
+    for (int i = 0; i < MAX_MINIS; i++) if (minis[i].state == 2) drawDash(c, cx + 9, cy + 2, (int)minis[i].x + 5, (int)minis[i].y - 4, (int)tick, QY);
   }
   if (task == TASK_WAIT) drawAlarmRing(c, alarmPhase);
 }

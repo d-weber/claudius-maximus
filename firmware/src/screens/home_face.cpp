@@ -1,10 +1,11 @@
 // Clawd's Studio on the home screen: LVGL glue around screens/room/ (the director and the pixel engine).
 //
-// Rendering: the director draws every tick (12 fps) into a 120 x 106 palette-index canvas (PSRAM). The rows and
-// columns that differ from the previous tick are upscaled 4x through the current palette into a 480 x 424 RGB565
-// image (PSRAM) that the face object paints in its draw callback, and only that area is invalidated. A palette
-// change (the light fading at dusk, the alarm) republishes the whole room. Settings.home_mirror flips the scene
-// horizontally at upscale time.
+// Rendering: the director draws every tick (12 fps) into a 120 x 106 palette-index canvas (internal RAM). The
+// face object's draw callback upscales the canvas 4x through the current palette straight into LVGL's draw buffer
+// for whatever area LVGL is refreshing, so the room takes the same paced band-by-band path to the PSRAM
+// framebuffer as every other screen (no intermediate 480 x 424 image, no PSRAM write bursts that would starve the
+// panel's scan-out). After each tick only the row bands that changed are invalidated; a palette change (the light
+// fading at dusk, the alarm) invalidates the whole room. Settings.home_mirror flips the scene horizontally.
 #include "home_face.h"
 #include "screens.h"
 #include "room/director.h"
@@ -25,10 +26,13 @@ static const int IMG_W = W * ZOOM, IMG_H = H * ZOOM;    // 480 x 424
 static lv_obj_t *face, *bubble, *bubble_lbl, *scroller;
 static void (*tap_cb)() = nullptr;
 static Idx *canvas, *prev_canvas;
-static uint16_t *img;
-static lv_img_dsc_t img_dsc;
 static bool first = true, mirrored = false;
-static Director dir;
+static uint32_t n_full = 0, n_band = 0, n_face_inv = 0;   // publish statistics (perf report)
+// The director's state lives in PSRAM, on purpose. In internal RAM (.bss) it sat in a region the LCD scan-out DMA
+// also depends on, and the CPU hammering it every tick starved the DMA: 10-40 missed frames per minute
+// (perf lcd_underruns, a sideways jump on the panel), zero with the state in PSRAM. Measured 2026-10-28, see
+// docs/STATUS.md "Scan-out stalls". Keep any other hot per-frame state out of .bss too.
+static Director &dir = *(Director *)heap_caps_calloc(1, sizeof(Director), MALLOC_CAP_SPIRAM);
 static uint32_t last_ms = 0, acc_ms = 0;
 static bool dbg_forced = false;
 static int dbg_helpers = -1;
@@ -56,26 +60,11 @@ static float local_tod() {
   return tm.tm_hour + tm.tm_min / 60.f + tm.tm_sec / 3600.f;
 }
 
-// ---- upscale the changed part of the canvas into the image and invalidate it
-static void publish(int lx0, int ly0, int lx1, int ly1) {   // inclusive logical rect
+// ---- invalidate the device area of a logical rect (inclusive); the draw callback repaints it from the canvas
+static void publish(int lx0, int ly0, int lx1, int ly1) {
   if (lx0 < 0) lx0 = 0;
   if (lx1 > W - 1) lx1 = W - 1;
   if (lx0 > lx1 || ly0 > ly1) return;
-  const uint16_t *pal = dir.palette(nullptr);
-  for (int ly = ly0; ly <= ly1; ly++) {
-    const Idx *src = canvas + ly * W;
-    uint16_t *row0 = img + (ly * ZOOM) * IMG_W;
-    for (int lx = lx0; lx <= lx1; lx++) {
-      uint16_t v = pal[src[lx]];
-      int dx = mirrored ? (W - 1 - lx) * ZOOM : lx * ZOOM;
-      uint16_t *d = row0 + dx;
-      d[0] = v; d[1] = v; d[2] = v; d[3] = v;
-    }
-    for (int r = 1; r < ZOOM; r++) {
-      int dx0 = mirrored ? (W - 1 - lx1) * ZOOM : lx0 * ZOOM;
-      memcpy(row0 + r * IMG_W + dx0, row0 + dx0, (lx1 - lx0 + 1) * ZOOM * sizeof(uint16_t));
-    }
-  }
   lv_area_t A;
   lv_obj_get_coords(face, &A);
   int sx0 = mirrored ? (W - 1 - lx1) * ZOOM : lx0 * ZOOM;
@@ -91,27 +80,35 @@ static void render() {
   dir.palette(&pdirty);
   bool mir = want_mirror();
   if (first || pdirty || mir != mirrored) {
+    n_full++;
     mirrored = mir;
     memcpy(prev_canvas, canvas, W * H);
     publish(0, 0, W - 1, H - 1);
     first = false;
     return;
   }
-  int x0 = W, y0 = H, x1 = -1, y1 = -1;
-  for (int y = 0; y < H; y++) {
-    const Idx *a0 = canvas + y * W, *b0 = prev_canvas + y * W;
-    if (!memcmp(a0, b0, W)) continue;
-    int lx = 0, rx = W - 1;
-    while (lx < W && a0[lx] == b0[lx]) lx++;
-    while (rx > lx && a0[rx] == b0[rx]) rx--;
-    if (y < y0) y0 = y;
-    if (y > y1) y1 = y;
-    if (lx < x0) x0 = lx;
-    if (rx > x1) x1 = rx;
+  // Dirty rects per band of 8 logical rows (32 device px): two small changes far apart (a star twinkling in the
+  // window, Clawd walking by the door) stay two small publishes instead of one frame-sized bounding box.
+  const int BAND = 8;
+  bool any = false;
+  for (int b0 = 0; b0 < H; b0 += BAND) {
+    int b1 = b0 + BAND > H ? H : b0 + BAND;
+    int x0 = W, x1 = -1;
+    for (int y = b0; y < b1; y++) {
+      const Idx *a0 = canvas + y * W, *p0 = prev_canvas + y * W;
+      if (!memcmp(a0, p0, W)) continue;
+      int lx = 0, rx = W - 1;
+      while (lx < W && a0[lx] == p0[lx]) lx++;
+      while (rx > lx && a0[rx] == p0[rx]) rx--;
+      if (lx < x0) x0 = lx;
+      if (rx > x1) x1 = rx;
+    }
+    if (x1 < 0) continue;
+    any = true;
+    n_band++;
+    publish(x0, b0, x1, b1 - 1);
   }
-  if (x1 < 0) return;
-  memcpy(prev_canvas, canvas, W * H);
-  publish(x0, y0, x1, y1);
+  if (any) memcpy(prev_canvas, canvas, W * H);
 }
 
 static void draw_cb(lv_event_t *e) {
@@ -119,10 +116,26 @@ static void draw_cb(lv_event_t *e) {
   lv_area_t A;
   lv_obj_get_coords(face, &A);
   lv_area_t ia = {A.x1, A.y1, (lv_coord_t)(A.x1 + IMG_W - 1), (lv_coord_t)(A.y1 + IMG_H - 1)};
-  if (_lv_area_is_on(&ia, dc->clip_area)) {
-    lv_draw_img_dsc_t d;
-    lv_draw_img_dsc_init(&d);
-    lv_draw_img(dc, &d, &ia, &img_dsc);
+  lv_area_t clip;
+  if (canvas && _lv_area_intersect(&clip, &ia, dc->clip_area)) {
+    const uint16_t *pal = dir.palette(nullptr);
+    lv_color_t *buf = (lv_color_t *)dc->buf;
+    int stride = lv_area_get_width(dc->buf_area);
+    for (int y = clip.y1; y <= clip.y2; y++) {
+      const Idx *src = canvas + ((y - A.y1) / ZOOM) * W;
+      lv_color_t *dst = buf + (y - dc->buf_area->y1) * stride + (clip.x1 - dc->buf_area->x1);
+      int x = clip.x1;
+      while (x <= clip.x2) {
+        int ox = x - A.x1;
+        int lx = ox / ZOOM;
+        int run = ZOOM - ox % ZOOM;                 // device pixels left in this logical pixel
+        if (x + run - 1 > clip.x2) run = clip.x2 - x + 1;
+        lv_color_t v;
+        v.full = pal[src[mirrored ? W - 1 - lx : lx]];
+        for (int k = 0; k < run; k++) dst[k] = v;
+        dst += run; x += run;
+      }
+    }
   }
   // bubble tail toward Clawd's head (the bubble is our child and draws after us)
   if (bub_drawn > 0.02f && !lv_obj_has_flag(bubble, LV_OBJ_FLAG_HIDDEN)) {
@@ -163,29 +176,30 @@ static void place_bubble() {
   if (x + bw > 474) x = 474 - bw;
   int y = hy - bh - 24;
   if (y < 4) y = hy + 60;
+  // the tail moved: invalidate the old and the new tail strips only (not the whole room)
+  lv_area_t B;
+  lv_obj_get_coords(bubble, &B);
+  lv_area_t old_tail = {(lv_coord_t)(B.x1 - 2), (lv_coord_t)(B.y2 - 6), (lv_coord_t)(B.x2 + 2), (lv_coord_t)(B.y2 + 18)};
+  lv_obj_invalidate_area(face, &old_tail);
   lv_obj_set_pos(bubble, x, y);
-  lv_obj_invalidate(face);   // the tail moved
+  lv_obj_get_coords(bubble, &B);
+  lv_area_t new_tail = {(lv_coord_t)(B.x1 - 2), (lv_coord_t)(B.y2 - 6), (lv_coord_t)(B.x2 + 2), (lv_coord_t)(B.y2 + 18)};
+  lv_obj_invalidate_area(face, &new_tail);
+  n_face_inv++;
 }
 
 // ---- API
 void home_face_create(lv_obj_t *parent, lv_coord_t y) {
   scroller = lv_obj_get_parent(parent);  // the tileview
-  canvas = (Idx *)heap_caps_calloc(W * H, 1, MALLOC_CAP_SPIRAM);
-  prev_canvas = (Idx *)heap_caps_calloc(W * H, 1, MALLOC_CAP_SPIRAM);
-  img = (uint16_t *)heap_caps_malloc(IMG_W * IMG_H * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
-  if (!canvas || !prev_canvas || !img) {   // no PSRAM: no scene (face stays null, every API no-ops)
-    heap_caps_free(canvas); heap_caps_free(prev_canvas); heap_caps_free(img);
-    canvas = prev_canvas = nullptr; img = nullptr;
+  // Internal RAM: the director writes the canvas pixel by pixel every tick and the draw callback reads it per
+  // device pixel; CPU traffic to PSRAM would compete with the panel's scan-out DMA (lcd underruns, a flicker).
+  canvas = (Idx *)heap_caps_calloc(W * H, 1, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  prev_canvas = (Idx *)heap_caps_calloc(W * H, 1, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!canvas || !prev_canvas) {   // no RAM: no scene (face stays null, every API no-ops)
+    heap_caps_free(canvas); heap_caps_free(prev_canvas);
+    canvas = prev_canvas = nullptr;
     return;
   }
-  uint16_t bg = rgb565(0x2b1e2a);
-  for (int i = 0; i < IMG_W * IMG_H; i++) img[i] = bg;
-  img_dsc.header.always_zero = 0;
-  img_dsc.header.w = IMG_W;
-  img_dsc.header.h = IMG_H;
-  img_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
-  img_dsc.data_size = IMG_W * IMG_H * sizeof(uint16_t);
-  img_dsc.data = (const uint8_t *)img;
 
   dir.init(esp_random(), local_tod());
 
@@ -285,7 +299,7 @@ void home_face_tick(bool visible) {
   // bubble fade
   if (bub_until && (int32_t)(now - bub_until) >= 0) { bub_until = 0; bub_prio = 0; }
   float bt = bub_until ? 1.f : 0.f;
-  bub_a += (bt - bub_a) * (1 - expf(-dt / 1000.f * 12));
+  bub_a += (bt - bub_a) * (1 - expf(-(float)dt / 1000.f * 12));
   if (!bub_until && bub_a < 0.03f) bub_a = 0;
   if (bub_until && bub_a > 0.97f) bub_a = 1;
   int o = (int)(bub_a * 255);
@@ -325,6 +339,7 @@ void home_face_debug(const char *name, int frame, int nhelpers, bool grey) {
 void home_face_debug_mirror(int m) { dbg_mirror = m; first = true; }
 
 void home_face_status(char *buf, size_t n) {
-  snprintf(buf, n, "{\"anim\":\"%s\",\"task\":\"%s\",\"frame\":%u,\"forced\":%d,\"x\":%d,\"y\":%d}",
-           face ? dir.activity() : "", face ? Director::TASK_NAMES[dir.task] : "", (unsigned)dir.tick, dbg_forced, dir.cx, dir.cy);
+  snprintf(buf, n, "{\"anim\":\"%s\",\"task\":\"%s\",\"frame\":%u,\"forced\":%d,\"x\":%d,\"y\":%d,\"full\":%u,\"bands\":%u,\"face_inv\":%u}",
+           face ? dir.activity() : "", face ? Director::TASK_NAMES[dir.task] : "", (unsigned)dir.tick, dbg_forced, dir.cx, dir.cy,
+           (unsigned)n_full, (unsigned)n_band, (unsigned)n_face_inv);
 }

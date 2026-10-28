@@ -18,7 +18,7 @@ enum React { REACT_GLANCE, REACT_HOP, REACT_SURPRISE, REACT_WINK, REACT_GIGGLE, 
 struct Input {
   Mood mood = MOOD_OFFLINE;
   char tool = 0;            // 'e' edit/write, 'r' read, 's' search (grep/glob), 'x' exec, 'w' web, 't' think, 'a' delegate, 'p' plan, 'v' review
-  int helpers = 0;          // active subagents (0..3 shown)
+  int helpers = 0;          // mini helpers to show: extra sessions + active subagents (0..MAX_MINIS)
   float energy = 0;         // 0..1
   float tod = 12.f;         // local time of day, hours
   int yday = 0;             // day of year (moon phase)
@@ -95,8 +95,9 @@ struct Director {
   int sleepShift = 0, sleepEyes = 0, sleepNext = 0, breath = 0;
   int emoteBob = 0;
   // helpers (mini Clawds)
+  static const int MAX_MINIS = 20;
   struct Mini { int state = 0; /*0 off 1 enter 2 at 3 leave*/ int st = -1; float x = 56, y = 98; int path[6][2]; int pathN = 0, pathI = 0; int legPhase = 0; View view = FRONT; int blink = 0; };
-  Mini minis[3];
+  Mini minis[MAX_MINIS];
   int shownHelpers = 0;
   // room
   WindowState win;
