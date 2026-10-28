@@ -120,6 +120,20 @@ class SpecTest(unittest.TestCase):
     def test_entry_passes_cli_through(self):
         self.assertEqual(self._run_entry(["x", "status", "--json"])[1], ["x", "status", "--json"])
 
+    def test_entry_restores_child_env_when_frozen(self):
+        """PyInstaller's LD_LIBRARY_PATH must not leak to children (systemctl died on the 0.3.0 AppImage)."""
+        entry = load("entry")
+        env = {"LD_LIBRARY_PATH": "/bundle/_internal", "LD_LIBRARY_PATH_ORIG": "/opt/lib",
+               "DYLD_LIBRARY_PATH": "/bundle/Frameworks"}
+        with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(sys, "frozen", True, create=True):
+            entry._restore_child_env()
+            self.assertEqual(os.environ["LD_LIBRARY_PATH"], "/opt/lib")
+            self.assertNotIn("LD_LIBRARY_PATH_ORIG", os.environ)
+            self.assertNotIn("DYLD_LIBRARY_PATH", os.environ)   # no _ORIG: the bootloader added it, drop it
+        with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": "/mine"}, clear=False):
+            entry._restore_child_env()   # not frozen: untouched
+            self.assertEqual(os.environ["LD_LIBRARY_PATH"], "/mine")
+
     def _run_entry_hook(self, argv, hook_side_effect=None):
         """hook / statusline: straight to companion.hookclient, then os._exit(0) whatever happens."""
         entry = load("entry")
