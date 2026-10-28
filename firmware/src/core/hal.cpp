@@ -8,6 +8,7 @@
 #include <esp_cache.h>
 #include <esp_timer.h>
 #include <rom/ets_sys.h>
+#include <soc/gpio_reg.h>
 #include <TouchDrvGT911.hpp>
 #include "board.h"
 #include "perf.h"
@@ -21,17 +22,20 @@ static Arduino_DataBus *bus = expander;
 static esp_lcd_panel_handle_t panel;
 static uint16_t *fb;  // 480x480 RGB565 in PSRAM, panel orientation (= the UI rotated by 180 degrees if HAL_ROT180)
 
-// Scan-out: the GDMA reads the PSRAM framebuffer directly (no bounce buffer). Bounce buffers (an ISR memcpy of
-// the whole 460 KB framebuffer into SRAM every refresh) cost 25-40 % of the LVGL core and 77 KB of RAM, and with
-// our flush on core 0 competing for PSRAM the copy ISR falls behind and the frame desyncs (vertical offset,
-// seen on the panel 2026-10-16); the ISR is also not IRAM-safe in the Arduino sdkconfig.
-// Direct scan-out underruns instead when the CPU saturates PSRAM through the data cache (each cached write
-// line-fills from PSRAM and is written back later): CONFIG_LCD_RGB_RESTART_IN_VSYNC resyncs at the next vsync,
-// which shows as one frame jumped sideways. The flush blit is the main saturating burst (~1 ms per 60-line
-// band), so it is chunked with short pauses that let the LCD DMA refill (HAL_BLIT_ROWS / HAL_BLIT_PAUSE_US),
-// and the vsync/frame-complete callbacks count underruns (perf: lcd_underruns) so this can be measured.
+// Scan-out: the GDMA reads the PSRAM framebuffer directly (no bounce buffer), in refresh-on-demand mode: the
+// DMA stops after each frame and the vsync callback starts the next one from an idle channel. In the driver's
+// default stream mode the descriptor ring runs continuously and CONFIG_LCD_RGB_RESTART_IN_VSYNC (on in the
+// Arduino core) resets and restarts the running channel at every vsync; when that reset lands on a channel with
+// a PSRAM burst in flight the channel stays stuck until the next vsync and the frame is lost (one frame jumped
+// sideways). How often depends on CPU traffic to PSRAM, the idle timing and even the code layout at 32-byte
+// granularity, which is why earlier "fixes" came and went. Refresh on demand measured 0 lost frames under every
+// synthetic load that lost 45-140 frames/min in stream mode (docs/SCANOUT.md, 2026-10-28). -DHAL_STREAM_MODE=1
+// selects stream mode again for comparisons.
+// Bounce buffers (an ISR memcpy of the whole 460 KB framebuffer into SRAM every refresh) also measured 0 but cost
+// 12 % of the LVGL core, a third of the frame rate on busy pages and 77 KB of RAM; -DHAL_BOUNCE_PX=19200 (40 lines)
+// still selects them for experiments. The flush blit is chunked (HAL_BLIT_ROWS / HAL_BLIT_PAUSE_US) and the
+// vsync/frame-complete callbacks count lost frames (perf: lcd_underruns) so all of this can be measured.
 // Tried and rejected: GDMA memcpy into the framebuffer (no cache traffic, but 9 ms per band vs 0.9 ms CPU).
-// -DHAL_BOUNCE_PX=19200 (40 lines) still selects bounce buffers for experiments.
 #ifndef HAL_BOUNCE_PX
 #define HAL_BOUNCE_PX 0
 #endif
@@ -82,6 +86,9 @@ int hal_probe_mode() { return probe_mode; }
 static const uint8_t probe_table[65536] = {1, 2, 3};   // 64 KB of rodata in flash to stream through the cache
 static volatile uint32_t probe_sink;
 extern "C" void Cache_WriteBack_All(void);
+// 1024: execute 32 KB of NOPs from flash on core 0 every 10 ms (instruction-fetch stream, twice the ICache)
+// 2048: 2000 APB register reads (GPIO input register) on core 0 every 10 ms (what an I2C driver does to its FIFO)
+extern "C" void __attribute__((noinline)) probe_icache_fn() { asm volatile(".rept 32768\n nop\n .endr"); }
 // 32: write back the whole data cache every 1 ms (keeps dirty PSRAM lines near zero)
 // 64: PSRAM read-only stream   128: PSRAM write-only stream
 static void probe_task(void *) {
@@ -95,6 +102,8 @@ static void probe_task(void *) {
     // 256: write stream followed by an immediate, bounded writeback of what was written (the blit's discipline)
     if (m & 256) { for (size_t i = 0; i < 65536; i += 32) pa[i] = (uint8_t)i; esp_cache_msync(pa, 65536, ESP_CACHE_MSYNC_FLAG_DIR_C2M); probe_sink = pa[32]; }
     if (m & 32) Cache_WriteBack_All();
+    if (m & 1024) probe_icache_fn();
+    if (m & 2048) { uint32_t acc = 0; for (int i = 0; i < 2000; i++) acc += REG_READ(GPIO_IN_REG); probe_sink = acc; }
     if (!(m & (3 | 64 | 128 | 256))) vTaskDelay(pdMS_TO_TICKS((m & 32) ? 1 : 10));
     else vTaskDelay(1);
   }
@@ -121,7 +130,10 @@ static bool IRAM_ATTR lcd_on_frame_complete(esp_lcd_panel_handle_t, const esp_lc
   return false;
 }
 
-static bool IRAM_ATTR lcd_on_vsync(esp_lcd_panel_handle_t, const esp_lcd_rgb_panel_event_data_t *, void *) {
+static bool IRAM_ATTR lcd_on_vsync(esp_lcd_panel_handle_t p, const esp_lcd_rgb_panel_event_data_t *, void *) {
+#ifndef HAL_STREAM_MODE
+  esp_lcd_rgb_panel_refresh(p);   // start the next frame from an idle channel (see the scan-out note)
+#endif
   lcd_frames++;
   int64_t now = esp_timer_get_time();
   int32_t late = 0;
@@ -198,6 +210,9 @@ static void panel_init() {
   const int data_pins[16] = BOARD_LCD_DATA;  // B0-4 G0-5 R0-4
   for (int i = 0; i < 16; i++) cfg.data_gpio_nums[i] = data_pins[i];
   cfg.flags.fb_in_psram = 1;
+#ifndef HAL_STREAM_MODE
+  cfg.flags.refresh_on_demand = 1;   // see the scan-out note above
+#endif
   ESP_ERROR_CHECK(esp_lcd_new_rgb_panel(&cfg, &panel));
   ESP_ERROR_CHECK(esp_lcd_panel_reset(panel));
   ESP_ERROR_CHECK(esp_lcd_panel_init(panel));
@@ -205,6 +220,9 @@ static void panel_init() {
   cbs.on_vsync = lcd_on_vsync;
   cbs.on_frame_buf_complete = lcd_on_frame_complete;
   esp_lcd_rgb_panel_register_event_callbacks(panel, &cbs, nullptr);
+#ifndef HAL_STREAM_MODE
+  esp_lcd_rgb_panel_refresh(panel);   // the driver starts the first frame by itself only in stream mode
+#endif
   void *p = nullptr;
   ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel, 1, &p));
   fb = (uint16_t *)p;

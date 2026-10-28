@@ -1,6 +1,6 @@
 # Scan-out underruns (the "flicker" on the home screen)
 
-Status as of 2026-10-28 evening: mechanism understood, triggers identified, no root fix yet; a measured-good build is on the device. This page is
+Status as of 2026-10-28, late evening: fixed by switching the scan-out to refresh-on-demand mode (0 lost frames under every load that lost frames before). The record below is in the order the work happened; the conclusion is in "Where this stands". This page is
 the record of what the glitch is, how to measure it, what was tried, and what is known. Short version in
 [PERF.md](PERF.md) under "scan-out-stalls"; the measurement notes of the first round are in [STATUS.md](STATUS.md).
 
@@ -185,21 +185,106 @@ underrun count is comparable.
 A lower pixel clock helps a little, in line with a FIFO-margin model, but does not remove the stalls, and 10 MHz
 already means 35 frames/s. A slower I2C bus changes nothing, so it is the poll's transactions, not their duration.
 
-## Where this stands (2026-10-28, end of day)
+## Instruction fetch versus APB traffic (one binary, pad 0 of a later build, 60 s windows)
 
-- Mechanism: the LCD DMA's PSRAM reads lose a few microseconds to other PSRAM traffic, the FIFO runs dry, the
-  driver drops the frame at the next vsync. PSRAM writes (dirty-line writebacks) are the heavy hitter; a 100 Hz
-  GT911 poll over I2C on core 0 is enough to trigger it on a static screen, at a rate that depends on the code
-  layout at 32-byte granularity. Reads, flash, the blit, the Director's placement and the animation are not it.
-- No root fix yet. The candidates, in order of expected payoff: bounce buffers (the DMA reads internal SRAM, so
-  PSRAM hiccups only delay a CPU copy that has milliseconds of slack; rejected once for CPU cost and page-change
-  flicker, worth a second look with a larger buffer), XIP from PSRAM (`CONFIG_SPIRAM_FETCH_INSTRUCTIONS` and
-  `CONFIG_SPIRAM_RODATA`, needs an ESP-IDF build with the Arduino component instead of the precompiled core), a
-  slower idle poll (fewer triggers, not zero), and understanding why an I2C transaction perturbs PSRAM at all.
-- Device as left: the probe build at `LAYOUT_PAD=0` (main plus the probe hooks, all switches at their defaults),
-  which measured 0 underruns in 120 s. Any rebuild is a new draw; measure before trusting it.
-- Probe tooling to keep or strip: `dev_touch` / `dev_probe` events, `LAYOUT_PAD`, the `fc_core` / `vs_core` /
-  `late_eof` / `poll` / `pmode` perf fields, the matrix script in the session scratchpad.
+| State | Underruns / 60 s |
+|---|---|
+| baseline, poll on (three windows) | 6, 21, 14 |
+| poll off | 14 |
+| poll off + core 0 executes 32 KB of NOPs from flash every 10 ms (instruction stream, twice the ICache) | 0, 0 |
+| poll off + core 0 reads a GPIO register 2000 times every 10 ms (APB traffic, 2 % duty) | 10, 13 |
+
+In this layout the stalls happen with the poll off as well, so the poll is one trigger among several and not the
+mechanism. The striking result repeats the earlier one: any sustained cache-miss stream on core 0, be it
+instruction fetch from flash, data reads from flash or data reads from PSRAM, takes the rate to 0, while a
+busy-spinning core 1 makes it worse. APB traffic does nothing. Within one binary and one setting the rate moved
+between 6 and 21, so single windows are noisy; the fix commit's build re-measured 0, 0 right after this run,
+which rules out a slow drift such as temperature (the chip temperature is now in the perf report as `temp_c`).
+
+Reading of the evidence: a `999` frame never shows a partial stall, so the DMA is not merely slowed, it stops for
+the rest of the frame. With `CONFIG_LCD_RGB_RESTART_IN_VSYNC` the driver resets and restarts the GDMA channel at
+every vsync while, in stream mode, that channel is already running the next frame's descriptors and may have a
+PSRAM burst outstanding through the cache. A reset that lands on an in-flight burst is the kind of thing that
+leaves a channel stuck until the next reset, and whether the burst is in flight at that instant is a timing
+question that code layout and idle behaviour can plausibly shift. Refresh-on-demand mode avoids this: the DMA
+stops after each frame and is started from an idle channel. Tested below.
+
+## Refresh on demand (`-DREFRESH_ON_DEMAND=1`)
+
+`cfg.flags.refresh_on_demand = 1`, one `esp_lcd_rgb_panel_refresh()` after panel init (the driver starts the
+first frame only in stream mode: a first attempt without it measured a panel that never scanned, frame count 0,
+and those "results" are discarded), and `esp_lcd_rgb_panel_refresh()` from the vsync callback to start each next
+frame. Frame rate unchanged at 42.3 frames/s (2536 per 60 s window). Two layouts, 60 s windows:
+
+| Load | Underruns / 60 s, pad 0 | pad 224 |
+|---|---|---|
+| none, poll on (twice) | 0, 0 | 0, 0 |
+| none, poll off | 0 | 0 |
+| PSRAM write stream (140 in stream mode) | 0 | 0 |
+| PSRAM memcpy (45 in stream mode) | 0 | 0 |
+| main loop busy-spinning (24 in stream mode) | 0 | 0 |
+
+The two boot-time `999`s disappear as well. The probe's stall and vsync-lateness columns are not meaningful in
+this mode: starting each frame from the vsync interrupt adds about 30 µs of period jitter that the probe's
+running reference cannot follow (70 % of frames show "stalls" of 25 to 40 µs with an equal and opposite vsync
+lateness).
+
+This is the first configuration that survives every synthetic load with zero drops, at no memory or CPU cost on
+the quiet room. What it says about the mechanism: the frame drops were caused by the driver's unconditional
+reset-and-restart of a running DMA channel at every vsync (`CONFIG_LCD_RGB_RESTART_IN_VSYNC`, on in the Arduino
+core), which in stream mode lands on a channel already prefetching the next frame; when that reset coincides with
+an outstanding PSRAM burst, the channel stays stuck until the next vsync and the frame is lost. Any CPU traffic to
+PSRAM raises the odds (hence the write-stream numbers), and the exact timing of idle code and interrupts decides
+the rest (hence the layout lottery and the touch poll). Still to check with eyes on the panel: the restart
+re-emits a vsync pulse at the frame boundary, which a panel driven in DE mode should ignore.
+
+## Bounce buffers (`-DHAL_BOUNCE_PX=19200`, 40 lines, two 38 KB buffers in internal SRAM)
+
+The DMA reads internal SRAM; an interrupt on the LVGL core copies the next 40 lines from the PSRAM framebuffer
+into the other buffer. Same probe, 60 s windows, pad 0.
+
+| Load | Underruns / 60 s |
+|---|---|
+| none, poll on (twice) | 0, 0 |
+| PSRAM write stream (140 in direct mode) | 0 |
+| PSRAM memcpy (45 in direct mode) | 0 |
+| demo stream with page cycling, 60 s | 0 |
+
+Costs on the page-cycling demo: CPU 42 → 55 %, LVGL 33 → 24 frames/s, worst frame 197 ms, internal heap
+158 → 75 KB free. The vsync interrupt now arrives more than 10 µs late 250 to 740 times a minute (up to 0.9 ms
+under the write stream) because the 38 KB fill copy runs in interrupt context on the same core; the probe's
+stall figures are not meaningful in this mode. What the probe cannot see is whether a slow fill ever lets the DMA
+read a half-filled buffer (the "vertical offset and flicker on page changes" that got bounce buffers rejected
+earlier); that needs eyes on the panel under load. Robust against the measured mechanism; expensive.
+
+## Touch interrupt wiring
+
+The GT911's INT pin (`TP_INT`) ends on the TCA9554 expander (EXIO6), and the expander's own INT output goes to a
+resistor with no net to any ESP32 pin (schematic: U9 pin 13 → R41). Interrupt-driven touch is not possible on
+this board: the I2C poll stays, and the question becomes why a poll disturbs the LCD DMA at all.
+
+## Where this stands (2026-10-28, late evening)
+
+- **Fix: refresh-on-demand scan-out**, now the default in `firmware/src/core/hal.cpp` (`-DHAL_STREAM_MODE=1`
+  restores the driver's stream mode for comparisons). The DMA stops after each frame and the vsync callback starts
+  the next one from an idle channel, so the driver's reset of a running channel never happens.
+- **Evidence**: 0 lost frames in every window on every layout tried, under the synthetic loads that lost 45 to 140
+  frames a minute in stream mode, through a 10 minute quiet soak (25,338 frames, 0 lost) and through the
+  page-cycling demo stream. Frame rate unchanged at 42.3 frames/s.
+- **Cost**: page-cycling demo 28.8 LVGL frames/s and 45 % CPU against 33.5 and 42 % in stream mode on a different
+  build (re-measure before reading much into it); no memory cost.
+- **Mechanism, as far as it is established**: with `CONFIG_LCD_RGB_RESTART_IN_VSYNC` the driver resets and restarts
+  the GDMA channel at every vsync. In stream mode that channel is already running the next frame's descriptors
+  and can have a PSRAM burst outstanding through the cache; a reset at that instant leaves it stuck until the next
+  vsync and the frame is lost. CPU writes to PSRAM raise the odds, idle timing and code layout shift them, which
+  is why the GT911 poll, the Director's placement and 32-byte padding all appeared to matter.
+- **To verify with eyes on the panel**: the restart re-emits a vsync pulse at the frame boundary. The panel runs in
+  DE mode and should ignore it; look for any artefact at the top edge or a brightness beat.
+- **Not needed after all**: bounce buffers, XIP from PSRAM, a slower poll, moving state between RAMs.
+- **Probe tooling kept**: `dev_touch` / `dev_probe` events (poll, synthetic loads, Director placement, animation
+  pause, pixel clock, I2C speed, poll period), `LAYOUT_PAD`, the extra perf fields including `temp_c`. In
+  on-demand mode only `lcd_underruns` (and `lcd_frames`) are meaningful; the stall and vsync-lateness columns
+  read the restart jitter.
 
 ## What Espressif says
 
