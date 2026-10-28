@@ -39,3 +39,4 @@ void home_face_resume();            // call when becoming visible
 void home_face_debug(const char *task, int frame, int helpers, bool grey);
 void home_face_debug_mirror(int m);     // QA: 0/1 overrides Settings.home_mirror, -1 follows it
 void home_face_status(char *buf, size_t n);   // JSON object: current activity, task, pacing (perf report)
+void home_face_probe_dirloc(bool internal);   // PROBE

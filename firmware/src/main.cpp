@@ -25,5 +25,6 @@ void loop() {
   { PerfScope p(PERF_LVGL); idle_ms = lv_timer_handler(); }
   perf_loop(perf_now_us() - t0);
   // Sleep until the next LVGL timer is due (capped so serial input is still drained every few ms).
-  delay(constrain(idle_ms, 1, 5));
+  if (hal_probe_mode() & 16) esp_rom_delay_us(constrain(idle_ms, 1, 5) * 1000);   // PROBE: busy idle
+  else delay(constrain(idle_ms, 1, 5));
 }
