@@ -71,6 +71,15 @@ class FakeApp:
     def set_port(self, device):
         self.calls.append(("port", device))
 
+    def check_updates(self):
+        self.calls.append(("check_updates",))
+
+    def update_app(self):
+        self.calls.append(("update_app",))
+
+    def set_update_check(self, on):
+        self.calls.append(("update_check", on))
+
 
 def pixels(img):
     b = img.convert("RGBA").tobytes()
@@ -142,7 +151,8 @@ class MenuModelTest(unittest.TestCase):
     def test_no_device(self):
         items = appmod.build_menu(STATES["no_device"], FakeApp())
         self.assertEqual(labels(items), ["Device: not found", "Sessions: none", "---", "Flash firmware…",
-                                         "Device port", "Start at login", "Install Claude Code hooks", "Open log",
+                                         "Device port", "---", "Check for app updates…", "Check for updates daily",
+                                         "Start at login", "Install Claude Code hooks", "Open log",
                                          "Open claude.ai usage", "---", "Quit"])
         self.assertFalse(items[0].enabled)
         fl = find(items, "Flash firmware…")
@@ -223,6 +233,30 @@ class MenuModelTest(unittest.TestCase):
         sub = find(appmod.build_menu(st, app), "Device port")
         self.assertEqual(sub.label, "Device port: /dev/ttyACM2")
         self.assertEqual([c.checked for c in sub.children if not c.separator], [False, False, True, False])
+
+    def test_app_update_entries(self):
+        """No newer release: "Check for app updates…"; one known: "Update app to X…", orange badge, tooltip line;
+        while downloading: a progress line. The daily-check toggle follows the setting."""
+        app = FakeApp()
+        st = dict(STATES["up_to_date"], update_check=True)
+        items = appmod.build_menu(st, app)
+        find(items, "Check for app updates…").action()
+        self.assertEqual(app.calls[-1], ("check_updates",))
+        daily = find(items, "Check for updates daily")
+        self.assertTrue(daily.checked)
+        daily.action()
+        self.assertEqual(app.calls[-1], ("update_check", False))
+        self.assertEqual(appmod.tray_state(st), "ok")
+        st["app_update"] = {"version": "0.5.0", "url": "https://github.com/d-weber/claudius-maximus/releases"}
+        items = appmod.build_menu(st, app)
+        find(items, "Update app to 0.5.0…").action()
+        self.assertEqual(app.calls[-1], ("update_app",))
+        self.assertEqual(appmod.tray_state(st), "update")
+        self.assertIn("App update available: 0.5.0", appmod.tooltip_lines(st))
+        st["app_update_state"] = {"active": True, "pct": 42}
+        items = appmod.build_menu(st, app)
+        self.assertFalse(find(items, "Updating the app… 42%").enabled)
+        self.assertNotIn("Update app to 0.5.0…", labels(items))
 
     def test_device_line_several_boards(self):
         two = [NATIVE, dict(NATIVE, device="/dev/ttyACM2")]
@@ -309,6 +343,41 @@ class AppTest(unittest.TestCase):
         self.assertEqual(events, ["resume"])
         self.assertEqual(backend.notify.call_args_list[-1].args, ("Flashing failed", "No board on USB"))
         self.assertEqual(appmod.tray_state({"flash": app.flash_state}), "error")
+
+    def test_check_updates_worker(self):
+        from companion import updater
+        backend = mock.Mock()
+        app = appmod.App(types.SimpleNamespace(no_setup=True), backend=backend, start_daemon=False)
+        app.refresh_soon = lambda: None
+        newer = updater.Release(version="9.9.0", tag="v9.9.0", url="https://x/rel")
+        with mock.patch.object(updater, "check", return_value=newer):
+            app._check_updates_worker(manual=False)
+        self.assertIs(app.update_release, newer)
+        self.assertEqual(backend.notify.call_args.args[0], "App update available")
+        self.assertIn("9.9.0", backend.notify.call_args.args[1])
+        self.assertEqual(appmod.settings_get(updater.SETTING_NOTIFIED), "9.9.0")
+        self.assertFalse(updater.auto_check_due())             # just checked
+        with mock.patch.object(updater, "check", return_value=newer):
+            app._check_updates_worker(manual=False)           # same version: told once only
+        self.assertEqual(backend.notify.call_count, 1)
+        same = updater.Release(version=updater.current_version(), tag="v", url="")
+        with mock.patch.object(updater, "check", return_value=same):
+            app._check_updates_worker(manual=True)
+        self.assertIsNone(app.update_release)
+        self.assertIn("latest version", backend.notify.call_args.args[1])
+        with mock.patch.object(updater, "check", side_effect=updater.UpdateError("offline")):
+            app._check_updates_worker(manual=True)
+        self.assertEqual(backend.notify.call_args.args[1], "Could not check: offline")
+        self.assertFalse(updater.auto_check_due())            # retried after an hour, not now
+        self.assertTrue(updater.auto_check_due(time.time() + updater.RETRY_AFTER_ERROR_S + 1))
+        # a source checkout cannot self-install: the Releases page is opened instead
+        app.update_release = newer
+        opened = []
+        with mock.patch.object(appmod, "open_path", lambda t: opened.append(t)):
+            app._update_worker(newer)
+        self.assertEqual(opened, ["https://x/rel"])
+        self.assertIn("Cannot update this copy by itself", backend.notify.call_args.args[1])
+        self.assertFalse(app.update_state["active"])
 
     def test_set_port_via_daemon_or_settings(self):
         backend = mock.Mock()

@@ -10,7 +10,9 @@ want to stop alt-tabbing to check on them.
 </p>
 
 Nothing leaves your machine: a small daemon reads Claude Code's local data and talks to the device over the USB
-cable. There is no cloud, no account and no network access.
+cable. There is no cloud and no account. The only network access is a once-a-day look at this repository's
+[Releases page](https://github.com/d-weber/claudius-maximus/releases) for a newer app version (public release
+metadata, nothing about you); turn it off with **Check for updates daily** in the menu.
 
 ## What you see
 
@@ -74,6 +76,11 @@ Then:
 The tray icon's badge tells you the state at a glance: grey means no device, green connected, orange flashing
 or update available, red error. The menu shows the device, your sessions and plan limits, and lets you reflash,
 pick the USB port, toggle start at login or open the log.
+
+**Updates.** When a newer app is on the Releases page the badge turns orange and the menu offers **Update app to
+X…**: it downloads the build for your OS, installs it the way you installed it (new AppImage next to the old one,
+the Windows installer silently, the .app replaced in Applications) and restarts. **Check for app updates…** asks
+right away; `claudius-maximus update` does the same from a terminal (`update --install` installs).
 
 **Several ESP32 boards on your USB?** The app asks each ESP32-S3 port for a hello and uses the one that answers
 as Claudius Maximus. A board that does not answer (blank, or running another project) is never picked by itself:

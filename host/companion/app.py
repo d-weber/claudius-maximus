@@ -36,6 +36,7 @@ SLOW_REFRESH_S = 10.0         # autostart / hooks checks touch files: not every 
 DAEMON_RETRY_S = 10.0         # observer mode: how often to try to take over the daemon lock
 FLASH_ERROR_SHOW_S = 300.0    # a failed flash keeps the badge red this long
 QUIT_FLASH_WAIT_S = 180.0     # Quit during a flash waits for esptool to finish (a half-written app won't boot)
+UPDATE_CHECK_SLOW_S = 60.0    # how often status() looks whether the daily release check is due
 BOARD_LABELS = {"4b": "4B"}
 DEFAULT_BOARD = "4b"
 APP_TITLE = "Claudius Maximus"
@@ -320,6 +321,9 @@ def tooltip_lines(st: dict, now: float | None = None) -> list[str]:
     upd = st.get("update")
     if isinstance(upd, (list, tuple)) and upd and upd[0] and not (st.get("flash") or {}).get("active"):
         lines.append(f"Firmware update available ({upd[1].replace('->', '→')})")
+    au = st.get("app_update")
+    if isinstance(au, dict) and au.get("version"):
+        lines.append(f"App update available: {au['version']}")
     if st.get("observer"):
         lines.append("Another daemon owns the device (status only)")
     elif st.get("connected") is False and any(p.get("kind") == "uart" for p in st.get("ports") or []) \
@@ -338,6 +342,9 @@ def tray_state(st: dict) -> str:
     if st.get("daemon_error") or (fl.get("error") and time.time() - fl.get("error_at", 0) < FLASH_ERROR_SHOW_S):
         return "error"
     upd = st.get("update")
+    au = st.get("app_update")
+    if isinstance(au, dict) and au.get("version"):
+        return "update"
     if st.get("connected") and st.get("fw"):
         return "update" if isinstance(upd, (list, tuple)) and upd and upd[0] else "ok"
     if st.get("connected") or st.get("install_needed"):
@@ -396,6 +403,17 @@ def build_menu(st: dict, app) -> list:
         items.append(MenuItem("Flash firmware…", action=lambda: app.flash(b), enabled=ok))
 
     items.append(port_menu(st, app))
+    items.append(MenuItem.sep())
+    up = st.get("app_update_state") or {}
+    au = st.get("app_update") if isinstance(st.get("app_update"), dict) else None
+    if up.get("active"):
+        items.append(MenuItem(f"Updating the app… {up.get('pct', 0)}%", enabled=False))
+    elif au and au.get("version"):
+        items.append(MenuItem(f"Update app to {au['version']}…", action=app.update_app))
+    else:
+        items.append(MenuItem("Check for app updates…", action=app.check_updates))
+    items.append(MenuItem("Check for updates daily", action=lambda: app.set_update_check(not st.get("update_check")),
+                          checked=bool(st.get("update_check"))))
     items.append(MenuItem("Start at login", action=lambda: app.set_autostart(not st.get("autostart")),
                           checked=bool(st.get("autostart"))))
     if st.get("hooks_installed"):
@@ -430,6 +448,11 @@ class App:
         self._slow: dict = {}
         self._slow_at = 0.0
         self._nohello_since: float | None = None
+        self.update_release = None           # updater.Release newer than us, once a check found one
+        self.update_state: dict = {"active": False, "pct": 0, "msg": "", "error": ""}
+        self._update_lock = threading.Lock()
+        self._update_checking = False
+        self._update_check_at = 0.0
         self.board = settings_get("board", DEFAULT_BOARD) or DEFAULT_BOARD
         if start_daemon:
             self._start_daemon()
@@ -552,9 +575,16 @@ class App:
         st["install_needed"] = bool(self._nohello_since and now - self._nohello_since >= NO_HELLO_INSTALL_S)
         if now - self._slow_at > SLOW_REFRESH_S:
             self._slow_at = now
-            self._slow = {"autostart": self.autostart(), "hooks_installed": self.hooks_installed()}
+            self._slow = {"autostart": self.autostart(), "hooks_installed": self.hooks_installed(),
+                          "update_check": self.update_check_enabled()}
         st.update(self._slow)
         st["flash"] = dict(self.flash_state)
+        rel = self.update_release
+        st["app_update"] = {"version": rel.version, "url": rel.url} if rel is not None else None
+        st["app_update_state"] = dict(self.update_state)
+        if now - self._update_check_at > UPDATE_CHECK_SLOW_S:
+            self._update_check_at = now
+            self._maybe_check_updates()
         st["board_choice"] = self.board
         if self.daemon_error:
             st["daemon_error"] = self.daemon_error
@@ -577,6 +607,7 @@ class App:
         """During flashing: re-render from the last status with the new progress (no port enumeration)."""
         st = dict(self._last_status)
         st["flash"] = dict(self.flash_state)
+        st["app_update_state"] = dict(self.update_state)
         st["tray_state"] = tray_state(st)
         _guard("tray refresh", self.refresh, st)
 
@@ -694,6 +725,115 @@ class App:
         self._next_daemon_try = 0.0   # enable() may have stopped the old daemon: try to take over now
         self.refresh_soon()
         return result
+
+    # -- app updates -----------------------------------------------------------------------------
+    def update_check_enabled(self) -> bool:
+        try:
+            from . import updater
+            return updater.auto_enabled()
+        except Exception as e:
+            _warn_once("updater", f"updater unavailable: {e}")
+            return False
+
+    def set_update_check(self, on: bool):
+        try:
+            from . import updater
+            msg = updater.set_auto(on)
+        except Exception as e:
+            self.notify("App updates", f"Could not change it: {e}")
+            return False
+        self._slow_at = 0
+        self.notify("App updates", msg[0].upper() + msg[1:])
+        self.refresh_soon()
+        return True
+
+    def _maybe_check_updates(self):
+        """status(): start the daily check when it is due (off the tray thread; network)."""
+        try:
+            from . import updater
+            due = updater.auto_check_due()
+        except Exception as e:
+            _warn_once("updater", f"updater unavailable: {e}")
+            return
+        if due:
+            self.check_updates(manual=False)
+
+    def check_updates(self, manual: bool = True):
+        with self._update_lock:
+            if self._update_checking:
+                return
+            self._update_checking = True
+        threading.Thread(target=self._check_updates_worker, args=(manual,), name="update-check", daemon=True).start()
+
+    def _check_updates_worker(self, manual: bool):
+        try:
+            from . import updater
+            try:
+                rel = updater.check()
+            except updater.UpdateError as e:
+                updater.mark_checked(False)
+                log.info("update check failed: %s", e)
+                if manual:
+                    self.notify("App updates", f"Could not check: {e}")
+                return
+            updater.mark_checked(True)
+            newer = updater.is_newer(rel.version)
+            self.update_release = rel if newer else None
+            if newer:
+                if manual or settings_get(updater.SETTING_NOTIFIED) != rel.version:
+                    settings_set(updater.SETTING_NOTIFIED, rel.version)
+                    self.notify("App update available",
+                                f"Claudius Maximus {rel.version} is out (you run {updater.current_version()}). "
+                                "Update from the tray menu.")
+            elif manual:
+                self.notify("App updates", f"You run the latest version ({updater.current_version()}).")
+        except Exception as e:
+            log.warning("update check crashed: %s", e)
+        finally:
+            self._update_checking = False
+            self.refresh_soon()
+
+    def update_app(self):
+        rel = self.update_release
+        if rel is None:
+            self.notify("App updates", "No newer version known; check first.")
+            return
+        with self._update_lock:
+            if self.update_state["active"]:
+                return
+            self.update_state = {"active": True, "pct": 0, "msg": "starting", "error": ""}
+        threading.Thread(target=self._update_worker, args=(rel,), name="update", daemon=True).start()
+
+    def _update_worker(self, rel):
+        from . import updater
+        try:
+            why = updater.can_self_install()
+            if why:
+                self.notify("App update", f"Cannot update this copy by itself: {why}. Opening the Releases page.")
+                _guard("open releases", open_path, rel.url)
+                return
+            last = [-1]
+
+            def progress(pct, msg=""):
+                self.update_state.update(pct=int(pct), msg=str(msg)[:60])
+                if int(pct) != last[0]:
+                    last[0] = int(pct)
+                    self._refresh_cached()
+            self.notify("App update", f"Downloading Claudius Maximus {rel.version}…")
+            path = updater.fetch(rel, progress)
+            progress(99, "Installing")
+            msg = updater.install(path, rel.version)
+            self.update_state = {"active": False, "pct": 100, "msg": "", "error": ""}
+            self.notify("App update", msg[0].upper() + msg[1:])
+            threading.Thread(target=self.quit, name="quit-for-update", daemon=True).start()
+        except Exception as e:
+            log.exception("app update failed")
+            self.update_state = {"active": False, "pct": 0, "msg": "", "error": str(e)}
+            self.notify("App update failed", str(e) or type(e).__name__)
+        finally:
+            if self.update_state.get("active"):
+                self.update_state["active"] = False
+            _guard("tray refresh", self.refresh)
 
     def set_port(self, device: str | None, notify: bool = True):
         """Tray menu: use this port (None = automatic). Through the daemon when we run it (it reconnects), else

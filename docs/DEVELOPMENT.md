@@ -96,6 +96,7 @@ Python (`cd host && .venv/bin/python -m companion status`); there, no command me
 | `detect` | serial ports (native / uart / other), link port, bundled firmware; marks the port a running daemon identified as ours |
 | `port [NAME\|auto]` | which USB serial port is the board. No argument lists the ports with the choice and what the daemon knows about each; `NAME` stores a choice (settings.json `port` + `port_serial`, matched by USB serial first), `auto` clears it. The running daemon follows within a few seconds and flashes that port too |
 | `flash [--port P] [--erase]` | flash the bundled firmware through `--port`, else the chosen port, else the only board found (several boards without a choice: refuses); asks a running daemon to release the port first, prints progress on stderr, exits 0 or 1 |
+| `update [--install]`, `update auto on\|off` | compare with the latest GitHub release (exit 0 up to date, 3 newer available, 1 error); `--install` downloads the build for this OS, stops a running app and installs it (`companion/updater.py`; frozen builds only: a checkout says to `git pull`); `auto` toggles the daily check (settings.json `update_check`) |
 | `hooks install\|uninstall\|check [--no-statusline]` | the Claude Code hooks and statusLine wrapper in `settings.json` |
 | `autostart enable\|disable\|status` | start the tray app at login |
 | `hook`, `statusline` | what Claude Code runs (reads the hook JSON on stdin; not for manual use) |

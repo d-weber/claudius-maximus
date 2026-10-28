@@ -228,7 +228,11 @@ the cable to USB-OTG` / `Device: 2 boards on USB, choose the port below` / `Devi
 answers)` / one check entry per USB serial port (`/dev/ttyACM0 · ESP32-S3 · Claudius Maximus fw 0.4.1`), see
 `companion/ports.py`: with several ESP32-S3 boards the daemon probes each for a hello and takes the one that
 answers, a board that answers nothing has to be chosen here (settings.json `port` / `port_serial`), and the
-flasher uses the daemon's port; `Start at login` (check);
+flasher uses the daemon's port; separator; `Check for app updates…` / `Update app to 0.5.0…` / `Updating the app…
+N%` and `Check for updates daily` (check; `companion/updater.py`: one GET of the latest-release metadata a day,
+a newer version gives an orange badge and one notification, installing is always a click: new AppImage next to
+the running one with hooks and autostart re-pointed, silent Inno Setup run, or .app swap in Applications, then the
+app quits and the new one takes the daemon lock); `Start at login` (check);
 `Claude Code hooks: installed` / `Install Claude Code hooks`; `Open log`; `Open claude.ai usage`; separator;
 `Quit`.
 

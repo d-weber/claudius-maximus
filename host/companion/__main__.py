@@ -9,6 +9,7 @@
     hook | statusline            what Claude Code runs (fast path: companion/hookclient.py, nothing else)
     autostart enable|disable|status
     port [NAME|auto]             which USB port is the board (several ESP32-S3 plugged in)
+    update [--install] [auto on|off]   check the GitHub Releases page for a newer app (and install it)
     hooks install|uninstall|check [--no-statusline]
 
 Backward compatible: no command, or only options (`python -m companion --demo`), means `run`.
@@ -16,7 +17,8 @@ Backward compatible: no command, or only options (`python -m companion --demo`),
 import os
 import sys
 
-COMMANDS = ("run", "status", "focus", "app", "detect", "flash", "hook", "statusline", "autostart", "hooks", "port")
+COMMANDS = ("run", "status", "focus", "app", "detect", "flash", "hook", "statusline", "autostart", "hooks", "port",
+            "update")
 
 
 def _default_log():
@@ -178,6 +180,68 @@ def cmd_port(name: str | None) -> int:
     return 0
 
 
+def cmd_update(install: bool, auto: str | None) -> int:
+    """`update`: compare with the latest GitHub release (exit 0 up to date, 3 when newer exists, 1 on error);
+    `--install`: download and install it, stopping a running app first; `update auto on|off`: the daily check."""
+    from . import updater
+    if auto:
+        print(updater.set_auto(auto == "on"))
+        return 0
+    try:
+        rel = updater.check()
+    except updater.UpdateError as e:
+        print(f"update check failed: {e}", file=sys.stderr)
+        return 1
+    cur = updater.current_version()
+    if not updater.is_newer(rel.version, cur):
+        print(f"up to date: {cur} (latest release {rel.version})")
+        return 0
+    print(f"update available: {rel.version} (you run {cur})  {rel.url}")
+    if not install:
+        why = updater.can_self_install()
+        print(f"run `update --install` to install it" if not why else f"cannot self-install: {why}")
+        return 3
+    why = updater.can_self_install()
+    if why:
+        print(f"cannot self-install: {why}", file=sys.stderr)
+        return 2
+
+    def progress(pct, msg):
+        print(f"\r[{pct:3d}%] {msg[:70]:70}", end="", file=sys.stderr, flush=True)
+    try:
+        path = updater.fetch(rel, progress)
+        print(file=sys.stderr)
+        # a running tray app must let go (Linux/macOS: ask it to quit; the Windows installer closes it itself)
+        _stop_running_app()
+        print(updater.install(path, rel.version))
+    except updater.UpdateError as e:
+        print(f"\nupdate failed: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _stop_running_app() -> None:
+    import json
+    import signal
+    import time
+    from .daemon import status_path
+    try:
+        with open(status_path()) as f:
+            pid = json.load(f).get("pid")
+    except (OSError, ValueError):
+        return
+    if not pid or pid == os.getpid() or not _pid_alive(pid) or sys.platform == "win32":
+        return
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+    except OSError:
+        return
+    for _ in range(40):
+        if not _pid_alive(pid):
+            break
+        time.sleep(0.25)
+
+
 def cmd_detect() -> int:
     from . import flasher
     from .ports import selection
@@ -300,6 +364,9 @@ def build_parser():
     p.add_argument("action", choices=["enable", "disable", "status"], nargs="?", default="status")
     p = sub.add_parser("port", help="which USB serial port is the board (list, or choose NAME / auto)")
     p.add_argument("name", nargs="?", default=None, metavar="NAME|auto")
+    p = sub.add_parser("update", help="check the GitHub Releases page for a newer app")
+    p.add_argument("--install", action="store_true", help="download and install it")
+    p.add_argument("auto", nargs="*", help="`auto on` / `auto off`: the daily check")
     p = sub.add_parser("hooks", help="Claude Code hooks in ~/.claude/settings.json")
     p.add_argument("action", choices=["install", "uninstall", "check"], nargs="?", default="check")
     p.add_argument("--no-statusline", action="store_true")
@@ -334,6 +401,15 @@ def main(argv=None) -> int:
         return cmd_hooks(a.action, not a.no_statusline)
     if a.command == "port":
         return cmd_port(a.name)
+    if a.command == "update":
+        setup_logging(False, None)
+        auto = None
+        if a.auto:
+            if len(a.auto) != 2 or a.auto[0] != "auto" or a.auto[1] not in ("on", "off"):
+                print("usage: update [--install] | update auto on|off", file=sys.stderr)
+                return 2
+            auto = a.auto[1]
+        return cmd_update(a.install, auto)
     if a.command == "focus":
         setup_logging(a.verbose, None)
         from .runtime_focus import focus_session
