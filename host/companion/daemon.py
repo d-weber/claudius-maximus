@@ -3,7 +3,7 @@
 Robustness rules:
   * never crash on provider / device errors (everything is caught and logged, throttled);
   * the serial port is opened only while holding <root>/.devlock (shared with tools/dev.py). While
-    connected the daemon periodically yields the lock for a moment (YIELD_EVERY_S) so dev tools waiting
+    connected the daemon periodically yields the lock for a moment (YIELD_EVERY_S, source checkouts only) so dev tools waiting
     on it get a turn; if someone takes it we back off and retry every few seconds;
   * the device is (re)detected every 2 s: unplug/replug/reflash just reconnects; the full state is re-sent
     on every (re)connect and whenever the device says `hello`;
@@ -120,7 +120,10 @@ MINOR_KEYS = frozenset(("tokens", "cost", "ctx_pct", "tool_count", "tokens_today
 META_KEYS = ("t", "ts", "tz", "part")
 RETRY_NO_DEVICE_S = 2.0
 RETRY_LOCKED_S = 3.0
-YIELD_EVERY_S = float(os.environ.get("CLAUDIUS_YIELD_S", "20"))  # 0 = never yield the device lock
+# Yield the shared device lock every so often so tools/dev.py gets a turn. Only meaningful in a source checkout,
+# where both use <repo>/.devlock; a frozen app locks in the state dir, which dev tools never look at, so there
+# the yield would only cost a port reopen and a full resend every 20 s. 0 = never yield.
+YIELD_EVERY_S = float(os.environ.get("CLAUDIUS_YIELD_S", "0" if hostos.is_frozen() else "20"))
 YIELD_FOR_S = 1.2
 DEDUPE_S = 5.0
 STATUS_EVERY_S = 5.0
@@ -451,6 +454,7 @@ class Daemon:
         self.last_tick = 0.0
         self.next_connect = 0.0
         self.yield_at = 0.0
+        self.yielded = False        # port closed by us to yield the lock: the reconnect and its hello log at DEBUG
         self.fw = None
         self.last_hello = 0
         self.board = None           # BOARD_NAME from the device hello
@@ -486,6 +490,7 @@ class Daemon:
     def _on_disconnect(self, why: str):
         self._notify_providers({"t": "disconnected"})
         log.info("device disconnected (%s)", why or "?")
+        self.yielded = False
         self.next_connect = time.time() + RETRY_NO_DEVICE_S
         self.next_status = 0
 
@@ -498,6 +503,7 @@ class Daemon:
                 self.link.close()
                 log.debug("dev tool wants the device: stepping aside")
                 self._notify_providers({"t": "disconnected"})
+                self.yielded = False
             self.next_connect = now + 1.0
             return
         if self.link.connected:
@@ -505,12 +511,14 @@ class Daemon:
             if YIELD_EVERY_S > 0 and now >= self.yield_at:
                 self.link.close()
                 log.debug("yielding device lock")
+                self.yielded = True
                 self.next_connect = now + YIELD_FOR_S
             return
         if now < self.next_connect:
             return
         if self.link.connect():
-            log.info("device connected on %s", self.link.port)
+            # a reconnect after our own yield is routine (every YIELD_EVERY_S): keep it out of the INFO log
+            (log.debug if self.yielded else log.info)("device connected on %s", self.link.port)
             self.yield_at = now + YIELD_EVERY_S
             self.last_body = None  # force full state
             self.dev_caps, self.dev_screen = set(), None   # until the device's hello says otherwise
@@ -532,13 +540,15 @@ class Daemon:
     def handle_device(self, msg: dict):
         t = msg.get("t")
         if t == "hello":
+            same = self.yielded and msg.get("fw") == self.fw and (msg.get("board") or self.board) == self.board
+            self.yielded = False
             self.fw = msg.get("fw")
             self.board = msg.get("board") or self.board
             self.last_hello = int(time.time())
             caps = msg.get("caps")
             self.dev_caps = {str(c) for c in caps} if isinstance(caps, list) else set()
             self.dev_screen = msg.get("screen") if "screen" in self.dev_caps else None
-            log.info("device hello fw=%s", self.fw)
+            (log.debug if same else log.info)("device hello fw=%s", self.fw)
             self.last_body = None  # re-send full state on next tick
         elif t == "screen":
             prev, self.dev_screen = self.dev_screen, msg.get("id")

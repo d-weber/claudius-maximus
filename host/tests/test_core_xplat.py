@@ -660,6 +660,49 @@ class DaemonApiTest(TempHome):
             self.assertEqual(d.public_status()["device_error"], "")
             d.resume_device()  # no-op when not paused
 
+    def test_yield_reconnect_is_quiet(self):
+        """The periodic lock yield (YIELD_EVERY_S) closes and reopens the port on purpose: that reconnect and the
+        hello it provokes must not land in the INFO log (they filled it with two lines every 22 s)."""
+        d = self.make(dry_run=False)
+        fake = d.link = FakeLink()
+        hello = {"t": "hello", "fw": "0.4.0", "board": "ESP32-S3-Touch-LCD-4B", "caps": ["part", "screen"]}
+        t = time.time()
+        with mock.patch.object(daemon_mod, "dev_wants_device", return_value=False), \
+                mock.patch.object(daemon_mod, "YIELD_EVERY_S", 20.0):
+            with self.assertLogs("companion", level="INFO") as first:
+                d.ensure_connected(t)
+                d.handle_device(hello)
+            self.assertEqual([r.getMessage() for r in first.records],
+                             ["device connected on /dev/fake0", "device hello fw=0.4.0"])
+            with self.assertLogs("companion", level="DEBUG") as cycle:
+                d.ensure_connected(t + 21)            # yields: port closed
+                self.assertFalse(fake.connected)
+                d.ensure_connected(t + 21.5)          # still in the YIELD_FOR_S gap
+                self.assertFalse(fake.connected)
+                d.ensure_connected(t + 23)            # reconnects
+                self.assertTrue(fake.connected)
+                self.assertEqual(fake.connects, 2)
+                d.handle_device(hello)                # same firmware says hello again
+            self.assertEqual([r.levelname for r in cycle.records], ["DEBUG"] * len(cycle.records))
+            self.assertIn("device connected on /dev/fake0", [r.getMessage() for r in cycle.records])
+            self.assertIn("device hello fw=0.4.0", [r.getMessage() for r in cycle.records])
+            self.assertEqual(d.fw, "0.4.0")
+            # a different firmware after a yield (someone reflashed meanwhile) is news: INFO
+            d.ensure_connected(t + 44)
+            d.ensure_connected(t + 46)
+            with self.assertLogs("companion", level="INFO") as new_fw:
+                d.handle_device(dict(hello, fw="0.4.1"))
+            self.assertEqual([r.getMessage() for r in new_fw.records], ["device hello fw=0.4.1"])
+            # a real disconnect (device gone) then reconnect is news too
+            fake.ser = None
+            fake.last_error = "read: device gone"
+            d._on_disconnect(fake.last_error)
+            with self.assertLogs("companion", level="INFO") as back:
+                d.ensure_connected(t + 60)
+                d.handle_device(dict(hello, fw="0.4.1"))
+            self.assertEqual([r.getMessage() for r in back.records],
+                             ["device connected on /dev/fake0", "device hello fw=0.4.1"])
+
     def test_runs_in_thread(self):
         d = self.make()
         rc = []
@@ -788,6 +831,23 @@ class FrozenDaemonImportTest(TempHome):
     def test_dev_dir_frozen_uses_state_dir(self):
         with mock.patch.object(hostos, "is_frozen", return_value=True):
             self.assertEqual(str(daemon_mod.dev_dir()), hostos.state_dir())
+
+    def test_frozen_app_does_not_yield_the_lock(self):
+        """A frozen app locks in the state dir, which tools/dev.py never looks at: yielding there is pointless.
+        CLAUDIUS_YIELD_S still overrides."""
+        code = "import sys; sys.frozen = True; import companion.daemon as d; print(d.YIELD_EVERY_S)"
+        r = subprocess.run([sys.executable, "-c", code], cwd=HOST, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "0.0")
+        env = dict(os.environ, CLAUDIUS_YIELD_S="7")
+        r = subprocess.run([sys.executable, "-c", code], cwd=HOST, capture_output=True, text=True, timeout=30,
+                           env=env)
+        self.assertEqual(r.stdout.strip(), "7.0")
+        code = "import companion.daemon as d; print(d.YIELD_EVERY_S)"
+        env = dict(os.environ); env.pop("CLAUDIUS_YIELD_S", None)
+        r = subprocess.run([sys.executable, "-c", code], cwd=HOST, capture_output=True, text=True, timeout=30,
+                           env=env)
+        self.assertEqual(r.stdout.strip(), "20.0")   # source checkout keeps yielding
 
     def test_daemon_module_imports_when_frozen(self):
         """DEVLOCK is computed at import: a frozen build must not hit a NameError there."""
