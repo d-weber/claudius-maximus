@@ -85,6 +85,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: host/pyproject.toml
       - uses: actions/download-artifact@v4
         with:
           name: firmware-bundle
@@ -92,7 +94,9 @@ jobs:
       - name: Check the bundled firmware
         run: ls -la host/companion/firmware/*/ && ls host/companion/firmware/*/manifest.json
       - name: Install
-        run: python -m pip install -e host "pyinstaller>=6.10"
+        # --prefer-binary: an older wheel beats a newer sdist. cryptography (via esptool) has no wheel for
+        # macOS x64 any more and compiled from source for ~4 min, the longest step of the whole release.
+        run: python -m pip install --prefer-binary -e host "pyinstaller>=6.10"
       - name: Icons
         run: python packaging/make_icons.py
       - name: PyInstaller build
