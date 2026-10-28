@@ -41,7 +41,6 @@ static lv_obj_t *shield, *saver, *box, *clock_lbl, *date_lbl, *line_row, *line_d
 static bool shield_pressed = false;
 static int shown_min = -1;
 static char shown_line[64] = "";
-static uint32_t drift_ms = 0;
 
 static void logf(const char *fmt, ...) {
   char b[120];
@@ -161,16 +160,9 @@ static void refresh_clock(bool force) {
   lv_label_set_text_fmt(date_lbl, "%s %d %s", WD[tm.tm_wday % 7], tm.tm_mday, MO[tm.tm_mon % 12]);
 }
 
-// Slow Lissajous drift, re-positioned every 20 s (one small redraw), so no pixel stays lit for long.
-static void drift(bool force) {
-  uint32_t now = millis();
-  if (!force && now - drift_ms < 20000) return;
-  drift_ms = now;
-  float k = now / 1000.0f / 60.0f;  // minutes
-  int dx = (int)(36 * sinf(k * 0.71f + 0.3f));
-  int dy = (int)(64 * sinf(k * 0.43f + 1.1f));
-  lv_obj_align(box, LV_ALIGN_CENTER, dx, dy);
-}
+// The clock block sits dead centre. (It used to wander a few px every 20 s against burn-in, but this is an
+// IPS LCD and a wandering clock just reads as off-centre.)
+static void center_box() { lv_obj_align(box, LV_ALIGN_CENTER, 0, 0); }
 
 static void touch_cb(lv_event_t *e) {
   lv_event_code_t code = lv_event_get_code(e);
@@ -194,7 +186,7 @@ static void show_saver(bool on) {
     lv_obj_move_background(saver);  // stay below alert cards / glow created by fx/alerts.cpp
     refresh_clock(true);
     refresh_line();
-    drift(true);
+    center_box();
     lv_obj_clear_flag(saver, LV_OBJ_FLAG_HIDDEN);
     lv_anim_t a;
     lv_anim_init(&a);
@@ -423,12 +415,11 @@ void ambient_tick() {
     hal_set_brightness(bri_cur);
   }
 
-  // night clock: minute flip / 20 s drift / status line — checked once a second, each redraws only on change
+  // night clock: minute flip / status line — checked once a second, each redraws only on change
   static uint32_t sec_ms = 0;
   if (ambient_saver_active() && now - sec_ms >= 1000) {
     sec_ms = now;
     refresh_clock(false);
-    drift(false);
     static uint32_t line_ms = 0;
     if (now - line_ms > 2000) { line_ms = now; refresh_line(); }
   }
