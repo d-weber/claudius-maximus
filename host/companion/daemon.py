@@ -33,6 +33,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from . import hostos, locking
+from . import ports as portsel
 from .link import DeviceLink, read_lock_holder
 
 log = logging.getLogger("companion")
@@ -119,6 +120,8 @@ MINOR_KEYS = frozenset(("tokens", "cost", "ctx_pct", "tool_count", "tokens_today
                         "prompts_today"))
 META_KEYS = ("t", "ts", "tz", "part")
 RETRY_NO_DEVICE_S = 2.0
+PORTS_REFRESH_S = 5.0     # how old the enumerated port list in status may get; also how often a changed
+                          # port choice (tray menu / `port` command, another process) is picked up
 RETRY_LOCKED_S = 3.0
 # Yield the shared device lock every so often so tools/dev.py gets a turn. Only meaningful in a source checkout,
 # where both use <repo>/.devlock; a frozen app locks in the state dir, which dev tools never look at, so there
@@ -441,6 +444,11 @@ class Daemon:
         self.providers = build_providers(demo)
         self.hooks = next((p for p in self.providers if type(p).__name__ == "HooksProvider"), None)
         self.link = DeviceLink(port, lock_path=DEVLOCK)
+        self.port_override = port            # --port on the command line: always that one
+        self.chooser = portsel.Chooser()     # which of several boards is ours (companion/ports.py)
+        self.selection = (None, None)        # the user's choice from settings.json, re-read every PORTS_REFRESH_S
+        self.ports_seen: list = []           # last flasher.detect()
+        self.ports_seen_at = 0.0
         self.filter = EventFilter()
         self.stop = False
         self.last_body = None       # None => next state goes out in full (connect / hello / refresh)
@@ -507,6 +515,19 @@ class Daemon:
             self.next_connect = now + 1.0
             return
         if self.link.connected:
+            if now - self.ports_seen_at > PORTS_REFRESH_S:
+                self.refresh_ports(now)
+                device, serial = self.selection
+                if device and not self.port_override:
+                    # a manual choice is strict: another port, or one that is not plugged in, means leaving
+                    want = portsel.resolve(self.ports_seen, device, serial)
+                    if want is None or want.device != self.link.port:
+                        log.info("device port choice is now %s: leaving %s", device, self.link.port)
+                        self.link.close()
+                        self._notify_providers({"t": "disconnected"})
+                        self.yielded = False
+                        self.next_connect = now
+                        return
             # yield the shared device lock now and then so tools/dev.py users get a turn
             if YIELD_EVERY_S > 0 and now >= self.yield_at:
                 self.link.close()
@@ -516,6 +537,16 @@ class Daemon:
             return
         if now < self.next_connect:
             return
+        target = self.pick_port(now)
+        if target is None:
+            self.link.last_error = self.chooser.reason
+            self.next_connect = now + RETRY_NO_DEVICE_S
+            if "boards" in self.chooser.reason or self.chooser.manual_missing:
+                if now - _last_logged.get("choose", 0) > 300:
+                    _last_logged["choose"] = now
+                    log.warning("%s", self.chooser.reason)
+            return
+        self.link.port_name = target.device
         if self.link.connect():
             # a reconnect after our own yield is routine (every YIELD_EVERY_S): keep it out of the INFO log
             (log.debug if self.yielded else log.info)("device connected on %s", self.link.port)
@@ -537,9 +568,47 @@ class Daemon:
                         _last_logged[_key] = now
                         log.warning("cannot open device: %s", err)
 
+    def refresh_ports(self, now: float) -> None:
+        """Enumerate the USB serial ports (no device I/O) and re-read the user's port choice."""
+        from . import flasher
+        try:
+            self.ports_seen = flasher.detect()
+        except Exception as e:
+            log.debug("port enumeration failed: %s", e)
+        self.ports_seen_at = now
+        try:
+            self.selection = portsel.selection()
+        except Exception:
+            self.selection = (None, None)
+
+    def pick_port(self, now: float):
+        """The port to open now (a flasher.Port), or None with chooser.reason set."""
+        self.refresh_ports(now)
+        return self.chooser.choose(self.ports_seen, self.selection, self.port_override)
+
+    def set_port(self, device: str | None) -> str:
+        """Tray menu / CLI: use this port (None or "auto" = automatic). Stored in settings.json; a connection to
+        another port is dropped so the next tick opens the chosen one. Returns a sentence for the user."""
+        with self._lock:
+            msg = portsel.select(device, self.ports_seen)
+            self.selection = portsel.selection()
+            self.chooser.failed_at.clear()
+            self.ports_seen_at = 0.0
+            self.next_connect = 0.0
+            if self.link.connected and self.selection[0] and not self.port_override:
+                want = portsel.resolve(self.ports_seen, *self.selection)
+                if want is None or want.device != self.link.port:
+                    self.link.close()
+                    self._notify_providers({"t": "disconnected"})
+                    self.yielded = False
+            log.info("%s", msg)
+            self.next_status = 0
+            return msg
+
     def handle_device(self, msg: dict):
         t = msg.get("t")
         if t == "hello":
+            self.chooser.learned(self.link.port, msg, self.ports_seen)
             same = self.yielded and msg.get("fw") == self.fw and (msg.get("board") or self.board) == self.board
             self.yielded = False
             self.fw = msg.get("fw")
@@ -682,9 +751,13 @@ class Daemon:
             cache = read_statusline_cache()
             rl = cache.get("rate_limits") if isinstance(cache.get("rate_limits"), dict) else {}
             rl_at = rl_at or cache.get("rate_limits_at") or 0
+        if now - self.ports_seen_at > PORTS_REFRESH_S and not self.dry_run:
+            self.refresh_ports(now)
         return {
             "pid": os.getpid(), "started": self.started, "updated": int(now), "root": str(ROOT),
             "connected": connected, "port": self.link.port, "fw": self.fw, "board": self.board,
+            "ports": self.chooser.describe(self.ports_seen, self.link.port, self.fw, self.board, self.selection),
+            "port_choice": self.port_override or self.selection[0] or portsel.AUTO,
             "last_hello": self.last_hello, "device_error": err,
             "lock_holder": "" if connected or self.paused is not None else self.link.lock_holder(),
             "paused": self.paused is not None, "error": self.error,

@@ -93,8 +93,9 @@ Python (`cd host && .venv/bin/python -m companion status`); there, no command me
 | `run [--demo] [--port P] [--dry-run] [--seconds N] [--log [FILE]] [-v]` | the headless daemon, no tray (what the systemd / launchd service runs); `--dry-run` prints the JSON stream instead of using the device |
 | `status [--json]` | daemon, start at login, device, hooks, sessions, plan limits, log path (a headless service from `tools/install.sh` is named only when installed) |
 | `focus SID` | raise the terminal running that session (8-char id from `status`) |
-| `detect` | serial ports (native / uart / other), link port, bundled firmware |
-| `flash [--port P] [--erase]` | flash the bundled firmware; asks a running daemon to release the port first, prints progress on stderr, exits 0 or 1 |
+| `detect` | serial ports (native / uart / other), link port, bundled firmware; marks the port a running daemon identified as ours |
+| `port [NAME\|auto]` | which USB serial port is the board. No argument lists the ports with the choice and what the daemon knows about each; `NAME` stores a choice (settings.json `port` + `port_serial`, matched by USB serial first), `auto` clears it. The running daemon follows within a few seconds and flashes that port too |
+| `flash [--port P] [--erase]` | flash the bundled firmware through `--port`, else the chosen port, else the only board found (several boards without a choice: refuses); asks a running daemon to release the port first, prints progress on stderr, exits 0 or 1 |
 | `hooks install\|uninstall\|check [--no-statusline]` | the Claude Code hooks and statusLine wrapper in `settings.json` |
 | `autostart enable\|disable\|status` | start the tray app at login |
 | `hook`, `statusline` | what Claude Code runs (reads the hook JSON on stdin; not for manual use) |

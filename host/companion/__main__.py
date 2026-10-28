@@ -8,6 +8,7 @@
     flash [--board 4b] [--port P] [--erase]
     hook | statusline            what Claude Code runs (fast path: companion/hookclient.py, nothing else)
     autostart enable|disable|status
+    port [NAME|auto]             which USB port is the board (several ESP32-S3 plugged in)
     hooks install|uninstall|check [--no-statusline]
 
 Backward compatible: no command, or only options (`python -m companion --demo`), means `run`.
@@ -15,7 +16,7 @@ Backward compatible: no command, or only options (`python -m companion --demo`),
 import os
 import sys
 
-COMMANDS = ("run", "status", "focus", "app", "detect", "flash", "hook", "statusline", "autostart", "hooks")
+COMMANDS = ("run", "status", "focus", "app", "detect", "flash", "hook", "statusline", "autostart", "hooks", "port")
 
 
 def _default_log():
@@ -101,7 +102,15 @@ def cmd_status(as_json: bool) -> int:
     print(f"start at login : {yes(report['autostart'])}")
     if report["launch_agent"]:   # the headless service is the exception now; say what the line checks
         print(f"headless daemon: {service_name()} installed ({report['service_path']})")
-    print(f"device port    : {report['device_port'] or 'not found'}")
+    choice = st.get("port_choice") if running else None
+    if choice is None:
+        try:
+            from .ports import selection
+            choice = selection()[0] or "auto"
+        except Exception:
+            choice = "auto"
+    print(f"device port    : {report['device_port'] or 'not found'}"
+          + ("" if choice == "auto" else f"  (chosen: {choice})"))
     if running:
         if st.get("connected"):
             board = f"  board={st['board']}" if st.get("board") else ""
@@ -130,17 +139,61 @@ def cmd_status(as_json: bool) -> int:
     return 0 if running else 1
 
 
+def _daemon_ports() -> list[dict] | None:
+    """The running daemon's view of the ports (status.json `ports`: which one is ours, its firmware), or None."""
+    import json
+    import time
+    from .daemon import status_path
+    try:
+        with open(status_path()) as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not (st.get("pid") and _pid_alive(st.get("pid")) and time.time() - st.get("updated", 0) < 30):
+        return None
+    return st.get("ports") if isinstance(st.get("ports"), list) else None
+
+
+def cmd_port(name: str | None) -> int:
+    """`port`: list the USB serial ports and the choice; `port NAME` / `port auto`: choose (the running daemon
+    picks the change up within a few seconds, and uses that port for flashing too)."""
+    from . import flasher
+    from .ports import AUTO, port_label, resolve, select, selection
+    ports = flasher.detect()
+    if name:
+        if name.lower() != AUTO and not any(p.device == name for p in ports):
+            print(f"warning: {name} is not a serial port right now; kept as the choice anyway", file=sys.stderr)
+        print(select(name, ports))
+        return 0
+    known = {p["device"]: p for p in _daemon_ports() or [] if isinstance(p, dict)}
+    device, serial = selection()
+    chosen = resolve(ports, device, serial)
+    print(f"choice: {device or 'automatic'}" + (f" (USB serial {serial})" if serial else ""))
+    if not ports:
+        print("no USB serial ports found")
+    for p in ports:
+        d = known.get(p.device) or {"device": p.device, "kind": p.kind, "description": p.description}
+        marks = ("connected" if d.get("connected") else "") + (" chosen" if chosen is p else "")
+        print(f"  {port_label(d)}" + (f"   [{marks.strip()}]" if marks.strip() else ""))
+    return 0
+
+
 def cmd_detect() -> int:
     from . import flasher
+    from .ports import selection
     ports = flasher.detect()
+    known = {p["device"]: p for p in _daemon_ports() or [] if isinstance(p, dict)}
     if not ports:
         print("no serial ports found")
     else:
         print(f"{'port':24} {'kind':7} {'vid:pid':10} description")
         for p in ports:
-            print(f"{p.device:24} {p.kind:7} {p.vid or 0:04x}:{p.pid or 0:04x}  {p.description}")
+            k = known.get(p.device) or {}
+            ours = f"  [Claudius Maximus fw {k['fw']}]" if k.get("fw") else "  [Claudius Maximus]" if k.get("ours") else ""
+            print(f"{p.device:24} {p.kind:7} {p.vid or 0:04x}:{p.pid or 0:04x}  {p.description}{ours}")
     link = flasher.link_port(ports)
-    print(f"link port: {link.device if link else 'none'}")
+    device, _serial = selection()
+    print(f"link port: {link.device if link else 'none'}" + (f"  (chosen: {device})" if device else ""))
     b = flasher.bundled()
     if not b:
         print("bundled firmware: none in this build")
@@ -245,6 +298,8 @@ def build_parser():
     sub.add_parser("statusline", help="Claude Code statusLine wrapper")
     p = sub.add_parser("autostart", help="start the tray app at login")
     p.add_argument("action", choices=["enable", "disable", "status"], nargs="?", default="status")
+    p = sub.add_parser("port", help="which USB serial port is the board (list, or choose NAME / auto)")
+    p.add_argument("name", nargs="?", default=None, metavar="NAME|auto")
     p = sub.add_parser("hooks", help="Claude Code hooks in ~/.claude/settings.json")
     p.add_argument("action", choices=["install", "uninstall", "check"], nargs="?", default="check")
     p.add_argument("--no-statusline", action="store_true")
@@ -277,6 +332,8 @@ def main(argv=None) -> int:
         return cmd_autostart(a.action)
     if a.command == "hooks":
         return cmd_hooks(a.action, not a.no_statusline)
+    if a.command == "port":
+        return cmd_port(a.name)
     if a.command == "focus":
         setup_logging(a.verbose, None)
         from .runtime_focus import focus_session

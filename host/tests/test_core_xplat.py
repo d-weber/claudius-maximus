@@ -613,7 +613,19 @@ class FakeLink:
         return None
 
 
+def native(device, serial=None):
+    from companion.flasher import Port
+    return Port(device=device, kind="native", vid=0x303A, pid=0x1001, serial=serial, description="USB JTAG")
+
+
 class DaemonApiTest(TempHome):
+    def setUp(self):
+        super().setUp()
+        # one board on USB, whatever the machine running the tests has plugged in
+        p = mock.patch("companion.flasher.detect", return_value=[native("/dev/fake0", "AA")])
+        p.start()
+        self.addCleanup(p.stop)
+
     def make(self, dry_run=True):
         d = daemon_mod.Daemon(demo=True, dry_run=dry_run, out=io.StringIO())
         return d
@@ -702,6 +714,77 @@ class DaemonApiTest(TempHome):
                 d.handle_device(dict(hello, fw="0.4.1"))
             self.assertEqual([r.getMessage() for r in back.records],
                              ["device connected on /dev/fake0", "device hello fw=0.4.1"])
+
+    def test_two_boards_connects_only_to_ours(self):
+        """Two ESP32-S3 on USB: the daemon probes them for a hello and opens the one that answers; none answering
+        means no connection and a status that says to choose the port; a stored choice is followed, also when it
+        changes while connected (tray menu / `port` command)."""
+        d = self.make(dry_run=False)
+        fake = d.link = FakeLink()
+        boards = [native("/dev/ttyACM0", "AA"), native("/dev/ttyACM1", "BB")]
+        probes = []
+
+        def probe(device):
+            probes.append(device)
+            return {"t": "hello", "fw": "0.4.1", "board": "ESP32-S3-Touch-LCD-4B"} if device == "/dev/ttyACM1" else None
+        d.chooser.probe = probe
+        t = time.time()
+        with mock.patch.object(daemon_mod, "dev_wants_device", return_value=False), \
+                mock.patch("companion.flasher.detect", return_value=boards):
+            d.ensure_connected(t)
+            self.assertEqual(fake.connects, 1)
+            self.assertEqual(fake.port_name, "/dev/ttyACM1")
+            self.assertEqual(probes, ["/dev/ttyACM0", "/dev/ttyACM1"])
+            st = d.public_status()
+            self.assertEqual(st["port_choice"], "auto")
+            ours = [p for p in st["ports"] if p["device"] == "/dev/ttyACM1"][0]
+            self.assertTrue(ours["ours"])
+            self.assertEqual(ours["fw"], "0.4.1")
+            self.assertFalse([p for p in st["ports"] if p["device"] == "/dev/ttyACM0"][0]["ours"])
+            # replugged under another name: known by USB serial, no new probe
+            fake.ser = None
+            d._on_disconnect("gone")
+            renamed = [native("/dev/ttyACM0", "AA"), native("/dev/ttyACM5", "BB")]
+            with mock.patch("companion.flasher.detect", return_value=renamed):
+                d.ensure_connected(t + 10)
+            self.assertEqual(fake.port_name, "/dev/ttyACM5")
+            self.assertEqual(len(probes), 2)
+        # nobody answers: no connection, a reason, probes not repeated within PROBE_RETRY_S
+        d2 = self.make(dry_run=False)
+        fake2 = d2.link = FakeLink()
+        d2.chooser.probe = lambda device: None
+        with mock.patch.object(daemon_mod, "dev_wants_device", return_value=False), \
+                mock.patch("companion.flasher.detect", return_value=boards):
+            d2.ensure_connected(t)
+            d2.ensure_connected(t + 3)
+            self.assertEqual(fake2.connects, 0)
+            self.assertIn("none runs the Claudius Maximus firmware", d2.public_status()["device_error"])
+            self.assertEqual(len(d2.chooser.failed_at), 2)
+            # the user chooses one: connect to it, flash would use the same one (settings.json)
+            msg = d2.set_port("/dev/ttyACM0")
+            self.assertEqual(msg, "device port: /dev/ttyACM0 (USB serial AA)")
+            d2.ensure_connected(t + 4)
+            self.assertEqual((fake2.connects, fake2.port_name), (1, "/dev/ttyACM0"))
+            self.assertEqual(d2.public_status()["port_choice"], "/dev/ttyACM0")
+            from companion import ports as portsel
+            self.assertEqual(portsel.selection(), ("/dev/ttyACM0", "AA"))
+            # the choice changes from outside (CLI `port`) while connected: picked up within PORTS_REFRESH_S
+            portsel.select("/dev/ttyACM1", boards)
+            d2.ensure_connected(t + 4 + daemon_mod.PORTS_REFRESH_S + 1)
+            self.assertFalse(fake2.connected)
+            d2.ensure_connected(t + 4 + daemon_mod.PORTS_REFRESH_S + 1.1)
+            self.assertEqual((fake2.connects, fake2.port_name), (2, "/dev/ttyACM1"))
+            # a choice that is not plugged in is honoured too: leave the board we are on, wait for the chosen one
+            portsel.select("/dev/ttyACM9", boards)
+            t2 = t + 4 + 2 * (daemon_mod.PORTS_REFRESH_S + 1)
+            d2.ensure_connected(t2)
+            self.assertFalse(fake2.connected)
+            d2.ensure_connected(t2 + 0.1)
+            self.assertEqual(fake2.connects, 2)
+            self.assertIn("/dev/ttyACM9 is not connected", d2.public_status()["device_error"])
+            # back to automatic
+            self.assertEqual(d2.set_port(None), "device port: automatic")
+            self.assertEqual(portsel.selection(), (None, None))
 
     def test_runs_in_thread(self):
         d = self.make()
@@ -1038,6 +1121,83 @@ class AutostartStatusExitTest(TempHome):
         with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
             self.assertEqual(main(["autostart", "status"]), 0)
         self.assertIn("disabled", out.getvalue())
+
+
+class PortsTest(TempHome):
+    def test_selection_roundtrip_and_resolve(self):
+        from companion import ports as portsel
+        self.assertEqual(portsel.selection(), (None, None))
+        boards = [native("/dev/ttyACM0", "AA"), native("/dev/ttyACM1", None)]
+        self.assertEqual(portsel.select("/dev/ttyACM0", boards), "device port: /dev/ttyACM0 (USB serial AA)")
+        self.assertEqual(portsel.selection(), ("/dev/ttyACM0", "AA"))
+        self.assertEqual(portsel.select("/dev/ttyACM1", boards), "device port: /dev/ttyACM1")
+        self.assertEqual(portsel.selection(), ("/dev/ttyACM1", None))
+        self.assertEqual(portsel.select("auto"), "device port: automatic")
+        self.assertEqual(portsel.selection(), (None, None))
+        self.assertEqual(portsel.resolve(boards, "COM9", "AA").device, "/dev/ttyACM0")
+        self.assertEqual(portsel.resolve(boards, "/dev/ttyACM1", None).device, "/dev/ttyACM1")
+        self.assertIsNone(portsel.resolve(boards, "/dev/ttyACM9", "ZZ"))
+
+    def test_chooser(self):
+        from companion import ports as portsel
+        from companion.flasher import Port
+        clock = [1000.0]
+        probes = []
+        c = portsel.Chooser(probe=lambda dev: probes.append(dev) or None, now=lambda: clock[0])
+        one = [native("/dev/ttyACM0", "AA")]
+        uart = Port("/dev/ttyACM3", "uart", 0x1A86, 0x55D3, None, "")
+        self.assertIsNone(c.choose([]))
+        self.assertEqual(c.reason, "no device found")
+        self.assertIsNone(c.choose([uart]))
+        self.assertEqual(c.choose(one + [uart]).device, "/dev/ttyACM0")   # a single board: no probe
+        self.assertEqual(probes, [])
+        two = one + [native("/dev/ttyACM1", "BB")]
+        self.assertIsNone(c.choose(two))
+        self.assertEqual(probes, ["/dev/ttyACM0", "/dev/ttyACM1"])
+        self.assertIn("2 ESP32-S3 boards", c.reason)
+        clock[0] += 10
+        self.assertIsNone(c.choose(two))                       # within PROBE_RETRY_S: not asked again
+        self.assertEqual(len(probes), 2)
+        clock[0] += portsel.PROBE_RETRY_S
+        self.assertIsNone(c.choose(two))
+        self.assertEqual(len(probes), 4)
+        # --port on the command line wins, even if not enumerated
+        self.assertEqual(c.choose(two, override="COM9").device, "COM9")
+        # a manual choice: by serial, else by name; missing -> reason
+        self.assertEqual(c.choose(two, manual=("/dev/ttyACM7", "BB")).device, "/dev/ttyACM1")
+        self.assertIsNone(c.choose(two, manual=("/dev/ttyACM7", None)))
+        self.assertTrue(c.manual_missing)
+        # the daemon connected and got a hello: remembered by serial
+        c.learned("/dev/ttyACM1", {"t": "hello", "fw": "0.4.1"}, two)
+        self.assertEqual(c.known_serial, "BB")
+        self.assertEqual(c.choose(two).device, "/dev/ttyACM1")
+        self.assertEqual(len(probes), 4)
+        desc = c.describe(two, connected="/dev/ttyACM1", fw="0.4.1", board="ESP32-S3-Touch-LCD-4B",
+                          manual=(None, None))
+        self.assertEqual([(d["device"], d["ours"], d["connected"], d["selected"], d["fw"]) for d in desc],
+                         [("/dev/ttyACM0", False, False, False, None), ("/dev/ttyACM1", True, True, False, "0.4.1")])
+        self.assertEqual(portsel.port_label(desc[1]), "/dev/ttyACM1 · ESP32-S3 · Claudius Maximus fw 0.4.1")
+        self.assertEqual(portsel.port_label(desc[0]), "/dev/ttyACM0 · ESP32-S3")
+        self.assertEqual(portsel.port_label({"device": "COM3", "kind": "uart"}), "COM3 · USB-TO-UART (CH343)")
+
+    def test_port_cli(self):
+        from companion.__main__ import main
+        two = [native("/dev/ttyACM0", "AA"), native("/dev/ttyACM1", "BB")]
+        with mock.patch("companion.flasher.detect", return_value=two):
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+                self.assertEqual(main(["port"]), 0)
+            self.assertIn("choice: automatic", out.getvalue())
+            self.assertIn("/dev/ttyACM1 · ESP32-S3", out.getvalue())
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+                self.assertEqual(main(["port", "/dev/ttyACM1"]), 0)
+            self.assertEqual(out.getvalue().strip(), "device port: /dev/ttyACM1 (USB serial BB)")
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+                main(["port"])
+            self.assertIn("choice: /dev/ttyACM1 (USB serial BB)", out.getvalue())
+            self.assertIn("[chosen]", out.getvalue())
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+                self.assertEqual(main(["port", "auto"]), 0)
+            self.assertEqual(out.getvalue().strip(), "device port: automatic")
 
 
 class StatusCommandTest(TempHome):

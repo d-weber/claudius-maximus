@@ -256,9 +256,14 @@ def device_line(st: dict) -> str:
             return f"Device: connected on {port} · fw {st['fw']}" + (f" ({board_label(b)})" if b else "")
         return f"Device: connected on {port} · waiting for hello"
     ports = st.get("ports") or []
+    err = st.get("device_error") or ""
+    if "none runs the Claudius Maximus firmware" in err:
+        n = sum(1 for p in ports if p.get("kind") == "native")
+        return f"Device: {n} boards on USB, choose the port below"
+    if "is not connected" in err and st.get("port_choice") not in (None, "", "auto"):
+        return f"Device: chosen port {st['port_choice']} not connected"
     if any(p.get("kind") == "native" for p in ports):
         native = next(p for p in ports if p.get("kind") == "native")
-        err = st.get("device_error") or ""
         if "lock" in err:
             holder = st.get("lock_holder")
             return f"Device: busy on {native.get('device')}" + (f" ({holder})" if holder else "")
@@ -342,6 +347,25 @@ def tray_state(st: dict) -> str:
     return "none"
 
 
+def port_menu(st: dict, app):
+    """Device port ▸ Automatic / one entry per USB serial port (ESP32-S3 boards first, the one answering as
+    Claudius Maximus marked). The check mark follows settings.json, not the current connection."""
+    from .tray.base import MenuItem
+    from .ports import AUTO, port_label
+    choice = st.get("port_choice") or AUTO
+    auto = choice == AUTO
+    kids = [MenuItem("Automatic (the board that answers)", action=lambda: app.set_port(None), checked=auto)]
+    ports = [p for p in st.get("ports") or [] if isinstance(p, dict) and p.get("device")]
+    if ports:
+        kids.append(MenuItem.sep())
+    for p in ports:
+        dev = p["device"]
+        kids.append(MenuItem(port_label(p), action=(lambda d=dev: app.set_port(d)),
+                             checked=(not auto and choice == dev)))
+    label = "Device port" if auto else f"Device port: {choice}"
+    return MenuItem(label, children=kids)
+
+
 def build_menu(st: dict, app) -> list:
     """Menu, top to bottom, per docs/DESKTOP.md. `app` provides flash(board), set_autostart(on),
     install_hooks(), open_log(), open_usage_page(), quit()."""
@@ -371,6 +395,7 @@ def build_menu(st: dict, app) -> list:
         ok = can_flash and (bundled is None or b in bundled)
         items.append(MenuItem("Flash firmware…", action=lambda: app.flash(b), enabled=ok))
 
+    items.append(port_menu(st, app))
     items.append(MenuItem("Start at login", action=lambda: app.set_autostart(not st.get("autostart")),
                           checked=bool(st.get("autostart"))))
     if st.get("hooks_installed"):
@@ -499,8 +524,9 @@ class App:
                 st["rate_limits"] = {}
         try:
             from . import flasher
-            ports = _guard("flasher.detect", flasher.detect, default=[]) or []
-            st["ports"] = [_port_dict(p) for p in ports]
+            if not isinstance(st.get("ports"), list):   # observer mode / older daemon: enumerate here
+                ports = _guard("flasher.detect", flasher.detect, default=[]) or []
+                st["ports"] = [_port_dict(p) for p in ports]
             if st.get("fw"):
                 st["update"] = _guard("flasher.needs_update", flasher.needs_update, st.get("fw"),
                                       st.get("board"), default=(False, ""))
@@ -669,6 +695,26 @@ class App:
         self.refresh_soon()
         return result
 
+    def set_port(self, device: str | None, notify: bool = True):
+        """Tray menu: use this port (None = automatic). Through the daemon when we run it (it reconnects), else
+        straight to settings.json (the daemon that owns the device picks it up within a few seconds)."""
+        try:
+            d = self.daemon
+            if d is not None and hasattr(d, "set_port"):
+                msg = d.set_port(device)
+            else:
+                from . import ports as portsel
+                msg = portsel.select(device, [])
+        except Exception as e:
+            log.warning("set port %r failed: %s", device, e)
+            if notify:
+                self.notify("Device port", f"Could not change it: {e}")
+            return False
+        if notify:
+            self.notify("Device port", msg[0].upper() + msg[1:])
+        self.refresh_soon()
+        return True
+
     def refresh_soon(self):
         if self.backend is not None and not self._quit.is_set():
             threading.Thread(target=_guard, args=("tray refresh", self.refresh), daemon=True).start()
@@ -723,12 +769,16 @@ class App:
                 last[0], last[1] = pct, now
                 self._refresh_cached()
 
+        # flash the port the daemon talks to (several boards may be plugged in); flasher.pick_port falls back to
+        # the user's port choice, then to the only board found
+        st = self._last_status or {}
+        port = st.get("port") if st.get("connected") and st.get("port") else None
         paused = False
         try:
             from . import flasher
             d.pause_device("flashing")
             paused = True
-            res = flasher.flash(board, progress=progress, log=lambda m: log.info("flash: %s", m))
+            res = flasher.flash(board, port=port, progress=progress, log=lambda m: log.info("flash: %s", m))
             fw = getattr(res, "fw_version", None) or ""
             self.flash_state = {"active": False, "pct": 100, "msg": "", "error": ""}
             body = f"{label} firmware {fw} written; the device is restarting.".replace("  ", " ")
