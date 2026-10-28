@@ -222,8 +222,9 @@ def is_enabled() -> bool:
     return os.path.exists(desktop_path())
 
 
-def enable() -> str:
-    """Start the app at login. Raises OSError if the entry can't be written."""
+def enable(cmd: list[str] | None = None) -> str:
+    """Start the app at login. `cmd` = the command to register instead of this program's (the updater
+    registers the new version's). Raises OSError if the entry can't be written."""
     if hostos.IS_MAC:   # checked before retiring the legacy service: fail without side effects
         why = mac_unstable_location()
         if why:
@@ -233,15 +234,15 @@ def enable() -> str:
     if legacy:
         notes.append(legacy)
     if hostos.IS_MAC:
-        _write_atomic(plist_path(), plist_bytes())
+        _write_atomic(plist_path(), plist_bytes(cmd))
         where = plist_path()
     elif hostos.IS_WINDOWS:
         wr = _winreg()
         with wr.CreateKey(wr.HKEY_CURRENT_USER, RUN_KEY) as k:
-            wr.SetValueEx(k, RUN_VALUE, 0, wr.REG_SZ, windows_command())
+            wr.SetValueEx(k, RUN_VALUE, 0, wr.REG_SZ, windows_command(cmd))
         where = "HKCU\\" + RUN_KEY + "\\" + RUN_VALUE
     else:
-        _write_atomic(desktop_path(), desktop_bytes())
+        _write_atomic(desktop_path(), desktop_bytes(cmd))
         where = desktop_path()
     msg = f"{hostos.APP_NAME} will start at login ({where})"
     log.info("autostart enabled: %s", where)

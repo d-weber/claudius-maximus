@@ -1200,6 +1200,135 @@ class PortsTest(TempHome):
             self.assertEqual(out.getvalue().strip(), "device port: automatic")
 
 
+class UpdaterTest(TempHome):
+    API = {"tag_name": "v9.9.0", "html_url": "https://github.com/d-weber/claudius-maximus/releases/tag/v9.9.0",
+           "body": "notes", "published_at": "2026-10-29T00:00:00Z",
+           "assets": [{"name": "ClaudiusMaximus-9.9.0-linux-x64.AppImage", "browser_download_url": "https://dl/a", "size": 5},
+                      {"name": "ClaudiusMaximus-9.9.0-windows-x64.exe", "browser_download_url": "https://dl/w", "size": 6}]}
+
+    def test_asset_names_and_versions(self):
+        from companion import updater
+        self.assertEqual(updater.asset_name("1.2.3", "win32", "AMD64"), "ClaudiusMaximus-1.2.3-windows-x64.exe")
+        self.assertEqual(updater.asset_name("1.2.3", "darwin", "arm64"), "ClaudiusMaximus-1.2.3-macos-arm64.dmg")
+        self.assertEqual(updater.asset_name("1.2.3", "darwin", "x86_64"), "ClaudiusMaximus-1.2.3-macos-x64.dmg")
+        self.assertEqual(updater.asset_name("1.2.3", "linux", "x86_64", appimage=True),
+                         "ClaudiusMaximus-1.2.3-linux-x64.AppImage")
+        self.assertIsNone(updater.asset_name("1.2.3", "linux", "x86_64", appimage=False))   # tar.gz install
+        self.assertTrue(updater.is_newer("0.5.0", "0.4.1"))
+        self.assertTrue(updater.is_newer("0.10.0", "0.9.9"))
+        self.assertFalse(updater.is_newer("0.4.1", "0.4.1"))
+        self.assertFalse(updater.is_newer("0.4.0", "0.4.1"))
+        self.assertFalse(updater.is_newer("garbage", "0.4.1"))
+        self.assertIn("source checkout", updater.can_self_install())
+
+    def test_check_parses_the_release(self):
+        from companion import updater
+        with mock.patch.object(updater, "_get", return_value=json.dumps(self.API).encode()):
+            rel = updater.check()
+        self.assertEqual((rel.version, rel.tag), ("9.9.0", "v9.9.0"))
+        self.assertEqual(rel.asset("ClaudiusMaximus-9.9.0-linux-x64.AppImage"), ("https://dl/a", 5))
+        self.assertIsNone(rel.asset("nope"))
+        import urllib.error
+        with mock.patch.object(updater, "_get", side_effect=urllib.error.URLError("no network")):
+            with self.assertRaises(updater.UpdateError) as cm:
+                updater.check()
+            self.assertIn("cannot reach", str(cm.exception))
+        with mock.patch.object(updater, "_get", side_effect=urllib.error.HTTPError("u", 403, "rate", {}, None)):
+            with self.assertRaises(updater.UpdateError) as cm:
+                updater.check()
+            self.assertIn("rate-limiting", str(cm.exception))
+        with mock.patch.object(updater, "_get", return_value=b"[]"):
+            with self.assertRaises(updater.UpdateError):
+                updater.check()
+
+    def test_daily_check_schedule_and_toggle(self):
+        from companion import updater
+        T = 1.7e9   # a real clock: never checked yet (0) means due
+        self.assertTrue(updater.auto_enabled())
+        self.assertTrue(updater.auto_check_due(T))
+        updater.mark_checked(True, T)
+        self.assertFalse(updater.auto_check_due(T + updater.CHECK_EVERY_S - 1))
+        self.assertTrue(updater.auto_check_due(T + updater.CHECK_EVERY_S))
+        self.assertEqual(updater.set_auto(False), "daily update check: off")
+        self.assertFalse(updater.auto_check_due(1e12))
+        updater.set_auto(True)
+        self.assertTrue(updater.auto_check_due(1e12))
+
+    def test_download_and_linux_install(self):
+        """download: streamed to .part, size checked, renamed. Linux install: the new AppImage lands next to the
+        running one, is made executable, hooks + autostart are pointed at it and it is started."""
+        from companion import updater, autostart
+        import io as _io
+        body = b"ELF-not-really"
+        resp = mock.MagicMock()
+        resp.__enter__.return_value = resp
+        resp.headers = {"Content-Length": str(len(body))}
+        resp.read.side_effect = [body, b""]
+        dest = os.path.join(self.tmp, "dl", "x.AppImage")
+        got = []
+        with mock.patch.object(updater.urllib.request, "urlopen", return_value=resp):
+            self.assertEqual(updater.download("https://dl/a", dest, len(body), lambda p, m: got.append(p)), dest)
+        self.assertEqual(open(dest, "rb").read(), body)
+        self.assertFalse(os.path.exists(dest + ".part"))
+        resp2 = mock.MagicMock(); resp2.__enter__.return_value = resp2; resp2.headers = {}
+        resp2.read.side_effect = [b"short", b""]
+        with mock.patch.object(updater.urllib.request, "urlopen", return_value=resp2):
+            with self.assertRaises(updater.UpdateError):
+                updater.download("https://dl/a", dest + "2", 99)
+        self.assertFalse(os.path.exists(dest + "2.part"))
+        # install, as if we were the AppImage at <tmp>/apps/ClaudiusMaximus-0.4.1-linux-x64.AppImage
+        apps = os.path.join(self.tmp, "apps")
+        os.makedirs(apps)
+        current = os.path.join(apps, "ClaudiusMaximus-0.4.1-linux-x64.AppImage")
+        open(current, "w").close()
+        runs, pops = [], []
+        with mock.patch.dict(os.environ, {"APPIMAGE": current}), \
+                mock.patch.object(hostos, "is_frozen", return_value=True), \
+                mock.patch.object(hostos, "IS_LINUX", True), mock.patch.object(hostos, "IS_MAC", False), \
+                mock.patch.object(hostos, "IS_WINDOWS", False), \
+                mock.patch.object(updater.subprocess, "run", lambda cmd, **kw: runs.append(cmd)), \
+                mock.patch.object(updater.subprocess, "Popen", lambda cmd, **kw: pops.append(cmd)), \
+                mock.patch.object(autostart, "is_enabled", return_value=True), \
+                mock.patch.object(autostart, "enable", lambda cmd=None: runs.append(("autostart", cmd))):
+            msg = updater.install(dest, "9.9.0")
+        new = os.path.join(apps, "ClaudiusMaximus-9.9.0-linux-x64.AppImage")
+        self.assertTrue(os.path.exists(new))
+        self.assertFalse(os.path.exists(dest))
+        if POSIX:
+            self.assertTrue(os.stat(new).st_mode & 0o111)
+        self.assertEqual(runs, [[new, "hooks", "install"], ("autostart", [new, "app"])])
+        self.assertEqual(pops, [[new, "app"]])
+        self.assertIn("9.9.0 installed as " + new, msg)
+        self.assertIn(current, msg)
+
+    def test_update_cli(self):
+        from companion import updater
+        from companion.__main__ import main
+        newer = updater.Release(version="9.9.0", tag="v9.9.0", url="https://x/rel")
+        with mock.patch.object(updater, "check", return_value=newer), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(main(["update"]), 3)
+        self.assertIn("update available: 9.9.0", out.getvalue())
+        self.assertIn("cannot self-install: this is a source checkout", out.getvalue())
+        same = updater.Release(version=updater.current_version(), tag="v", url="")
+        with mock.patch.object(updater, "check", return_value=same), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(main(["update"]), 0)
+        self.assertIn("up to date", out.getvalue())
+        with mock.patch.object(updater, "check", side_effect=updater.UpdateError("offline")), \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(main(["update"]), 1)
+        self.assertIn("offline", err.getvalue())
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(main(["update", "auto", "off"]), 0)
+        self.assertFalse(updater.auto_enabled())
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(main(["update", "auto", "on"]), 0)
+        self.assertTrue(updater.auto_enabled())
+        with mock.patch("sys.stderr", new_callable=io.StringIO):
+            self.assertEqual(main(["update", "auto", "maybe"]), 2)
+
+
 class StatusCommandTest(TempHome):
     """#12: `status` reports the app's start-at-login entry; the headless service of a script install is only
     mentioned when it is actually installed, under a label that says what it is."""
