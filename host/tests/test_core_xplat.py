@@ -1283,6 +1283,7 @@ class UpdaterTest(TempHome):
         open(current, "w").close()
         runs, pops = [], []
         with mock.patch.dict(os.environ, {"APPIMAGE": current}), \
+                mock.patch.object(updater.platform, "machine", return_value="x86_64"), \
                 mock.patch.object(hostos, "is_frozen", return_value=True), \
                 mock.patch.object(hostos, "IS_LINUX", True), mock.patch.object(hostos, "IS_MAC", False), \
                 mock.patch.object(hostos, "IS_WINDOWS", False), \
