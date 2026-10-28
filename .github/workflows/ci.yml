@@ -1,10 +1,14 @@
 # Tests on the three OSes + a PyInstaller smoke build of the desktop app + both firmware builds.
 name: ci
 
+# Branch pushes are covered by the pull_request run (a push to a PR branch used to run everything twice).
+# Docs-only changes run nothing.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
+    paths-ignore: ["docs/**", "**.md"]
   pull_request:
+    paths-ignore: ["docs/**", "**.md"]
 
 permissions:
   contents: read
@@ -32,7 +36,8 @@ jobs:
           cache: pip
           cache-dependency-path: host/pyproject.toml
       - name: Install
-        run: python -m pip install -e host "pyinstaller>=6.10"
+        # --prefer-binary: an older wheel beats a newer sdist (cryptography from source costs minutes on macOS x64)
+        run: python -m pip install --prefer-binary -e host "pyinstaller>=6.10"
       - name: Unit tests
         run: python -m unittest discover -s host/tests -v
       - name: Icons
@@ -72,7 +77,13 @@ jobs:
           path: ~/.platformio
           key: pio-${{ runner.os }}-${{ hashFiles('firmware/platformio.ini') }}
           restore-keys: pio-${{ runner.os }}-
+      - uses: actions/cache@v4
+        with:
+          # incremental build: SCons rebuilds only what changed since the last cached build
+          path: firmware/.pio
+          key: pio-build-${{ hashFiles('firmware/platformio.ini', 'firmware/src/**', 'firmware/include/**') }}
+          restore-keys: pio-build-
       - name: Install PlatformIO
         run: python -m pip install "platformio>=6.1"
-      - name: Build both boards
+      - name: Build the firmware
         run: pio run -d firmware -e companion
