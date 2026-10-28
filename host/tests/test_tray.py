@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from companion import app as appmod  # noqa: E402
 from companion.tray.base import MenuItem  # noqa: E402
 from companion.tray.icon import (BADGE, CLAWD, render_app_icon, render_tray_icon,  # noqa: E402
-                                 render_tray_icon_mono, usage_pcts)
+                                 render_tray_icon_mono)
 
 try:
     import dbus_fast  # noqa: F401
@@ -115,21 +115,16 @@ class IconTest(unittest.TestCase):
             for size in (22, 32):
                 self.assertTrue(self._has_color(render_tray_icon(size, st), BADGE[key]), f"{name} @{size}")
 
-    def test_usage_bars_drawn(self):
+    def test_usage_does_not_change_icon(self):
+        """Plan usage lives on the device and in the menu, not in the icon."""
         plain = render_tray_icon(22, {"connected": True})
-        bars = render_tray_icon(22, {"connected": True, "rate_limits": RL})
-        self.assertNotEqual(plain.tobytes(), bars.tobytes())
-        self.assertEqual(usage_pcts({"rate_limits": RL}), (42.0, 12.0))
-        self.assertEqual(usage_pcts({"rate_limits": {"five_hour": {"used_percentage": 150}}}), (100.0, None))
-        # 5h bar (42 %) is longer than the 7d bar (12 %): count filled orange pixels per bar row
-        img = render_tray_icon(64, {"rate_limits": RL})
-        def filled(y):
-            return sum(1 for x in range(64) if img.getpixel((x, y))[3] > 200 and img.getpixel((x, y))[0] > 180
-                       and img.getpixel((x, y))[1] < 140)
-        top = max(filled(y) for y in range(40, 51))
-        bottom = max(filled(y) for y in range(52, 64))
-        self.assertGreater(top, bottom)
-        self.assertGreater(bottom, 0)
+        with_rl = render_tray_icon(22, {"connected": True, "rate_limits": RL})
+        self.assertEqual(plain.tobytes(), with_rl.tobytes())
+        # the face fills the icon: orange in the middle at every size
+        for size in (16, 22, 32):
+            r, g, b, a = render_tray_icon(size, {}).getpixel((size // 2, size // 2))
+            self.assertEqual(a, 255)
+            self.assertLess(abs(r - CLAWD[0]) + abs(g - CLAWD[1]) + abs(b - CLAWD[2]), 12, size)
 
     def test_mono_is_black_only(self):
         for st in STATES.values():

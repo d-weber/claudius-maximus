@@ -3,12 +3,12 @@
 Geometry is laid out on a 22-unit grid (the classic tray size) and snapped to whole target pixels, then drawn
 4x supersampled and downscaled: edges stay crisp at 16/22/32 px, corners get a little antialiasing.
 
-Tray icon, with plan limits known:      without:
-    +----------+ o   <- state badge         +--------------+
-    | ▌      ▌ |                            |  ▌        ▌  |
-    +----------+                            |            o |  <- badge on the corner
-    [=====-------]   5-hour                 +--------------+
-    [==----------]   7-day
+Tray icon: Clawd's face with a state badge on the corner (plan usage is shown on the device and in the menu,
+not in the icon).
+    +--------------+
+    |  ▌        ▌  |
+    |            o |  <- badge
+    +--------------+
 """
 from __future__ import annotations
 
@@ -17,9 +17,6 @@ from PIL import Image, ImageDraw
 CLAWD = (217, 119, 87, 255)       # #D97757, Anthropic's orange (the device's Clawd)
 EYE = (31, 26, 23, 255)
 RING = (30, 30, 30, 255)          # dark ring around the badge: separates it on light and dark trays
-TRACK = (153, 153, 153, 90)
-TRACK_EDGE = (153, 153, 153, 205)
-
 BADGE = {
     "none": (154, 160, 166, 255),     # grey: no device
     "ok": (63, 185, 80, 255),         # green: connected
@@ -29,15 +26,6 @@ BADGE = {
 }
 
 SS = 4  # supersampling factor
-
-
-def bar_color(pct: float) -> tuple:
-    """Same thresholds and colours as the claude_tray usage indicator."""
-    if pct >= 90:
-        return (227, 69, 61, 255)
-    if pct >= 70:
-        return (245, 158, 38, 255)
-    return (217, 120, 87, 255)
 
 
 def tray_state(status: dict | None) -> str:
@@ -55,17 +43,6 @@ def tray_state(status: dict | None) -> str:
             return "update"
         return "ok"
     return "none"
-
-
-def usage_pcts(status: dict | None) -> tuple[float | None, float | None]:
-    rl = (status or {}).get("rate_limits") or {}
-
-    def pct(key):
-        v = rl.get(key)
-        if isinstance(v, dict) and isinstance(v.get("used_percentage"), (int, float)):
-            return max(0.0, min(100.0, float(v["used_percentage"])))
-        return None
-    return pct("five_hour"), pct("seven_day")
 
 
 class _Canvas:
@@ -118,22 +95,6 @@ def _badge(c: _Canvas, cx, cy, d, fill, ring=RING, hollow=False):
         c.d.ellipse(box, fill=fill, outline=ring, width=rw)
 
 
-def _bars(c: _Canvas, pcts, top, mono=False):
-    edge_w = max(1, round(0.7 * c.f * SS))
-    h, gap = 3.6, 0.8
-    for i, pct in enumerate(pcts):
-        y0 = top + i * (h + gap)
-        box = c.box(0.5, y0, 21.5, y0 + h, min_px=2)
-        track = (0, 0, 0, 80) if mono else TRACK
-        edge = (0, 0, 0, 200) if mono else TRACK_EDGE
-        c.rrect(box, 1.2, track, outline=edge, width=edge_w)
-        if pct is None or pct <= 0:
-            continue
-        x1 = box[0] + max(SS, round((box[2] - box[0]) * pct / 100.0))
-        fill = (0, 0, 0, 255) if mono else bar_color(pct)
-        c.rrect([box[0], box[1], x1, box[3]], 1.2, fill)
-
-
 def render_app_icon(size: int = 256) -> Image.Image:
     """The application icon (packaging, notifications): Clawd's face filling a rounded square."""
     c = _Canvas(size)
@@ -157,23 +118,16 @@ def render_tray_icon_mono(size: int, status: dict | None = None) -> Image.Image:
 def _render_tray(size: int, status: dict | None, mono: bool) -> Image.Image:
     c = _Canvas(size)
     state = tray_state(status)
-    five, week = usage_pcts(status)
     body = (0, 0, 0, 255) if mono else CLAWD
-    color = BADGE[state]
-    if five is not None or week is not None:
-        _face(c, 0.5, 0.5, 16.0, 12.0, body=body, eye_cut=mono)
-        bx, by, bd = 19.0, 6.25, 5.6
-        _bars(c, (five, week), 13.6, mono=mono)
-    else:
-        _face(c, 0.5, 2.0, 21.5, 19.0, body=body, eye_cut=mono)
-        bx, by, bd = 17.6, 16.6, 7.4
+    _face(c, 0.5, 2.0, 21.5, 19.0, body=body, eye_cut=mono)
+    bx, by, bd = 17.6, 16.6, 7.4
     if mono:
         if state == "none":
             _badge(c, bx, by, bd, (0, 0, 0, 255), hollow=True)
         elif state != "ok":
-            if five is None and week is None:   # on the face: cut a gap so the dot stays distinct
-                _badge(c, bx, by, bd + 2.2, (0, 0, 0, 0), ring=(0, 0, 0, 0))
+            # the dot sits on the face: cut a gap around it so it stays distinct
+            _badge(c, bx, by, bd + 2.2, (0, 0, 0, 0), ring=(0, 0, 0, 0))
             _badge(c, bx, by, bd, (0, 0, 0, 255), ring=(0, 0, 0, 255))
     else:
-        _badge(c, bx, by, bd, color)
+        _badge(c, bx, by, bd, BADGE[state])
     return c.done()
