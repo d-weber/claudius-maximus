@@ -91,7 +91,7 @@ Python (`cd host && .venv/bin/python -m companion status`); there, no command me
 |---|---|
 | `app [--no-setup] [--demo] [--port P] [--seconds N] [-v]` | the tray app (default for the binary); `--no-setup` skips the first-run setup, `--seconds` quits after N s (testing) |
 | `run [--demo] [--port P] [--dry-run] [--seconds N] [--log [FILE]] [-v]` | the headless daemon, no tray (what the systemd / launchd service runs); `--dry-run` prints the JSON stream instead of using the device |
-| `status [--json]` | daemon, device, hooks, sessions, plan limits, log path |
+| `status [--json]` | daemon, start at login, device, hooks, sessions, plan limits, log path (a headless service from `tools/install.sh` is named only when installed) |
 | `focus SID` | raise the terminal running that session (8-char id from `status`) |
 | `detect` | serial ports (native / uart / other), link port, bundled firmware |
 | `flash [--port P] [--erase]` | flash the bundled firmware; asks a running daemon to release the port first, prints progress on stderr, exits 0 or 1 |

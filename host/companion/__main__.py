@@ -66,7 +66,8 @@ def cmd_status(as_json: bool) -> int:
     import time
     from .daemon import state_dir, status_path, ROOT
     from .hooksetup import installed
-    from .hostos import service_installed, service_name
+    from . import autostart
+    from .hostos import service_installed, service_name, service_path
     from .link import find_port
     st = {}
     try:
@@ -83,17 +84,23 @@ def cmd_status(as_json: bool) -> int:
             sl = json.load(f)
     except (OSError, ValueError):
         pass
+    # "launch_agent" / "service" describe the headless service of a source checkout (tools/install.sh), kept
+    # under their old names for scripts; "autostart" is the app's own start-at-login entry (#12)
     report = {
         "daemon_running": running, "daemon": st, "device_port": find_port(),
         "hooks_installed": hooks_installed, "statusline_installed": statusline_installed,
-        "launch_agent": service_installed(), "service": service_name(), "statusline_cache": sl, "root": str(ROOT),
+        "autostart": autostart.is_enabled(),
+        "launch_agent": service_installed(), "service": service_name(), "service_path": service_path(),
+        "statusline_cache": sl, "root": str(ROOT),
     }
     if as_json:
         print(json.dumps(report, indent=1))
         return 0 if running else 1
     yes = lambda b: "yes" if b else "no"  # noqa: E731
     print(f"daemon         : {'running (pid %s, up %s)' % (st.get('pid'), _ago(st.get('started')).replace(' ago', '')) if running else 'not running'}")
-    print(f"{service_name():15}: {yes(report['launch_agent'])}")
+    print(f"start at login : {yes(report['autostart'])}")
+    if report["launch_agent"]:   # the headless service is the exception now; say what the line checks
+        print(f"headless daemon: {service_name()} installed ({report['service_path']})")
     print(f"device port    : {report['device_port'] or 'not found'}")
     if running:
         if st.get("connected"):
@@ -143,6 +150,7 @@ def cmd_detect() -> int:
 
 
 def cmd_flash(board: str | None, port: str | None, erase: bool) -> int:
+    from contextlib import ExitStack
     from . import flasher
     from .daemon import claim_device
     from .hostos import settings_get
@@ -153,12 +161,18 @@ def cmd_flash(board: str | None, port: str | None, erase: bool) -> int:
 
     try:
         # ask a running daemon (headless or the tray app) to release the port; flash() itself doesn't lock
-        with claim_device("flash", timeout=30):
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(claim_device("flash", timeout=30))
+            except TimeoutError as e:
+                print(f"\nflash failed: {e}", file=sys.stderr)
+                return 1
+            except OSError as e:   # lock file not creatable (#11): one line and exit 1, not a traceback
+                where = f" {e.filename}" if e.filename else ""
+                print(f"\nflash failed: cannot create the device lock{where}: {e.strerror or e}", file=sys.stderr)
+                return 1
             res = flasher.flash(board, port=port, progress=progress, erase=erase)
     except flasher.FlashError as e:
-        print(f"\nflash failed: {e}", file=sys.stderr)
-        return 1
-    except TimeoutError as e:
         print(f"\nflash failed: {e}", file=sys.stderr)
         return 1
     print(f"\nflashed {res.board} fw {res.fw_version} via {res.port} in {res.seconds:.0f}s", file=sys.stderr)
