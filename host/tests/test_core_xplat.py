@@ -1247,34 +1247,52 @@ class UpdaterTest(TempHome):
         import ssl
         import urllib.error
         from companion import updater
+        self.addCleanup(setattr, updater, "_ssl_ctx", None)
         updater._ssl_ctx = None
-        ctx = updater._ssl_context()
+        # start from an empty trust store, as the frozen app does on macOS/Windows: the CAs must come from certifi
+        empty = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        self.assertEqual(empty.cert_store_stats()["x509_ca"], 0)
+        with mock.patch.object(ssl, "create_default_context", return_value=empty):
+            ctx = updater._ssl_context()
+        self.assertIs(ctx, empty)
         self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
         self.assertTrue(ctx.check_hostname)
         self.assertIs(updater._ssl_context(), ctx)                                  # built once
         try:
-            import certifi
+            import certifi   # noqa: F401
         except ImportError:
-            certifi = None
-        if certifi:
-            self.assertGreater(ctx.cert_store_stats()["x509_ca"], 100)             # certifi's CAs are loaded
+            self.skipTest("certifi not installed")
+        self.assertGreater(ctx.cert_store_stats()["x509_ca"], 100)                 # certifi's CAs are loaded
+        # without certifi (a broken bundle): the system store alone, and a warning in the log, not a debug line
+        updater._ssl_ctx = None
+        with mock.patch.dict(sys.modules, {"certifi": None}), self.assertLogs("companion.updater", "WARNING") as logs:
+            self.assertIsInstance(updater._ssl_context(), ssl.SSLContext)
+        self.assertIn("certifi", logs.output[0])
+        updater._ssl_ctx = ctx
         # every request goes through that context
         resp = mock.MagicMock()
         resp.__enter__.return_value.read.return_value = b"{}"
         with mock.patch.object(updater.urllib.request, "urlopen", return_value=resp) as uo:
             updater._get("https://api/x", 1.0)
         self.assertIs(uo.call_args.kwargs["context"], ctx)
-        # a certificate failure names the certificate check
+        # a certificate failure names the certificate check; another TLS failure (a captive portal answering
+        # plain HTTP on 443) stays a network problem
         err = urllib.error.URLError(ssl.SSLCertVerificationError("[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate"))
         with mock.patch.object(updater, "_get", side_effect=err):
             with self.assertRaises(updater.UpdateError) as cm:
                 updater.check()
         self.assertIn("certificate check", str(cm.exception))
         self.assertIn("CERTIFICATE_VERIFY_FAILED", str(cm.exception))
-        with mock.patch.object(updater.urllib.request, "urlopen", side_effect=err):
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(updater.urllib.request, "urlopen", side_effect=err):
             with self.assertRaises(updater.UpdateError) as cm:
-                updater.download("https://dl/a", os.path.join(tempfile.mkdtemp(), "f"), 0)
+                updater.download("https://dl/a", os.path.join(td, "f"), 0)
         self.assertIn("certificate check", str(cm.exception))
+        other = urllib.error.URLError(ssl.SSLError(1, "[SSL: WRONG_VERSION_NUMBER] wrong version number"))
+        with mock.patch.object(updater, "_get", side_effect=other):
+            with self.assertRaises(updater.UpdateError) as cm:
+                updater.check()
+        self.assertNotIn("certificate check", str(cm.exception))
+        self.assertIn("WRONG_VERSION_NUMBER", str(cm.exception))
 
     def test_daily_check_schedule_and_toggle(self):
         from companion import updater

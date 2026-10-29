@@ -290,8 +290,10 @@ class ReviewTest(unittest.TestCase):
         except ImportError:
             self.skipTest("esptool not installed")
         left = []
+        orig = serial.serial_for_url
 
         def fake_main(args):
+            self.assertIsNot(serial.serial_for_url, orig)                   # the hook is in place during the run
             s = serial.serial_for_url("loop://", do_not_open=True)   # what ESPLoader.__init__ does
             s.open()
             left.append(s)
@@ -303,7 +305,8 @@ class ReviewTest(unittest.TestCase):
                 flasher._run_esptool(["x"], prog, None)
         self.assertEqual(len(left), 1)
         self.assertFalse(left[0].is_open)
-        self.assertIs(serial.serial_for_url.__name__, "serial_for_url")   # the hook is gone afterwards
+        self.assertIs(serial.serial_for_url, orig)                          # the hook is gone afterwards
+        self.assertFalse(flasher._esptool_lock.locked())
         # and a successful run (esptool closes its own port) is left alone
         def ok_main(args):
             s = serial.serial_for_url("loop://")

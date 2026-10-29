@@ -127,17 +127,18 @@ def _ssl_context() -> ssl.SSLContext:
         try:
             import certifi
             ctx.load_verify_locations(cafile=certifi.where())
-        except Exception as e:   # no certifi, or an unreadable file: keep the system store
-            log.debug("certifi CAs not loaded: %s", e)
+        except Exception as e:   # no certifi, or an unreadable file: the system store alone (none when frozen)
+            log.warning("certifi CAs not loaded (%s): the update check depends on the system's CA store", e)
         _ssl_ctx = ctx
     return _ssl_ctx
 
 
 def _reason(e: BaseException) -> str:
     """A sentence for a URLError/OSError: names a failed certificate check, which looks like "cannot reach"
-    otherwise, and the user then checks their network instead of the app."""
+    otherwise, and the user then checks their network instead of the app. Other TLS failures (a captive portal
+    answering plain HTTP on 443, a reset handshake) stay what they are: a network problem."""
     reason = getattr(e, "reason", None) or e
-    if isinstance(reason, ssl.SSLError):
+    if isinstance(reason, ssl.SSLCertVerificationError):
         return f"the TLS certificate check for GitHub failed ({reason})"
     return str(reason)
 
@@ -203,8 +204,8 @@ def download(url: str, dest: str, size: int = 0, progress: Progress | None = Non
     req = urllib.request.Request(url, headers={"User-Agent": f"claudius-maximus/{current_version()}"})
     try:
         os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
-        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as r, \
-                open(part, "wb") as f:   # noqa: S310
+        with (urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as r,   # noqa: S310
+              open(part, "wb") as f):
             total = size or int(r.headers.get("Content-Length") or 0)
             got, last = 0, -1
             while True:
