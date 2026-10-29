@@ -23,6 +23,7 @@ import logging
 import os
 import platform
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -111,10 +112,40 @@ def can_self_install() -> str:
 
 
 # -- the check -------------------------------------------------------------------------------------------------
+_ssl_ctx: ssl.SSLContext | None = None
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """A verifying TLS context that also works in the frozen app. Python's default context trusts the OS
+    store on Linux, but the macOS and Windows builds PyInstaller freezes have no CA file at all (the python.org
+    macOS installer relies on its own certifi copy, which a frozen app does not inherit), so every https
+    request failed with CERTIFICATE_VERIFY_FAILED (issue #21). The bundled certifi CAs are added on top of
+    whatever the system provides; without certifi (a source checkout without it) the system store alone."""
+    global _ssl_ctx
+    if _ssl_ctx is None:
+        ctx = ssl.create_default_context()
+        try:
+            import certifi
+            ctx.load_verify_locations(cafile=certifi.where())
+        except Exception as e:   # no certifi, or an unreadable file: keep the system store
+            log.debug("certifi CAs not loaded: %s", e)
+        _ssl_ctx = ctx
+    return _ssl_ctx
+
+
+def _reason(e: BaseException) -> str:
+    """A sentence for a URLError/OSError: names a failed certificate check, which looks like "cannot reach"
+    otherwise, and the user then checks their network instead of the app."""
+    reason = getattr(e, "reason", None) or e
+    if isinstance(reason, ssl.SSLError):
+        return f"the TLS certificate check for GitHub failed ({reason})"
+    return str(reason)
+
+
 def _get(url: str, timeout: float) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": f"claudius-maximus/{current_version()}",
                                                "Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:   # noqa: S310 (fixed https URL)
+    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as r:   # noqa: S310 (fixed https URL)
         return r.read()
 
 
@@ -128,7 +159,7 @@ def check(timeout: float = TIMEOUT_S, url: str | None = None) -> Release:
             raise UpdateError("GitHub is rate-limiting update checks from this address; try again later") from e
         raise UpdateError(f"the Releases page answered {e.code}") from e
     except (urllib.error.URLError, OSError, ValueError) as e:
-        raise UpdateError(f"cannot reach the Releases page ({getattr(e, 'reason', None) or e})") from e
+        raise UpdateError(f"cannot reach the Releases page ({_reason(e)})") from e
     if not isinstance(data, dict) or not data.get("tag_name"):
         raise UpdateError("the Releases page gave an unexpected answer")
     tag = str(data["tag_name"])
@@ -172,7 +203,8 @@ def download(url: str, dest: str, size: int = 0, progress: Progress | None = Non
     req = urllib.request.Request(url, headers={"User-Agent": f"claudius-maximus/{current_version()}"})
     try:
         os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
-        with urllib.request.urlopen(req, timeout=timeout) as r, open(part, "wb") as f:   # noqa: S310
+        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as r, \
+                open(part, "wb") as f:   # noqa: S310
             total = size or int(r.headers.get("Content-Length") or 0)
             got, last = 0, -1
             while True:
@@ -197,7 +229,7 @@ def download(url: str, dest: str, size: int = 0, progress: Progress | None = Non
             pass
         if isinstance(e, UpdateError):
             raise
-        raise UpdateError(f"download failed: {getattr(e, 'reason', None) or e}") from e
+        raise UpdateError(f"download failed: {_reason(e)}") from e
 
 
 def _popen_detached(cmd: list[str], **kw) -> None:

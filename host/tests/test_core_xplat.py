@@ -1241,6 +1241,41 @@ class UpdaterTest(TempHome):
             with self.assertRaises(updater.UpdateError):
                 updater.check()
 
+    def test_tls_context_and_certificate_errors(self):
+        """Issue #21: the frozen app has no OS CA store; the requests use a context with certifi's CAs, and a
+        failed certificate check is reported as such, not as "cannot reach"."""
+        import ssl
+        import urllib.error
+        from companion import updater
+        updater._ssl_ctx = None
+        ctx = updater._ssl_context()
+        self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(ctx.check_hostname)
+        self.assertIs(updater._ssl_context(), ctx)                                  # built once
+        try:
+            import certifi
+        except ImportError:
+            certifi = None
+        if certifi:
+            self.assertGreater(ctx.cert_store_stats()["x509_ca"], 100)             # certifi's CAs are loaded
+        # every request goes through that context
+        resp = mock.MagicMock()
+        resp.__enter__.return_value.read.return_value = b"{}"
+        with mock.patch.object(updater.urllib.request, "urlopen", return_value=resp) as uo:
+            updater._get("https://api/x", 1.0)
+        self.assertIs(uo.call_args.kwargs["context"], ctx)
+        # a certificate failure names the certificate check
+        err = urllib.error.URLError(ssl.SSLCertVerificationError("[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate"))
+        with mock.patch.object(updater, "_get", side_effect=err):
+            with self.assertRaises(updater.UpdateError) as cm:
+                updater.check()
+        self.assertIn("certificate check", str(cm.exception))
+        self.assertIn("CERTIFICATE_VERIFY_FAILED", str(cm.exception))
+        with mock.patch.object(updater.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(updater.UpdateError) as cm:
+                updater.download("https://dl/a", os.path.join(tempfile.mkdtemp(), "f"), 0)
+        self.assertIn("certificate check", str(cm.exception))
+
     def test_daily_check_schedule_and_toggle(self):
         from companion import updater
         T = 1.7e9   # a real clock: never checked yet (0) means due

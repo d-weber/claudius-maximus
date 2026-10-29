@@ -281,6 +281,38 @@ class ReviewTest(unittest.TestCase):
         p2.start()
         self.addCleanup(p2.stop)
 
+    def test_ports_esptool_left_open_are_closed(self):
+        """Issue #20: esptool re-raises a failed connect on a named port without closing it; in-process the
+        exclusive lock would then block every later flash. _run_esptool closes what esptool left open."""
+        try:
+            import esptool
+            import serial
+        except ImportError:
+            self.skipTest("esptool not installed")
+        left = []
+
+        def fake_main(args):
+            s = serial.serial_for_url("loop://", do_not_open=True)   # what ESPLoader.__init__ does
+            s.open()
+            left.append(s)
+            raise esptool.FatalError("device reports readiness to read but returned no data")
+
+        prog = flasher._Progress(flasher.bundled()["4b"], None)
+        with mock.patch.object(esptool, "main", side_effect=fake_main):
+            with self.assertRaises(esptool.FatalError):
+                flasher._run_esptool(["x"], prog, None)
+        self.assertEqual(len(left), 1)
+        self.assertFalse(left[0].is_open)
+        self.assertIs(serial.serial_for_url.__name__, "serial_for_url")   # the hook is gone afterwards
+        # and a successful run (esptool closes its own port) is left alone
+        def ok_main(args):
+            s = serial.serial_for_url("loop://")
+            left.append(s)
+            s.close()
+        with mock.patch.object(esptool, "main", side_effect=ok_main):
+            flasher._run_esptool(["x"], prog, None)
+        self.assertFalse(left[1].is_open)
+
     def test_logger_restored_after_esptool_error(self):
         try:
             import esptool
