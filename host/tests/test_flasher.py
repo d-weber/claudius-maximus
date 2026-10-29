@@ -281,6 +281,61 @@ class ReviewTest(unittest.TestCase):
         p2.start()
         self.addCleanup(p2.stop)
 
+    def test_ports_esptool_left_open_are_closed(self):
+        """Issue #20: esptool re-raises a failed connect on a named port without closing it; in-process the
+        exclusive lock would then block every later flash. _run_esptool closes what esptool left open."""
+        try:
+            import esptool
+            import serial
+        except ImportError:
+            self.skipTest("esptool not installed")
+        left = []
+        orig = serial.serial_for_url
+
+        def fake_main(args):
+            self.assertIsNot(serial.serial_for_url, orig)                   # the hook is in place during the run
+            s = serial.serial_for_url("loop://", do_not_open=True)   # what ESPLoader.__init__ does
+            s.open()
+            left.append(s)
+            raise esptool.FatalError("device reports readiness to read but returned no data")
+
+        prog = flasher._Progress(flasher.bundled()["4b"], None)
+        with mock.patch.object(esptool, "main", side_effect=fake_main):
+            with self.assertRaises(esptool.FatalError):
+                flasher._run_esptool(["x"], prog, None)
+        self.assertEqual(len(left), 1)
+        self.assertFalse(left[0].is_open)
+        self.assertIs(serial.serial_for_url, orig)                          # the hook is gone afterwards
+        self.assertFalse(flasher._esptool_lock.locked())
+        # only the flashed port is closed: another port opened meanwhile is not ours to close
+        def other_main(args):
+            s = serial.serial_for_url("loop://")
+            left.append(s)
+            raise esptool.FatalError("x")
+        with mock.patch.object(esptool, "main", side_effect=other_main):
+            with self.assertRaises(esptool.FatalError):
+                flasher._run_esptool(["--port", "/dev/not-loop"], prog, None)
+        self.assertTrue(left[-1].is_open)
+        left[-1].close()
+        # a second flash while one runs fails at once instead of waiting
+        self.assertTrue(flasher._esptool_lock.acquire(blocking=False))
+        try:
+            with self.assertRaises(flasher.FlashError) as cm:
+                flasher._run_esptool(["x"], prog, None)
+            self.assertIn("already running", str(cm.exception))
+        finally:
+            flasher._esptool_lock.release()
+        self.assertEqual(flasher._port_arg(["--chip", "esp32s3", "--port", "COM5", "--baud", "1"]), "COM5")
+        self.assertIsNone(flasher._port_arg(["--port"]))
+        # and a successful run (esptool closes its own port) is left alone
+        def ok_main(args):
+            s = serial.serial_for_url("loop://")
+            left.append(s)
+            s.close()
+        with mock.patch.object(esptool, "main", side_effect=ok_main):
+            flasher._run_esptool(["x"], prog, None)
+        self.assertFalse(left[1].is_open)
+
     def test_logger_restored_after_esptool_error(self):
         try:
             import esptool

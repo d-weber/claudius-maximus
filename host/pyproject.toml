@@ -19,6 +19,7 @@ dependencies = [
   "psutil>=5.9",
   "pillow>=10",
   "esptool>=5.0,<6",
+  "certifi>=2024.2.2",
   "pystray>=0.19; sys_platform != 'linux'",
   "pyobjc-framework-Cocoa>=10; sys_platform == 'darwin'",
   "dbus-fast>=2.20; sys_platform == 'linux'",

@@ -30,6 +30,7 @@ hiddenimports = [
     *collect_submodules("esptool"),            # chip targets are loaded by name
     "PIL", "PIL.Image", "PIL.ImageDraw", "PIL.ImageFont",
     "serial", "serial.tools.list_ports",
+    "certifi",                                 # CA bundle for the update check (PyInstaller's hook adds cacert.pem)
 ]
 if WIN:
     hiddenimports += ["pystray._win32", "serial.tools.list_ports_windows", "psutil._pswindows"]

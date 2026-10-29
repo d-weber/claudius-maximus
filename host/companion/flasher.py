@@ -41,6 +41,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -322,8 +323,62 @@ class _Progress:
             self.last_frac = 0.0
 
 
+_esptool_lock = threading.Lock()
+
+
+def _port_arg(args: list[str]) -> str | None:
+    for flag in ("--port", "-p"):
+        if flag in args and args.index(flag) + 1 < len(args):
+            return args[args.index(flag) + 1]
+    return None
+
+
+@contextlib.contextmanager
+def _closing_esptool_port(port: str | None):
+    """Close the serial port esptool leaves open. esptool.main() closes the ESPLoader's port only on its
+    success path (esptool/__init__.py, after the command ran): a failed connect on a named port
+    (connect_first_available re-raises), a failed stub upload, write or reset all leave it open. As a one-shot
+    process that does not matter; in-process the handle lives on in the traceback, with pyserial's exclusive
+    flock on it, and every later open of the port in this or any other process fails with "could not
+    exclusively lock" until the app is restarted (issue #20). esptool reaches pyserial through
+    serial.serial_for_url: record what it returns for the duration of the call and close what is still open
+    on `port` afterwards (any port, if the args named none). The hook rebinds a pyserial module global, so one
+    run at a time: a second caller gets a FlashError at once rather than a silent wait (link.py and
+    request_download_mode open ports with serial.Serial(), which the hook does not see)."""
+    import serial
+    if not _esptool_lock.acquire(blocking=False):
+        raise FlashError("A flash is already running; wait for it to finish.")
+    opened: list = []
+    orig = serial.serial_for_url
+
+    def tracking(*a, **k):
+        s = orig(*a, **k)
+        opened.append(s)
+        return s
+
+    serial.serial_for_url = tracking
+    try:
+        yield
+    finally:
+        serial.serial_for_url = orig
+        for s in opened:
+            try:
+                if s.is_open and (port is None or getattr(s, "port", None) == port):
+                    s.close()
+            except Exception:
+                pass
+        _esptool_lock.release()
+
+
 def _run_esptool(args: list[str], prog: _Progress, log: Log | None) -> None:
-    """esptool.main(args) in-process with output routed to log() and progress to prog."""
+    """esptool.main(args) in-process with output routed to log() and progress to prog, with the port esptool
+    opened closed on the way out, whether it succeeded or raised (_closing_esptool_port). The tests and
+    flash() go through this function; _esptool_main is the body."""
+    with _closing_esptool_port(_port_arg(args)):
+        _esptool_main(args, prog, log)
+
+
+def _esptool_main(args: list[str], prog: _Progress, log: Log | None) -> None:
     import esptool
 
     def emit(text: str):
