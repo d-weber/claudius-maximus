@@ -10,8 +10,8 @@ static inline uint32_t perf_now_us() { return (uint32_t)esp_timer_get_time(); }
 void perf_add(PerfSlot s, uint32_t us);        // accumulate a measured span
 void perf_loop(uint32_t busy_us);              // once per main loop iteration (work time, excl. delay)
 void perf_report();                            // send {"t":"perf"} line and reset window
-// PROBE: one home-room Director::draw (its time; cumulative sprite-path fallback counters, 0 in the procedural build)
-void perf_room_draw(uint32_t us, uint32_t fallbacks, uint32_t fallback_frames);
+// PROBE: the time of one home-room Director::draw
+void perf_room_draw(uint32_t us);
 
 // What the main loop is doing right now (0 = idle/delay, else PerfSlot + 1); read by the LCD vsync ISR to
 // attribute late interrupts (hal.cpp probe). `perf_loop_task` = the main loop task, set by perf_init.

@@ -1,8 +1,6 @@
 // The director: Clawd's behaviour in his studio. See director.h for the overview.
 #include "director.h"
-#if ROOM_SPRITES
 #include "sprites_gen.h"
-#endif
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
@@ -609,9 +607,9 @@ void Director::step() {
 }
 
 // ---------------------------------------------------------------- drawing
-void Director::composePose(ClawdPose &p, int &emote, Idx &emoteCol, int &jump, int &shake) const {
+void Director::composePose(ClawdPose &p, int &emote, int &jump, int &shake) const {
   p.x = cx; p.y = cy; p.tint = task == TASK_OFFLINE ? TINT_GREY : TINT_CORAL;
-  emote = -1; emoteCol = OUT; jump = 0; shake = 0;
+  emote = -1; jump = 0; shake = 0;
   p.view = walking ? walkView : view;
   p.legPhase = walking ? legPhase : 0;
   p.arms = ARMS_DOWN;
@@ -621,24 +619,24 @@ void Director::composePose(ClawdPose &p, int &emote, Idx &emoteCol, int &jump, i
     switch (task) {
       case TASK_CODE: case TASK_WEB:
         if (station == ST_DESK) { p.arms = typeBurst > 0 ? (((tick / 3) & 1) ? ARMS_TYPE_A : ARMS_TYPE_B) : ARMS_DOWN; }
-        if (settled && station == ST_DESK) { emote = task == TASK_WEB ? ICO_WEB : ICO_CODE; emoteCol = task == TASK_WEB ? RUG2 : SCRD; }
+        if (settled && station == ST_DESK) { emote = task == TASK_WEB ? ICO_WEB : ICO_CODE; }
         break;
-      case TASK_REVIEW: if (settled && station == ST_DESK) { emote = ICO_LOOK; emoteCol = RUG2; } break;
-      case TASK_READ: p.arms = ARMS_HOLD; if (settled) { emote = ICO_BOOK; emoteCol = RED; } break;
+      case TASK_REVIEW: if (settled && station == ST_DESK) { emote = ICO_LOOK; } break;
+      case TASK_READ: p.arms = ARMS_HOLD; if (settled) { emote = ICO_BOOK; } break;
       case TASK_RUN:
         if (station == ST_RACK) p.arms = ((tick % 36) < 3) ? ARMS_UP_L : ARMS_DOWN;
-        if (settled && station == ST_RACK) { emote = ICO_PLAY; emoteCol = GRN2; }
+        if (settled && station == ST_RACK) { emote = ICO_PLAY; }
         break;
       case TASK_SEARCH:
         if (station == ST_SHELF) { p.view = FRONT; p.arms = ((tick / 4) & 1) ? ARMS_UP_L : ARMS_UP_R; }
         else if (station == ST_DRAWER) p.arms = ARMS_UP_R;
         else p.legPhase = ((tick / 4) & 1) ? 1 : 0;
-        if (settled) { emote = ICO_LOOK; emoteCol = RUG2; }
+        if (settled) { emote = ICO_LOOK; }
         break;
       case TASK_DELEGATE: if (shownHelpers) p.arms = ((tick / 6) & 1) ? ARMS_WAVE_A : ARMS_WAVE_B; break;
       case TASK_PLAN:
         if (station == ST_BOARD) p.arms = ((tick / 2) & 1) ? ARMS_UP_R : ARMS_UP;
-        if (settled && station == ST_BOARD) { emote = ICO_PEN; emoteCol = PUR; }
+        if (settled && station == ST_BOARD) { emote = ICO_PEN; }
         break;
       case TASK_WAIT:
         p.eyes = EYES_WIDE; p.arms = ARMS_UP; p.mouth = MOUTH_O;
@@ -683,7 +681,7 @@ void Director::composePose(ClawdPose &p, int &emote, Idx &emoteCol, int &jump, i
         case FID_NOD: jump = ((t / 3) & 1); break;
         case FID_HOP: jump = t < 4 ? t : 8 - t; if (jump < 0) jump = 0; break;
         case FID_TAP_FOOT: p.legPhase = ((t / 2) & 1) ? 1 : 0; break;
-        case FID_SHRUG: p.arms = ARMS_UP; p.view = FRONT; emote = ICO_QUESTION; emoteCol = RUG2; break;
+        case FID_SHRUG: p.arms = ARMS_UP; p.view = FRONT; emote = ICO_QUESTION; break;
         case FID_SPIN: { static const View V[] = {FRONT, RIGHTV, BACK, LEFTV}; p.view = V[(t / 2) % 4]; break; }
         case FID_WAVE: p.view = FRONT; p.arms = ((t / 3) & 1) ? ARMS_WAVE_A : ARMS_WAVE_B; p.mouth = MOUTH_SMILE; break;
         case FID_YAWN: p.view = FRONT; p.mouth = MOUTH_O; p.eyes = EYES_BLINK; p.arms = (t > 5 && t < 14) ? ARMS_UP : ARMS_DOWN; break;
@@ -697,138 +695,21 @@ void Director::composePose(ClawdPose &p, int &emote, Idx &emoteCol, int &jump, i
     emote = -1;
     switch (reactId) {
       case REACT_GLANCE: p.view = FRONT; break;
-      case REACT_HOP: p.view = FRONT; jump = t < 4 ? t : (t < 8 ? 8 - t : 0); emote = ICO_CHECK; emoteCol = GRN; break;
-      case REACT_SURPRISE: p.view = FRONT; p.eyes = EYES_WIDE; p.mouth = MOUTH_O; p.arms = ARMS_UP; emote = ICO_BANG; emoteCol = QO; break;
-      case REACT_WINK: p.view = FRONT; p.eyes = EYES_WINK; p.mouth = MOUTH_SMILE; emote = ICO_HEART; emoteCol = RED; break;
-      case REACT_GIGGLE: p.view = FRONT; p.eyes = EYES_HAPPY; p.mouth = MOUTH_SMILE; p.blush = true; jump = ((t / 2) & 1); emote = ICO_NOTE; emoteCol = PUR; break;
-      case REACT_HAPPY: { p.view = FRONT; p.eyes = EYES_HAPPY; p.mouth = MOUTH_SMILE; p.arms = ARMS_UP; int k = t % 10; jump = k < 5 ? k : 10 - k; if (t > 20) jump = 0; emote = ICO_STAR; emoteCol = QO; break; }
-      case REACT_WINCE: p.view = FRONT; p.eyes = EYES_WINCE; p.mouth = MOUTH_FLAT; shake = t < 8 ? ((t & 1) ? 1 : -1) : 0; emote = ICO_CROSS; emoteCol = RED; break;
+      case REACT_HOP: p.view = FRONT; jump = t < 4 ? t : (t < 8 ? 8 - t : 0); emote = ICO_CHECK; break;
+      case REACT_SURPRISE: p.view = FRONT; p.eyes = EYES_WIDE; p.mouth = MOUTH_O; p.arms = ARMS_UP; emote = ICO_BANG; break;
+      case REACT_WINK: p.view = FRONT; p.eyes = EYES_WINK; p.mouth = MOUTH_SMILE; emote = ICO_HEART; break;
+      case REACT_GIGGLE: p.view = FRONT; p.eyes = EYES_HAPPY; p.mouth = MOUTH_SMILE; p.blush = true; jump = ((t / 2) & 1); emote = ICO_NOTE; break;
+      case REACT_HAPPY: { p.view = FRONT; p.eyes = EYES_HAPPY; p.mouth = MOUTH_SMILE; p.arms = ARMS_UP; int k = t % 10; jump = k < 5 ? k : 10 - k; if (t > 20) jump = 0; emote = ICO_STAR; break; }
+      case REACT_WINCE: p.view = FRONT; p.eyes = EYES_WINCE; p.mouth = MOUTH_FLAT; shake = t < 8 ? ((t & 1) ? 1 : -1) : 0; emote = ICO_CROSS; break;
       default: break;
     }
   }
   p.x += shake; p.y -= jump;
 }
 
-void Director::drawClawdNow(Canvas &c) {
-  ClawdPose p; int emote, jump, shake; Idx ecol;
-  composePose(p, emote, ecol, jump, shake);
-  drawClawd(c, p);
-  // held props
-  if (p.arms == ARMS_HOLD) drawBook(c, p.x + 2, p.y + 6, page);
-  if (fid == FID_SIP || (fid == ERR_COFFEE && errPhase == 1)) drawMugHeld(c, p.x + 15, p.y - 2);
-  if (fid == ERR_WATER && errPhase == 1) drawCan(c, p.x + 16, p.y + 3, true, (int)tick);
-  if (task == TASK_SEARCH && station == ST_UNDERDESK && !walking) drawTorch(c, p.x + 17, p.y + 2);
-  if (task == TASK_WAIT) {
-    int lift = (tick / 6) % 2;
-    drawQuestBang(c, p.x - 3, p.y - 40, lift);
-  } else if (emote >= 0) {
-    // above the head, except where that would cover the monitor / whiteboard: then beside him
-    int ex = p.x + 3, ey = p.y - 13 - emoteBob; bool tailRight = false;
-    if (station == ST_DESK || station == ST_RACK || station == ST_DRAWER) { ex = p.x - 13; ey = p.y - 7 - emoteBob; tailRight = true; }
-    else if (station == ST_BOARD || station == ST_WINDOW) { ex = p.x + 19; ey = p.y - 4 - emoteBob; }
-    else if (p.x > 95) { ex = p.x - 2; tailRight = true; }
-    drawEmote(c, ex, ey, (Icon)emote, ecol, tailRight);
-  }
-  if ((task == TASK_THINK) && !walking && fid == FID_NONE && reactId < 0 && atT > 4) {
-    drawThought(c, p.x + 10, p.y - 24, thinkDots, p.x + 16, p.y - 4);
-  }
-  if (reactId == REACT_HAPPY) {
-    int t = reactT;
-    for (int i = 0; i < 8; i++) {
-      float a = i * 3.14159f / 4 + 0.4f;
-      int rr = 17 + ((t / 3) % 2) * 4;
-      static const Idx SC[4] = {QY, QW, SCR, QY};
-      drawSparkle(c, (int)(p.x + 9 + cosf(a) * rr), (int)(p.y + 6 + sinf(a) * rr * 0.75f), SC[i % 4], true);
-    }
-    static const int8_t CF[6][2] = {{-8, -17}, {26, -14}, {-2, -22}, {20, -22}, {-12, -4}, {30, -2}};
-    static const Idx CC[6] = {RED, RUG, GRN, PUR, YEL, PINK};
-    for (int i = 0; i < 6; i++) c.r(p.x + CF[i][0], p.y + CF[i][1] + t / 2, p.x + CF[i][0] + 1, p.y + CF[i][1] + t / 2, CC[i]);
-  }
-  if (reactId == REACT_WINCE) drawSweat(c, p.x + 17, p.y - 3);
-}
-
-void Director::drawSprites(Canvas &c) {
-  // painter's order by feet y: minis, Clawd, the plant
-  struct D { int key, kind, idx; } d[MAX_MINIS + 2]; int n = 0;
-  for (int i = 0; i < MAX_MINIS; i++) if (minis[i].state) d[n++] = {(int)minis[i].y, 1, i};
-  if (!inBed) d[n++] = {cy + 11, 0, 0};
-  d[n++] = {97, 2, 0};
-  for (int i = 1; i < n; i++) { D t = d[i]; int j = i - 1; while (j >= 0 && d[j].key > t.key) { d[j + 1] = d[j]; j--; } d[j + 1] = t; }
-  for (int i = 0; i < n; i++) {
-    if (d[i].kind == 2) drawPlant(c, plantSway);
-    else if (d[i].kind == 0) drawClawdNow(c);
-    else {
-      const Mini &m = minis[d[i].idx];
-      int mx = (int)(m.x + 0.5f), my = (int)(m.y + 0.5f) - 8;
-      drawMini(c, mx, my, m.view, m.state == 2 ? m.legPhase : m.legPhase, TINT_VIOLET, m.blink);
-      if (m.state == 2 && m.st == 1) { c.r(mx + 1, my + 4, mx + 10, my + 8, OUT); c.r(mx + 2, my + 5, mx + 5, my + 7, CRM); c.r(mx + 6, my + 5, mx + 9, my + 7, WHT); }
-    }
-  }
-}
-
-void Director::drawFx(Canvas &c) {
-  if (inBed) {
-    drawClawdInBed(c, sleepShift, sleepEyes > 0, task == TASK_OFFLINE ? TINT_GREY : TINT_CORAL);
-    if (sleepEyes == 0) drawZzz(c, 24 + sleepShift, 56, (int)tick);
-  }
-  if (task == TASK_DELEGATE && !walking && reactId < 0) {
-    for (int i = 0; i < MAX_MINIS; i++) if (minis[i].state == 2) drawDash(c, cx + 9, cy + 2, (int)minis[i].x + 5, (int)minis[i].y - 4, (int)tick, QY);
-  }
-  if (task == TASK_WAIT) drawAlarmRing(c, alarmPhase);
-}
-
-void Director::draw(Canvas &c) {
-#if ROOM_SPRITES
-  if (!procPath) { drawSpr(c); return; }
-#endif
-  c.clear(OUT);
-  drawWalls(c);
-  drawFloor(c);
-  float tod = in.tod;
-  bool night = win.mode == SKY_NIGHT;
-  if (!night && !rain && tod >= 7.f && tod < 19.5f) {
-    int off = (int)lroundf((13.f - tod) * 2.6f);
-    if (off > 14) off = 14;
-    if (off < -14) off = -14;
-    drawSunPatch(c, off, 20 + iabs(off) / 2, FL);
-  } else if (night && task != TASK_OFFLINE) {
-    float mt = tod >= 21.f ? tod - 24.f : tod;
-    int off = (int)lroundf(mt * -2.5f);
-    if (off > 10) off = 10;
-    if (off < -10) off = -10;
-    drawSunPatch(c, off, 16, MOONF);
-  }
-  if (lampOn) drawLampPool(c);
-  if (task == TASK_WAIT) drawDoorSpot(c);
-  drawWindow(c, win);
-  drawWhiteboard(c, in.todoTotal, in.todoDone);
-  drawBookshelf(c, shelfGap);
-  drawDesk(c, desk);
-  drawRack(c, task == TASK_RUN && station == ST_RACK && !walking, ledT, (task == TASK_RUN && !walking) ? runProg : -1, runSeed);
-  drawRug(c);
-  drawBed(c, inBed, breath);
-  drawNightstand(c, lampOn);
-  if (task == TASK_SEARCH && station == ST_UNDERDESK && !walking) {
-    drawUnderDeskBeam(c, (int)tick);
-    drawPaper(c, 88, 44);
-    if ((tick / 4) % 3 == 0) drawSparkle(c, 92, 43, QW);
-  }
-  drawSprites(c);
-  drawFx(c);
-}
-
-#if ROOM_SPRITES
-// ---------------------------------------------------------------- sprite path (experiment, docs/PERF.md "sprite-room")
-// The same frame as the procedural draw() above, from the pre-rendered tables in sprites_gen.h (tools/sprites/).
-// The lighting passes that read the canvas (sun / moon patch, lamp pool, door spot, under-desk beam, shadows) stay
-// procedural. Where no sprite matches the state, that element is drawn procedurally and counted in sprFallbacks.
-#ifdef ROOM_SPR_DEBUG   // host harness only: fallbacks per site (window desk rack bed clawd emote plant mini bedhead dash)
-uint32_t room_spr_debug_site[10];
-void room_spr_debug_pose(const ClawdPose &p);
-#define SPR_FALLBACK(site) (sprFallbacks++, room_spr_debug_site[site]++)
-#else
-#define SPR_FALLBACK(site) (sprFallbacks++)
-#endif
+// Every element comes from the sheets (sprites_gen.h, generated from firmware/assets/sprites by tools/sprites.py).
+// Only the lighting passes that recolour what is drawn (sun / moon patch, lamp pool, door spot, under-desk beam,
+// shadows) are code; which frame is shown, and where, is the director's.
 namespace {
 using spr::Sprite;
 const Sprite *const *const NIGHT[8] = {spr::window_night_m0, spr::window_night_m1, spr::window_night_m2, spr::window_night_m3,
@@ -837,7 +718,7 @@ const Sprite *const *const BOARD[5] = {spr::whiteboard_1, spr::whiteboard_2, spr
 const Sprite *const *const CWALK[4] = {spr::clawd_front_walk, spr::clawd_back_walk, spr::clawd_left_walk, spr::clawd_right_walk};
 const Sprite *const *const CARMS[4] = {spr::clawd_front_arms, spr::clawd_back_arms, spr::clawd_left_arms, spr::clawd_right_arms};
 const Sprite *const *const MWALK[4] = {spr::mini_front_walk, spr::mini_back_walk, spr::mini_left_walk, spr::mini_right_walk};
-// clawd_expr frames (tools/sprites/sheet.cpp, same order): arms, eyes (SLEEP folded into BLINK), mouth, legPhase, blush
+// clawd_expr frames (firmware/assets/sprites/atlas.json, same order): arms, eyes (SLEEP folded into BLINK), mouth, legPhase, blush
 struct Expr { int8_t a, e, m, leg; bool blush; };
 const Expr EXPR[] = {
     {ARMS_UP, EYES_WIDE, MOUTH_O, 0, false},     {ARMS_UP, EYES_LOOK_L, MOUTH_O, 0, false},    {ARMS_UP, EYES_LOOK_R, MOUTH_O, 0, false},
@@ -847,38 +728,77 @@ const Expr EXPR[] = {
     {ARMS_UP, EYES_BLINK, MOUTH_O, 0, false},    {ARMS_WAVE_A, EYES_OPEN, MOUTH_SMILE, 0, false}, {ARMS_WAVE_B, EYES_OPEN, MOUTH_SMILE, 0, false},
     {ARMS_UP_R, EYES_BLINK, MOUTH_NONE, 0, false}, {ARMS_DOWN, EYES_BLINK, MOUTH_NONE, 0, false}, {ARMS_DOWN, EYES_BLINK, MOUTH_NONE, 1, false},
 };
-static_assert(sizeof EXPR / sizeof *EXPR == spr::clawd_expr_n, "clawd_expr out of sync with tools/sprites/sheet.cpp");
-// the emote colour each icon was rendered in (the director's choice); another colour falls back
-const Idx EMOTE_COL[ICO_COUNT] = {SCRD, GRN2, QO, RUG2, GRN, RED, RED, PUR, RUG2, QO, GRN, RED, INK, RUG2, PUR, W2};
+static_assert(sizeof EXPR / sizeof *EXPR == spr::clawd_expr_n, "clawd_expr out of sync with the clawd sheet (atlas.json)");
+// A grey / violet Clawd in a pose clawd_tint does not have: the coral sprite with its three body entries swapped.
+struct TintMaps { Idx m[3][N_COL]; };
+constexpr TintMaps makeTintMaps() {
+  TintMaps t{};
+  const Idx to[3][3] = {{C, CS, CH}, {GC, GCS, GCH}, {VC, VCS, VCH}};
+  for (int k = 0; k < 3; k++) {
+    for (int i = 0; i < N_COL; i++) t.m[k][i] = (Idx)i;
+    for (int j = 0; j < 3; j++) t.m[k][to[0][j]] = to[k][j];
+  }
+  return t;
+}
+constexpr TintMaps TINT_MAPS = makeTintMaps();
 
-// Clawd's pose -> one pre-rendered sprite, or null. Only what the pose actually draws counts: the back view has no
-// face, the side views show only open / closed eyes, SLEEP draws like BLINK.
-const Sprite *clawdSprite(const ClawdPose &p) {
-  int v = p.view, e = p.eyes == EYES_SLEEP ? EYES_BLINK : p.eyes, m = p.mouth, leg = p.legPhase, a = p.arms;
-  bool b = p.blush;
-  if (v == BACK) { e = EYES_OPEN; m = MOUTH_NONE; b = false; }
-  else if (v != FRONT) { m = MOUTH_NONE; b = false; e = e == EYES_BLINK ? EYES_BLINK : EYES_OPEN; }
-  if (leg < 0 || leg > 3) return nullptr;
+// The sprite that draws exactly this (normalised) pose, or null.
+const Sprite *clawdExact(int v, int a, int e, int m, int leg, bool b) {
   bool face0 = e == EYES_OPEN && m == MOUTH_NONE && !b;
-  if (p.tint != TINT_CORAL)
-    return v == FRONT && leg == 0 && a == ARMS_DOWN && face0 ? spr::clawd_tint[p.tint] : nullptr;
   if (a == ARMS_DOWN && face0) return CWALK[v][leg];
   if (leg == 0 && face0) return CARMS[v][a];
   if (v == FRONT && leg == 0 && a == ARMS_DOWN && m == MOUTH_NONE && !b) return spr::clawd_eyes[e];
   if (v == FRONT && leg == 0 && a == ARMS_DOWN && e == EYES_OPEN && !b) return spr::clawd_mouth[m];
-  if ((v == LEFTV || v == RIGHTV) && leg == 0 && a == ARMS_DOWN && e == EYES_BLINK) return spr::clawd_side_blink[v == LEFTV ? 0 : 1];
+  if (v != FRONT && v != BACK && leg == 0 && a == ARMS_DOWN && e == EYES_BLINK) return spr::clawd_side_blink[v == LEFTV ? 0 : 1];
   if (v == FRONT)
     for (int i = 0; i < spr::clawd_expr_n; i++)
       if (EXPR[i].a == a && EXPR[i].e == e && EXPR[i].m == m && EXPR[i].leg == leg && EXPR[i].blush == b) return spr::clawd_expr[i];
   return nullptr;
 }
 
+// Clawd's pose -> the sheet sprite that draws it, or the closest one; *remap is set for a tint swap. The sheet
+// has walk cycles, every arm pose standing, every eye / mouth alone and the director's usual face combinations
+// (clawd_expr), not the product of all of them. Normalised first (what the pose draws: ARMS_HOLD draws as
+// ARMS_DOWN, SLEEP as BLINK, the back view has no face, the side views only open / closed eyes). Then, when no
+// frame matches exactly:
+//   1. a blink (2 ticks) is dropped: the eyes stay open;
+//   2. moving legs with arms down: the walk frame, face ignored; with arms raised the arms win and the legs stand;
+//   3. standing: drop the blush, then the mouth; then raised arms win over the eyes (arms frame, eyes open);
+//      arms down: the eyes frame (front) or the plain / blink frame (sides, back).
+// Grey / violet: clawd_tint when the pose is its (front, standing, plain), else the coral choice tint-swapped.
+const Sprite *clawdSprite(const ClawdPose &p, const Idx **remap) {
+  int v = p.view & 3, e = p.eyes == EYES_SLEEP ? EYES_BLINK : p.eyes, m = p.mouth, leg = p.legPhase & 3;
+  int a = p.arms == ARMS_HOLD ? ARMS_DOWN : p.arms;
+  bool b = p.blush;
+  if (v == BACK) { e = EYES_OPEN; m = MOUTH_NONE; b = false; }
+  else if (v != FRONT) { m = MOUTH_NONE; b = false; e = e == EYES_BLINK ? EYES_BLINK : EYES_OPEN; }
+  *remap = nullptr;
+  if (p.tint != TINT_CORAL) {
+    if (v == FRONT && leg == 0 && a == ARMS_DOWN && e == EYES_OPEN && m == MOUTH_NONE && !b) return spr::clawd_tint[p.tint];
+    *remap = TINT_MAPS.m[p.tint];
+  }
+  if (const Sprite *s = clawdExact(v, a, e, m, leg, b)) return s;
+  if (p.eyes == EYES_BLINK) {
+    e = EYES_OPEN;
+    if (const Sprite *s = clawdExact(v, a, e, m, leg, b)) return s;
+  }
+  if (leg) {
+    if (a == ARMS_DOWN) return CWALK[v][leg];
+    leg = 0;
+    if (const Sprite *s = clawdExact(v, a, e, m, leg, b)) return s;
+  }
+  if (b) { b = false; if (const Sprite *s = clawdExact(v, a, e, m, 0, b)) return s; }
+  if (m) { m = MOUTH_NONE; if (const Sprite *s = clawdExact(v, a, e, m, 0, b)) return s; }
+  if (a != ARMS_DOWN) return CARMS[v][a];
+  if (v == FRONT) return spr::clawd_eyes[e];
+  return e == EYES_BLINK && v != BACK ? spr::clawd_side_blink[v == LEFTV ? 0 : 1] : CWALK[v][0];
+}
+
 // Redraw the canvas rect (x0..x1, y0..y1) from a fixed-anchor opaque sprite (floor, walls, background).
 void copyRect(Canvas &c, const Sprite &s, int x0, int y0, int x1, int y1) { c.blitRect(0, 0, s, false, x0, y0, x1, y1); }
 }  // namespace
 
-void Director::drawSpr(Canvas &c) {
-  uint32_t fb0 = sprFallbacks;
+void Director::draw(Canvas &c) {
   // walls, floor, rug, furniture at rest (screen dim, day window at cloudX 0, empty board, idle rack), plant sway 0
   if (!bgCache) {
     bgCache = (Idx *)malloc(W * H);
@@ -889,7 +809,7 @@ void Director::drawSpr(Canvas &c) {
   memcpy(c.buf, bgCache, W * H);
   // the plant is part of the painter pass below (it can stand in front of / behind Clawd): floor back under it
   copyRect(c, spr::floor_0, 100, 82, 113, 98);
-  // lighting reads the floor: procedural, as in draw(). Furniture has no floor colours, so it may run after it.
+  // lighting reads the floor; furniture has no floor colours, so it may run first
   float tod = in.tod;
   bool night = win.mode == SKY_NIGHT;
   if (!night && !rain && tod >= 7.f && tod < 19.5f) {
@@ -906,29 +826,33 @@ void Director::drawSpr(Canvas &c) {
   }
   if (lampOn) drawLampPool(c);
   if (task == TASK_WAIT) drawDoorSpot(c);
-  // window
+  // window: one full frame per sky state. The sheet has the shooting star over the full moon only (another moon
+  // phase keeps its plain night frame: a moon changing shape for half a second reads as a glitch), and a bird
+  // over the cloudX 0 sky only: elsewhere the bird sprite goes over the frame, clipped at the right curtain as
+  // the window draws it (behind the curtain).
   {
     const Sprite *w = nullptr;
-    bool same = false;
+    int bird = win.bird;
     static const int8_t BIRDF[14] = {0, 1, -1, -1, -1, -1, -1, -1, 2, 3, 4, 5, 6, 7};
     if (win.mode == SKY_NIGHT) {
-      if (win.bird < 0 && win.moonPhase >= 0 && win.moonPhase < 8) {
-        int tw = (win.starT / 7) % 5;
-        if (!win.shootingStar) w = NIGHT[win.moonPhase][tw];
-        else if (win.moonPhase == 4 && tw == 0 && win.shootT >= 0 && win.shootT <= 6) w = spr::window_shoot[win.shootT];
-      }
+      int ph = win.moonPhase & 7, tw = (win.starT / 7) % 5;
+      w = win.shootingStar && ph == 4 ? spr::window_shoot[imin(imax(win.shootT, 0), spr::window_shoot_n - 1)] : NIGHT[ph][tw];
     } else if (win.rain) {
-      if (win.bird < 0) w = spr::window_rain[win.rainT % 40];
-    } else if (win.bird >= 0) {
-      if (win.cloudX % 22 == 0 && win.bird < 14 && BIRDF[win.bird] >= 0) w = spr::window_bird[BIRDF[win.bird]];
-    } else if (win.cloudX % 22) {
+      w = spr::window_rain[win.rainT % 40];
+    } else if (bird >= 0 && bird < 14 && BIRDF[bird] >= 0 && win.cloudX % 22 == 0) {
+      w = spr::window_bird[BIRDF[bird]];
+      bird = -1;
+    } else if (win.cloudX % 22 || bird >= 0) {
       w = spr::window_day[win.cloudX % 22];
-    } else {
-      same = true;   // = the background's
     }
-    if (!same) copyRect(c, spr::walls_0, 25, 15, 25, 15);   // the background's cloud pixel left of the curtain
-    if (w) c.blit(0, 0, *w);
-    else if (!same) { drawWindow(c, win); SPR_FALLBACK(0); }
+    if (w) {
+      copyRect(c, spr::walls_0, 25, 15, 25, 15);   // the background's cloud pixel left of the curtain
+      c.blit(0, 0, *w);
+    }
+    if (bird >= 0) {
+      const Sprite &b = bird >= 8 ? *spr::bird_fly[imin(bird - 8, spr::bird_fly_n - 1)] : *spr::bird_sit[bird % 4 == 1 ? 1 : 0];
+      c.blitRect(40, 23, b, false, 0, 0, 47, H - 1);
+    }
   }
   if (in.todoTotal > 0) {
     int tot = in.todoTotal, n = tot > 5 ? 5 : tot;
@@ -943,138 +867,125 @@ void Director::drawSpr(Canvas &c) {
     bool steam = d.mug && d.steam > 0;
     if (!(d.screen == SCREEN_DIM && d.mug && !steam && !d.drawer && !d.lit)) {
       const Sprite *scr = nullptr;
-      bool ok = true;
       switch (d.screen) {
         case SCREEN_DIM: scr = spr::desk_scr_dim[0]; break;
         case SCREEN_PLUG: scr = spr::desk_scr_plug[0]; break;
-        case SCREEN_CODE: scr = spr::desk_scr_code[d.t % 48]; break;
-        case SCREEN_WEB: scr = spr::desk_scr_web[(d.t / 8) % 3]; break;
-        case SCREEN_SAVER: if (d.t < spr::desk_scr_saver_n) scr = spr::desk_scr_saver[d.t]; else ok = false; break;
+        case SCREEN_CODE: scr = spr::desk_scr_code[d.t % spr::desk_scr_code_n]; break;
+        case SCREEN_WEB: scr = spr::desk_scr_web[(d.t / 8) % spr::desk_scr_web_n]; break;
+        case SCREEN_SAVER: scr = spr::desk_scr_saver[d.t % spr::desk_scr_saver_n]; break;   // loops the sheet's frames
         default: break;
       }
-      if (!ok) { drawDesk(c, d); copyRect(c, spr::background_0, 101, 45, 101, 45); SPR_FALLBACK(1); }
-      else {
-        c.blit(0, 0, *spr::desk[SCREEN_OFF]);
-        if (scr) c.blit(0, 0, *scr);
-        if (steam) c.blit(0, 0, *spr::desk_steam[((d.steam / 3) & 1) | ((d.steam / 4) & 1) << 1 | ((d.steam / 5) & 1) << 2]);
-        if (d.drawer) c.blit(0, 0, *spr::desk_drawer[0]);
-        if (!d.mug) c.blit(0, 0, *spr::desk_nomug[0]);
-        if (d.lit) c.blit(0, 0, *spr::desk_lit[0]);
-        copyRect(c, spr::background_0, 101, 45, 101, 45);   // the rack's foot, drawn over the desk's edge
-      }
+      c.blit(0, 0, *spr::desk[SCREEN_OFF]);
+      if (scr) c.blit(0, 0, *scr);
+      if (steam) c.blit(0, 0, *spr::desk_steam[((d.steam / 3) & 1) | ((d.steam / 4) & 1) << 1 | ((d.steam / 5) & 1) << 2]);
+      if (d.drawer) c.blit(0, 0, *spr::desk_drawer[0]);
+      if (!d.mug) c.blit(0, 0, *spr::desk_nomug[0]);
+      if (d.lit) c.blit(0, 0, *spr::desk_lit[0]);
+      copyRect(c, spr::background_0, 101, 45, 101, 45);   // the rack's foot, drawn over the desk's edge
     }
   }
-  // rack: idle LEDs from the table; the active pattern hashes (seed, t / 2), only seed 1 / t < 16 is pre-rendered
+  // rack: the active LEDs loop the sheet's frames (one pattern for every run, whatever its seed)
   {
     bool active = task == TASK_RUN && station == ST_RACK && !walking;
     int prog = (task == TASK_RUN && !walking) ? runProg : -1;
-    if (active && !(runSeed == 1 && ledT / 2 < spr::rack_active_n)) { drawRack(c, true, ledT, prog, runSeed); SPR_FALLBACK(2); }
-    else {
-      if (active) c.blit(0, 0, *spr::rack_active[ledT / 2]);
-      else if ((ledT / 24) % 5) c.blit(0, 0, *spr::rack_idle[(ledT / 24) % 5]);
-      if (prog >= 0) c.blit(0, 0, *spr::rack_progress[prog > 16 ? 16 : prog]);
-    }
+    if (active) c.blit(0, 0, *spr::rack_active[(ledT / 2) % spr::rack_active_n]);
+    else if ((ledT / 24) % spr::rack_idle_n) c.blit(0, 0, *spr::rack_idle[(ledT / 24) % spr::rack_idle_n]);
+    if (prog >= 0) c.blit(0, 0, *spr::rack_progress[prog > 16 ? 16 : prog]);
   }
-  if (inBed) {
-    if (breath == 0 || breath == 1) c.blit(0, 0, *spr::bed_sleep[breath]);
-    else { drawBed(c, true, breath); SPR_FALLBACK(3); }
-  }
+  if (inBed) c.blit(0, 0, *spr::bed_sleep[breath & 1]);
   if (lampOn) c.blit(0, 0, *spr::nightstand[1]);
   if (task == TASK_SEARCH && station == ST_UNDERDESK && !walking) {
     drawUnderDeskBeam(c, (int)tick);
     c.blit(88, 44, *spr::paper[0]);
     if ((tick / 4) % 3 == 0) c.blit(92, 43, *spr::sparkle[0]);
   }
-  drawSpritesSpr(c);
-  drawFxSpr(c);
-  if (sprFallbacks != fb0) sprFallbackFrames++;
+  drawSprites(c);
+  drawFx(c);
 }
 
-void Director::drawClawdSpr(Canvas &c) {
-  ClawdPose p; int emote, jump, shake; Idx ecol;
-  composePose(p, emote, ecol, jump, shake);
-  if (const Sprite *s = clawdSprite(p)) {
-    if (p.shadow) c.darken(p.x + 3, p.x + 14, p.y + 12);
-    c.blit(p.x, p.y, *s);
-  } else {
-    drawClawd(c, p);
-    SPR_FALLBACK(4);
-#ifdef ROOM_SPR_DEBUG
-    room_spr_debug_pose(p);
-#endif
-  }
-  if (p.arms == ARMS_HOLD) c.blit(p.x + 2, p.y + 6, *spr::book[page % 6]);
+void Director::drawClawdNow(Canvas &c) {
+  ClawdPose p; int emote, jump, shake;
+  composePose(p, emote, jump, shake);
+  const Idx *remap;
+  const Sprite *s = clawdSprite(p, &remap);
+  if (p.shadow) c.darken(p.x + 3, p.x + 14, p.y + 12);
+  c.blit(p.x, p.y, *s, false, remap);
+  if (p.arms == ARMS_HOLD) c.blit(p.x + 2, p.y + 6, *spr::book[page % spr::book_n]);
   if (fid == FID_SIP || (fid == ERR_COFFEE && errPhase == 1)) c.blit(p.x + 15, p.y - 2, *spr::mug_held[0]);
-  if (fid == ERR_WATER && errPhase == 1) c.blit(p.x + 16, p.y + 3, *spr::can_pour[tick % 5]);
+  if (fid == ERR_WATER && errPhase == 1) c.blit(p.x + 16, p.y + 3, *spr::can_pour[tick % spr::can_pour_n]);
   if (task == TASK_SEARCH && station == ST_UNDERDESK && !walking) c.blit(p.x + 17, p.y + 2, *spr::torch[0]);
   if (task == TASK_WAIT) {
     int lift = (tick / 6) % 2;
     c.blit(p.x - 3, p.y - 40, *spr::quest_bang[lift]);
   } else if (emote >= 0) {
+    // above the head, except where that would cover the monitor / whiteboard: then beside him
     int ex = p.x + 3, ey = p.y - 13 - emoteBob; bool tailRight = false;
     if (station == ST_DESK || station == ST_RACK || station == ST_DRAWER) { ex = p.x - 13; ey = p.y - 7 - emoteBob; tailRight = true; }
     else if (station == ST_BOARD || station == ST_WINDOW) { ex = p.x + 19; ey = p.y - 4 - emoteBob; }
     else if (p.x > 95) { ex = p.x - 2; tailRight = true; }
-    if (ecol == EMOTE_COL[emote]) c.blit(ex, ey, *(tailRight ? spr::emote_r : spr::emote_l)[emote]);
-    else { drawEmote(c, ex, ey, (Icon)emote, ecol, tailRight); SPR_FALLBACK(5); }
+    c.blit(ex, ey, *(tailRight ? spr::emote_r : spr::emote_l)[emote]);
   }
   if ((task == TASK_THINK) && !walking && fid == FID_NONE && reactId < 0 && atT > 4)
     c.blit(p.x + 10, p.y - 24, *spr::thought[thinkDots & 3]);
-  if (reactId == REACT_HAPPY) {
+  if (reactId == REACT_HAPPY) {   // a ring of big sparkles and falling confetti (small sparkles)
     int t = reactT;
     for (int i = 0; i < 8; i++) {
       float a = i * 3.14159f / 4 + 0.4f;
       int rr = 17 + ((t / 3) % 2) * 4;
       static const uint8_t SC[4] = {0, 1, 2, 0};   // sparkle_big: QY, QW, SCR
-      c.blit((int)(p.x + 9 + cosf(a) * rr), (int)(p.y + 6 + sinf(a) * rr * 0.75f), *spr::sparkle_big[SC[i % 4]]);
+      c.blit((int)(p.x + 9 + cosf(a) * rr), (int)(p.y + 6 + sinf(a) * rr * 0.75f), *spr::sparkle_big[SC[i % 4] % spr::sparkle_big_n]);
     }
     static const int8_t CF[6][2] = {{-8, -17}, {26, -14}, {-2, -22}, {20, -22}, {-12, -4}, {30, -2}};
-    static const Idx CC[6] = {RED, RUG, GRN, PUR, YEL, PINK};
-    for (int i = 0; i < 6; i++) c.r(p.x + CF[i][0], p.y + CF[i][1] + t / 2, p.x + CF[i][0] + 1, p.y + CF[i][1] + t / 2, CC[i]);
+    for (int i = 0; i < 6; i++) c.blit(p.x + CF[i][0], p.y + CF[i][1] + t / 2, *spr::sparkle[0]);
   }
   if (reactId == REACT_WINCE) c.blit(p.x + 17, p.y - 3, *spr::sweat[0]);
 }
 
-void Director::drawSpritesSpr(Canvas &c) {
+void Director::drawSprites(Canvas &c) {
+  // painter's order by feet y: minis, Clawd, the plant
   struct D { int key, kind, idx; } d[MAX_MINIS + 2]; int n = 0;
   for (int i = 0; i < MAX_MINIS; i++) if (minis[i].state) d[n++] = {(int)minis[i].y, 1, i};
   if (!inBed) d[n++] = {cy + 11, 0, 0};
   d[n++] = {97, 2, 0};
   for (int i = 1; i < n; i++) { D t = d[i]; int j = i - 1; while (j >= 0 && d[j].key > t.key) { d[j + 1] = d[j]; j--; } d[j + 1] = t; }
   for (int i = 0; i < n; i++) {
-    if (d[i].kind == 2) {
-      if (plantSway >= -1 && plantSway <= 1) c.blit(0, 0, *spr::plant[plantSway + 1]);
-      else { drawPlant(c, plantSway); SPR_FALLBACK(6); }
-    } else if (d[i].kind == 0) drawClawdSpr(c);
+    if (d[i].kind == 2) c.blit(0, 0, *spr::plant[imin(imax(plantSway, -1), 1) + 1]);
+    else if (d[i].kind == 0) drawClawdNow(c);
     else {
       const Mini &m = minis[d[i].idx];
-      int mx = (int)(m.x + 0.5f), my = (int)(m.y + 0.5f) - 8;
-      const Sprite *s = nullptr;
-      if (m.legPhase >= 0 && m.legPhase <= 3) {
-        if (m.blink && m.view == FRONT) s = m.legPhase < 2 ? spr::mini_front_blink[m.legPhase] : nullptr;
-        else s = MWALK[m.view][m.legPhase];
-      }
-      if (s) { c.darken(mx + 2, mx + 9, my + 9); c.blit(mx, my, *s); }
-      else { drawMini(c, mx, my, m.view, m.legPhase, TINT_VIOLET, m.blink); SPR_FALLBACK(7); }
-      if (m.state == 2 && m.st == 1) { c.r(mx + 1, my + 4, mx + 10, my + 8, OUT); c.r(mx + 2, my + 5, mx + 5, my + 7, CRM); c.r(mx + 6, my + 5, mx + 9, my + 7, WHT); }
+      int mx = (int)(m.x + 0.5f), my = (int)(m.y + 0.5f) - 8, leg = m.legPhase & 3;
+      // the blink frames exist standing and mid-step (legPhase 0 / 1, what a working mini uses); walking, it is dropped
+      const Sprite &s = m.blink && m.view == FRONT && leg < spr::mini_front_blink_n ? *spr::mini_front_blink[leg] : *MWALK[m.view & 3][leg];
+      c.darken(mx + 2, mx + 9, my + 9);
+      c.blit(mx, my, s);
+      if (m.state == 2 && m.st == 1) c.blit(mx - 1, my + 4, *spr::book[0]);   // reading at the shelf
     }
   }
 }
 
-void Director::drawFxSpr(Canvas &c) {
+void Director::drawFx(Canvas &c) {
   if (inBed) {
-    if (sleepShift >= -1 && sleepShift <= 1)
-      c.blit(0, 0, *(task == TASK_OFFLINE ? spr::clawd_bed_grey : spr::clawd_bed)[(sleepShift + 1) * 2 + (sleepEyes > 0 ? 1 : 0)]);
-    else { drawClawdInBed(c, sleepShift, sleepEyes > 0, task == TASK_OFFLINE ? TINT_GREY : TINT_CORAL); SPR_FALLBACK(8); }
-    if (sleepEyes == 0) c.blit(24 + sleepShift, 56, *spr::zzz[(tick / 6) % 3]);
+    int sh = imin(imax(sleepShift, -1), 1);
+    c.blit(0, 0, *(task == TASK_OFFLINE ? spr::clawd_bed_grey : spr::clawd_bed)[(sh + 1) * 2 + (sleepEyes > 0 ? 1 : 0)]);
+    if (sleepEyes == 0) c.blit(24 + sleepShift, 56, *spr::zzz[(tick / 6) % spr::zzz_n]);
   }
-  if (task == TASK_DELEGATE && !walking && reactId < 0) {   // the dash line depends on both endpoints: procedural
-    for (int i = 0; i < MAX_MINIS; i++)
-      if (minis[i].state == 2) { drawDash(c, cx + 9, cy + 2, (int)minis[i].x + 5, (int)minis[i].y - 4, (int)tick, QY); SPR_FALLBACK(9); }
+  if (task == TASK_DELEGATE && !walking && reactId < 0) {
+    // The dash runs from Clawd to each working helper, so its geometry is code; each dot is the first dot of the
+    // dash sprite (its top-left pixel: the line runs down-right from it), so its colour comes from the sheet.
+    const Sprite &dot = *spr::dash[0];
+    for (int i = 0; i < MAX_MINIS; i++) {
+      if (minis[i].state != 2) continue;
+      int x0 = cx + 9, y0 = cy + 2, x1 = (int)minis[i].x + 5, y1 = (int)minis[i].y - 4;
+      const int steps = 16;
+      for (int k = 2; k < steps - 1; k++) {
+        if ((k + (int)tick / 4) % 3 == 0) continue;
+        int x = x0 + (x1 - x0) * k / steps, y = y0 + (y1 - y0) * k / steps;
+        c.blitRect(x + dot.ax, y + dot.ay, dot, false, x, y, x, y);
+      }
+    }
   }
   if (task == TASK_WAIT) c.blit(0, 0, *spr::alarm_ring[alarmPhase & 1]);
 }
-#endif  // ROOM_SPRITES
 
 const char *Director::activity() const {
   static char buf[32];

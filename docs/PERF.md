@@ -362,3 +362,12 @@ JSON parse of a state ≈ 5.6 ms (≈ 6/s). Flush (copy to PSRAM framebuffer) �
   - So the compact tables draw at the procedural speed (± 0.1 ms) for a quarter of the plain tables' flash; the
     plain tables' 2x draw-time win is spent on decoding. The remaining decode cost is the delta bases (a window
     or desk frame decodes its frame 0 and then the overlay) and the fallbacks already listed above.
+- **sprites-only room** (2026-10-29, adopted: PR "sprites only") — the procedural art drawing is removed; `Director::draw`
+  blits the sheets' sprites (RLE tables generated at build time) and only the lighting passes, the frame choice, the
+  dash geometry and a tint swap stay as code. Where the sheets had no exact frame the closest one is used (desk
+  screensaver loops its 24 frames, active rack its 8, a blink is dropped while walking...; the rules are in
+  `firmware/src/screens/room/README.md`). Same probe, release 0.5.2 firmware vs this build, back to back:
+  demo 21.9 fps / 13.1 ms / 35.3 % cpu → 22.6-23.6 / 12.5-12.6 / 34.9-36.2; quiet 7.1 / 8.6 / 8.9 → 7.0-7.7 /
+  8.1-8.4 / 8.6-9.0; room draw 1483-1726 µs avg demo, 1171-1272 quiet (procedural was 1559-1564 / 1215-1233);
+  first draw after boot 2.9 ms (the background decode into its PSRAM cache); 0 underruns; heap_int 160.1-160.3 KB
+  (unchanged); image 1 232 464 B (+58 KB over the procedural 1 174 384). room.cpp 859 → 268 lines.

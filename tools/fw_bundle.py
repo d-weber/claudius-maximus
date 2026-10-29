@@ -52,8 +52,9 @@ def tree_hash(fw: Path = FW) -> str:
     import hashlib
     h = hashlib.sha1()
     files = [fw / n for n in ("platformio.ini", "CMakeLists.txt", "sdkconfig.defaults", "partitions.csv")]
-    for d in ("src", "include", "lib"):
-        files += sorted(p for p in (fw / d).rglob("*") if p.is_file())
+    # assets/ instead of the sprites_gen.* generated from it, which exist only after a first build
+    for d in ("src", "include", "lib", "assets"):
+        files += sorted(p for p in (fw / d).rglob("*") if p.is_file() and not p.name.startswith("sprites_gen."))
     for p in files:
         try:
             h.update(str(p.relative_to(fw)).encode() + b"\0" + p.read_bytes() + b"\0")

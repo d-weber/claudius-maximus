@@ -16,8 +16,7 @@ static uint32_t loops, loop_max_us;
 static uint32_t frames, frame_ms_sum, frame_ms_max, px_sum;
 static uint32_t window_start_ms;
 static uint64_t room_sum;
-static uint64_t room_sum_clean;
-static uint32_t room_max_clean, room_n_clean, room_n, room_max, room_min = UINT32_MAX, room_first, room_fb, room_fbf, room_fb0, room_fbf0;
+static uint32_t room_n, room_max, room_min = UINT32_MAX, room_first;
 static void (*prev_monitor)(lv_disp_drv_t *, uint32_t, uint32_t);
 
 static void monitor_cb(lv_disp_drv_t *d, uint32_t ms, uint32_t px) {
@@ -34,7 +33,7 @@ static void reset() {
   memset(cnt, 0, sizeof(cnt));
   busy_total = 0; loops = 0; loop_max_us = 0;
   frames = frame_ms_sum = frame_ms_max = px_sum = 0;
-  room_sum = room_sum_clean = 0; room_n = room_n_clean = room_max = room_max_clean = 0; room_min = UINT32_MAX; room_fb0 = room_fb; room_fbf0 = room_fbf;
+  room_sum = 0; room_n = room_max = 0; room_min = UINT32_MAX;
   window_start_ms = millis();
 }
 
@@ -51,14 +50,12 @@ void perf_add(PerfSlot s, uint32_t us) {
   if (us > max_us[s]) max_us[s] = us;
 }
 
-void perf_room_draw(uint32_t us, uint32_t fallbacks, uint32_t fallback_frames) {
+void perf_room_draw(uint32_t us) {
   if (!room_first) room_first = us ? us : 1;   // the very first draw since boot (cold caches)
   room_sum += us;
   room_n++;
   if (us > room_max) room_max = us;
   if (us < room_min) room_min = us;
-  if (fallback_frames == room_fbf) { room_sum_clean += us; room_n_clean++; if (us > room_max_clean) room_max_clean = us; }   // drawn without a procedural fallback
-  room_fb = fallbacks; room_fbf = fallback_frames;
 }
 
 void perf_loop(uint32_t busy_us) {
@@ -101,15 +98,9 @@ void perf_report() {
   for (int i = 0; i < PERF__N; i++)
     P(",\"%s\":{\"n\":%lu,\"avg_ms\":%.2f,\"max_ms\":%.1f}", NAMES[i], (unsigned long)cnt[i],
       (double)(cnt[i] ? sum_us[i] / 1000.0f / cnt[i] : 0), (double)(max_us[i] / 1000.0f));
-#if ROOM_SPRITES
-  const int room_spr = 1;
-#else
-  const int room_spr = 0;
-#endif
-  P(",\"room_spr\":%d,\"room_draw_n\":%lu,\"room_draw_us_avg\":%lu,\"room_draw_us_min\":%lu,\"room_draw_us_max\":%lu,"
-    "\"room_draw_us_first\":%lu,\"room_draw_us_avg_clean\":%lu,\"room_draw_us_max_clean\":%lu,\"room_fallbacks\":%lu,\"room_fallback_frames\":%lu", room_spr, (unsigned long)room_n,
-    (unsigned long)(room_n ? room_sum / room_n : 0), (unsigned long)(room_n ? room_min : 0), (unsigned long)room_max,
-    (unsigned long)room_first, (unsigned long)(room_n_clean ? room_sum_clean / room_n_clean : 0), (unsigned long)room_max_clean, (unsigned long)(room_fb - room_fb0), (unsigned long)(room_fbf - room_fbf0));
+  P(",\"room_draw_n\":%lu,\"room_draw_us_avg\":%lu,\"room_draw_us_min\":%lu,\"room_draw_us_max\":%lu,\"room_draw_us_first\":%lu",
+    (unsigned long)room_n, (unsigned long)(room_n ? room_sum / room_n : 0), (unsigned long)(room_n ? room_min : 0),
+    (unsigned long)room_max, (unsigned long)room_first);
   P(",\"heap_int\":%u,\"heap_int_min\":%u,\"heap_int_largest\":%u,\"psram_free\":%u",
     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));

@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Room view</title>
+<style>
+  :root { --bg: #1b1b22; --panel: #26262f; --text: #e8e4dc; --muted: #9a958c; --accent: #e8743b; --err: #ff6b6b; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 -apple-system, "Segoe UI", sans-serif; }
+  main { display: grid; grid-template-columns: 1fr 300px; gap: 16px; padding: 16px; min-height: 100vh; }
+  .stage { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; }
+  .device { position: relative; background: #000; border-radius: 48px; padding: 0; overflow: hidden; box-shadow: 0 0 0 6px #2e2e38, 0 20px 50px #0008; }
+  canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+  .hud { background: #15151a; color: var(--muted); font-size: 11px; display: flex; align-items: center; justify-content: center; letter-spacing: 1px; }
+  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: center; }
+  aside { background: var(--panel); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px; align-self: start; }
+  aside h1 { font-size: 15px; margin: 0 0 4px; }
+  label { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: var(--muted); }
+  label > * { flex: 0 0 60%; }
+  select, input[type=number] { width: 100%; background: #1b1b22; color: var(--text); border: 1px solid #3a3a46; border-radius: 6px; padding: 4px 6px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  button { background: var(--accent); color: #1b1b22; border: 0; border-radius: 8px; padding: 8px 12px; font-weight: 600; cursor: pointer; }
+  button.secondary { background: #3a3a46; color: var(--text); }
+  button:disabled { opacity: .5; cursor: default; }
+  .status { font-size: 12px; color: var(--muted); min-height: 1.2em; }
+  .error { white-space: pre-wrap; font: 12px/1.4 ui-monospace, Menlo, monospace; color: var(--err); background: #2a1c1c; border-radius: 8px; padding: 8px; display: none; max-width: 640px; }
+  .error.show { display: block; }
+  details { font-size: 12px; color: var(--muted); }
+  .sheets { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+  .sheets img { image-rendering: pixelated; width: 100%; background: repeating-conic-gradient(#333 0 25%, #2a2a33 0 50%) 0 0 / 12px 12px; border-radius: 4px; }
+  .sheets span { font-size: 11px; }
+  kbd { font: 11px ui-monospace, Menlo, monospace; background: #1b1b22; padding: 1px 5px; border-radius: 4px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <section class="stage">
+    <div class="device" id="device">
+      <canvas id="room" width="480" height="424"></canvas>
+      <div class="hud" id="hud" style="width:480px;height:56px">HUD band (LVGL widgets, not previewed)</div>
+    </div>
+    <div class="bar">
+      <button class="secondary" id="play">Pause</button>
+      <input type="range" id="scrub" min="0" max="0" value="0" style="width:240px">
+      <span class="status" id="frameinfo"></span>
+    </div>
+    <div class="error" id="error"></div>
+    <div class="status" id="status"></div>
+  </section>
+  <aside>
+    <h1>Clawd's Studio</h1>
+    <button id="refresh">Refresh sprites from disk</button>
+    <label><span>Auto-refresh on save</span><input type="checkbox" id="auto" checked style="flex:0 0 auto"></label>
+    <label><span>State</span><select id="task"></select></label>
+    <label><span>Time of day <b id="todv"></b></span><input type="range" id="tod" min="0" max="23.5" step="0.5" value="10"></label>
+    <label><span>Helpers</span><input type="number" id="helpers" min="0" max="3" value="0"></label>
+    <label><span>Plan total / done</span><span style="display:flex;gap:4px"><input type="number" id="todo" min="0" max="20" value="5"><input type="number" id="done" min="0" max="20" value="2"></span></label>
+    <label><span>Reaction</span><select id="react"><option value="">none</option></select></label>
+    <label><span>Seconds</span><select id="seconds"><option>4</option><option selected>8</option><option>15</option><option>30</option></select></label>
+    <label><span>Seed</span><input type="number" id="seed" min="1" max="9999" value="1"></label>
+    <label><span>Zoom</span><select id="zoom"><option value="2">2x</option><option value="4" selected>4x (device)</option><option value="6">6x</option></select></label>
+    <label><span>Device frame</span><input type="checkbox" id="frame" checked style="flex:0 0 auto"></label>
+    <details><summary>Sheets on disk</summary><div class="sheets" id="sheets"></div></details>
+    <details><summary>How it works</summary>
+      The page asks <kbd>tools/room_view.py</kbd> to run the real room code (the firmware's C++, built for the host) for the chosen state and plays the frames at 12 fps.
+      Refresh regenerates the sprite tables from <kbd>firmware/assets/sprites</kbd>, recompiles, and re-renders. Auto-refresh watches the sheets' modification times, so saving from Photoshop (indexed mode, palette.gpl) updates the view within a few seconds. A broken sheet shows the converter's error here.
+    </details>
+  </aside>
+</main>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const W = 120, H = 106, FPS = 12;
+  const canvas = $('room'), ctx = canvas.getContext('2d');
+  let strip = null, frames = 0, frame = 0, playing = true, version = -1, timer = null, busy = false;
+  const controls = ['task', 'tod', 'helpers', 'todo', 'done', 'react', 'seconds', 'seed', 'zoom', 'auto', 'frame'];
+
+  function save() { try { localStorage.setItem('roomview', JSON.stringify(Object.fromEntries(controls.map(k => [k, $(k).type === 'checkbox' ? $(k).checked : $(k).value])))); } catch (e) {} }
+  function load() { try { const s = JSON.parse(localStorage.getItem('roomview') || '{}'); for (const k of controls) if (k in s) { if ($(k).type === 'checkbox') $(k).checked = s[k]; else $(k).value = s[k]; } } catch (e) {} }
+
+  function applyZoom() {
+    const z = +$('zoom').value;
+    canvas.width = W * z; canvas.height = H * z;
+    canvas.style.width = (W * z) + 'px'; canvas.style.height = (H * z) + 'px';
+    $('hud').style.width = (W * z) + 'px'; $('hud').style.height = (14 * z) + 'px';
+    $('device').style.borderRadius = $('frame').checked ? (3 * z) + 'px' : '0';
+    $('device').style.boxShadow = $('frame').checked ? '' : 'none';
+    draw();
+  }
+
+  function draw() {
+    if (!strip || !frames) return;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(strip, 0, frame * H, W, H, 0, 0, canvas.width, canvas.height);
+    $('scrub').max = frames - 1; $('scrub').value = frame;
+    $('frameinfo').textContent = `${frame + 1} / ${frames}`;
+  }
+
+  function tick() { if (playing && frames) { frame = (frame + 1) % frames; draw(); } }
+
+  async function render() {
+    if (busy) return; busy = true;
+    $('status').textContent = 'rendering…';
+    const q = new URLSearchParams({ task: $('task').value, tod: $('tod').value, helpers: $('helpers').value, todo: $('todo').value,
+                                    done: $('done').value, react: $('react').value, seconds: $('seconds').value, seed: $('seed').value });
+    try {
+      const r = await fetch('/frames?' + q, { cache: 'no-store' });
+      if (!r.ok) { const j = await r.json(); showError(j.error); return; }
+      const n = +r.headers.get('X-Frames'); version = +r.headers.get('X-Version');
+      const blob = await r.blob();
+      const img = new Image();
+      await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = URL.createObjectURL(blob); });
+      if (strip) URL.revokeObjectURL(strip.src);
+      strip = img; frames = n; frame = Math.min(frame, frames - 1); showError('');
+      $('status').textContent = `${n} frames · ${$('task').value} · ${$('tod').value}h · sprites v${version}`;
+      draw();
+    } catch (e) { showError(String(e)); }
+    finally { busy = false; }
+  }
+
+  function showError(msg) { const el = $('error'); el.textContent = msg || ''; el.classList.toggle('show', !!msg); if (msg) $('status').textContent = 'sheet problem'; }
+
+  async function refresh() {
+    $('refresh').disabled = true; $('status').textContent = 'rebuilding…';
+    try { const j = await (await fetch('/refresh', { method: 'POST' })).json(); if (j.error) showError(j.error); else { showError(''); loadSheets(); await render(); } }
+    finally { $('refresh').disabled = false; }
+  }
+
+  async function poll() {
+    try {
+      const s = await (await fetch('/status', { cache: 'no-store' })).json();
+      if (s.error) showError(s.error);
+      if ($('auto').checked && s.version !== version && !busy) { loadSheets(); await render(); }
+    } catch (e) {}
+  }
+
+  function loadSheets() {
+    fetch('/status', { cache: 'no-store' }).then(r => r.json()).then(s => {
+      $('sheets').innerHTML = s.sheets.map(n => `<span>${n}</span><img src="/sheet/${n}?v=${Date.now()}" alt="${n}">`).join('');
+    });
+  }
+
+  async function init() {
+    const s = await (await fetch('/status')).json();
+    $('task').innerHTML = [...s.tasks, 'free'].map(t => `<option>${t}</option>`).join('');
+    $('react').innerHTML += s.reacts.map(r => `<option>${r}</option>`).join('');
+    load();
+    $('todv').textContent = $('tod').value + 'h';
+    for (const k of controls) $(k).addEventListener(k === 'tod' ? 'input' : 'change', () => {
+      save();
+      if (k === 'tod') $('todv').textContent = $('tod').value + 'h';
+      if (k === 'zoom' || k === 'frame') applyZoom(); else if (k !== 'auto') render();
+    });
+    $('tod').addEventListener('change', render);
+    $('play').addEventListener('click', () => { playing = !playing; $('play').textContent = playing ? 'Pause' : 'Play'; });
+    $('scrub').addEventListener('input', () => { playing = false; $('play').textContent = 'Play'; frame = +$('scrub').value; draw(); });
+    $('refresh').addEventListener('click', refresh);
+    document.addEventListener('keydown', e => { if (e.key === ' ') { e.preventDefault(); $('play').click(); } if (e.key === 'r') refresh(); });
+    applyZoom();
+    if (s.error) showError(s.error);
+    loadSheets();
+    await render();
+    timer = setInterval(tick, 1000 / FPS);
+    setInterval(poll, 1500);
+  }
+  init();
+})();
+</script>
+</body>
+</html>
