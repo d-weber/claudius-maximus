@@ -40,9 +40,11 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 CONFIG_LOG_DEFAULT_LEVEL_WARN=y
 CONFIG_BOOTLOADER_LOG_LEVEL_ERROR=y
 
-# Caches: the Arduino core's values. The data cache (PSRAM framebuffer traffic) can go to 64 KB / 64-byte lines
-# once the port measures equal to the Arduino build; see docs/SCANOUT.md "Native build".
-CONFIG_ESP32S3_INSTRUCTION_CACHE_16KB=y
+# Caches. 32 KB instruction cache (the Arduino core ran 16 KB): the LVGL renderer is code-bound (object-tree walk,
+# style lookups, draw descriptors) and the larger I-cache took 30 % off the frame time for 16 KB of internal RAM
+# (docs/PERF.md "render-perf-levers"). The data cache stays at the Arduino core's 32 KB / 32 B: 64 KB measured
+# the same and costs another 32 KB (docs/SCANOUT.md "Native build").
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
 CONFIG_ESP32S3_INSTRUCTION_CACHE_LINE_32B=y
 CONFIG_ESP32S3_DATA_CACHE_32KB=y
 CONFIG_ESP32S3_DATA_CACHE_LINE_32B=y

@@ -308,6 +308,7 @@ counts do not depend on it.
 | native, 64 KB D-cache, 64 B lines | on demand | 0, 0 | 30.5 / 14.1 / 50, 31.1 / 13.3 / 48 | 146.5 KB |
 | native, stream mode, `RESTART_IN_VSYNC` off | stream | 0, 0 (stall and lateness counters 0 as well) | 29.5 / 14.4 / 49, 29.8 / 14.0 / 48 | 178.5 KB |
 | native as committed (touch poll starts after the panel init) | on demand | 0, 0, 0, 0 (two with the clock set) | 29.1 / 14.7 / 50, 25.9 / 15.8 / 47 | 178.5 KB |
+| native + 32 KB I-cache + LVGL shadow/circle caches (`perf-c1`, see PERF.md "render-perf-levers") | on demand | 0 (60 s window, clock set) | 31.9 / 10.3 / 39, 28.4 / 10.1 / 35 | 160.3 KB |
 
 What it says:
 
