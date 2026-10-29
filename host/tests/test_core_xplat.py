@@ -1263,11 +1263,13 @@ class UpdaterTest(TempHome):
         except ImportError:
             self.skipTest("certifi not installed")
         self.assertGreater(ctx.cert_store_stats()["x509_ca"], 100)                 # certifi's CAs are loaded
-        # without certifi (a broken bundle): the system store alone, and a warning in the log, not a debug line
+        # without certifi (a broken bundle): the system store alone for this request, a warning in the log, and
+        # nothing cached, so the next call tries certifi again
         updater._ssl_ctx = None
         with mock.patch.dict(sys.modules, {"certifi": None}), self.assertLogs("companion.updater", "WARNING") as logs:
             self.assertIsInstance(updater._ssl_context(), ssl.SSLContext)
         self.assertIn("certifi", logs.output[0])
+        self.assertIsNone(updater._ssl_ctx)
         updater._ssl_ctx = ctx
         # every request goes through that context
         resp = mock.MagicMock()
@@ -1293,6 +1295,11 @@ class UpdaterTest(TempHome):
                 updater.check()
         self.assertNotIn("certificate check", str(cm.exception))
         self.assertIn("WRONG_VERSION_NUMBER", str(cm.exception))
+        # a bare SSL error from the response stream (ssl.SSLError.reason is a string there) keeps its text
+        bare = ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        self.assertIn("certificate check", updater._reason(bare))
+        self.assertIn("certificate verify failed", updater._reason(bare))
+        self.assertEqual(updater._reason(urllib.error.URLError("no network")), "no network")
 
     def test_daily_check_schedule_and_toggle(self):
         from companion import updater

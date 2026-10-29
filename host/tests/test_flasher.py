@@ -307,6 +307,26 @@ class ReviewTest(unittest.TestCase):
         self.assertFalse(left[0].is_open)
         self.assertIs(serial.serial_for_url, orig)                          # the hook is gone afterwards
         self.assertFalse(flasher._esptool_lock.locked())
+        # only the flashed port is closed: another port opened meanwhile is not ours to close
+        def other_main(args):
+            s = serial.serial_for_url("loop://")
+            left.append(s)
+            raise esptool.FatalError("x")
+        with mock.patch.object(esptool, "main", side_effect=other_main):
+            with self.assertRaises(esptool.FatalError):
+                flasher._run_esptool(["--port", "/dev/not-loop"], prog, None)
+        self.assertTrue(left[-1].is_open)
+        left[-1].close()
+        # a second flash while one runs fails at once instead of waiting
+        self.assertTrue(flasher._esptool_lock.acquire(blocking=False))
+        try:
+            with self.assertRaises(flasher.FlashError) as cm:
+                flasher._run_esptool(["x"], prog, None)
+            self.assertIn("already running", str(cm.exception))
+        finally:
+            flasher._esptool_lock.release()
+        self.assertEqual(flasher._port_arg(["--chip", "esp32s3", "--port", "COM5", "--baud", "1"]), "COM5")
+        self.assertIsNone(flasher._port_arg(["--port"]))
         # and a successful run (esptool closes its own port) is left alone
         def ok_main(args):
             s = serial.serial_for_url("loop://")
