@@ -18,3 +18,5 @@ dist/
 *.egg-info/
 !packaging/icons/*.png
 !firmware/assets/sprites/*.png
+# generated from firmware/assets/sprites by the pre-build hook (tools/sprites_prebuild.py)
+firmware/src/screens/room/sprites_gen.*

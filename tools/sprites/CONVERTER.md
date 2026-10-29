@@ -1,7 +1,9 @@
 # Sprite converter: `tools/sprites.py`
 
 Turns the sheets described in [FORMAT.md](FORMAT.md) into `sprites_gen.h` + `sprites_gen.cpp` for the room.
-Everything runs with the host venv (Pillow): `host/.venv/bin/python tools/sprites.py <command>`.
+Everything runs with the host venv (Pillow): `host/.venv/bin/python tools/sprites.py <command>`. The firmware
+build runs `build` through the PlatformIO pre-build hook `tools/sprites_prebuild.py`, so the generated files are
+never committed (they are gitignored).
 
 ## Commands
 
@@ -9,7 +11,7 @@ Everything runs with the host venv (Pillow): `host/.venv/bin/python tools/sprite
 |---|---|
 | `palette [--room-cpp PATH] [--out DIR]` | Reads `room::BASE` from `firmware/src/screens/room/room.cpp` and writes `palette.png` (N_COL x 1, index 0 = `#ff00ff`) + `palette.gpl` into `firmware/assets/sprites/`. Run it after any change to BASE. |
 | `build [--atlas PATH] [--out DIR]` | Reads `atlas.json` and every sheet in it, writes `sprites_gen.h/.cpp` (default `firmware/src/screens/room/`). Prints sprites, groups and byte totals. Files are only rewritten when their content changes. |
-| `check [--atlas PATH] [--room-cpp PATH] [--gen DIR]` | Validates without writing (see below). With `--gen firmware/src/screens/room` it also fails if the committed generated files are stale. |
+| `check [--atlas PATH] [--room-cpp PATH] [--gen DIR]` | Validates without writing (see below). With `--gen DIR` it also fails if `DIR/sprites_gen.*` are stale. CI runs it on the committed sheets. |
 | `preview [--atlas PATH] --out DIR` | `<sheet>@4x.png`: nearest 4x, transparency as a checkerboard, sprite rectangles outlined. |
 
 Every command exits 1 with an `error:` line that names the sheet, the sprite and the pixel.
@@ -37,10 +39,6 @@ its first N_COL pixels are used.
   colours above. This catches an index 0 that is opaque and not magenta, or another entry made
   transparent. A sheet that uses duplicate-colour indices gets a note saying it must stay indexed.
 
-FORMAT.md's "Round trip" also mentions comparing with the original canvas pixels. That part needs the C++
-drawing code, so it belongs to the renderer (`tools/sprites/sheet.cpp`). This tool checks everything it
-can from the files alone.
-
 ## Generated code
 
 The output matches FORMAT.md: `struct Sprite { uint8_t w, h; int8_t ax, ay; uint8_t ox, oy, ow, oh;
@@ -55,7 +53,7 @@ includes.
 
 ## Using it in the firmware
 
-`Canvas::blit(int x, int y, const spr::Sprite &s, bool flip = false)` in room.cpp (behind `ROOM_SPRITES`)
+`Canvas::blit(int x, int y, const spr::Sprite &s, bool flip = false)` in room.cpp
 is the reference decoder: it draws `base` first if there is one, then walks the RLE stream over the overlay
 rect, writing non-zero indices into the canvas with clipping. `blitRect` draws only the part of a sprite
 inside a canvas rect (the floor under the plant). Usage: `c.blit(pose.x, pose.y, *spr::clawd_front_walk[pose.legPhase]);`

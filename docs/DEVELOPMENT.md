@@ -12,11 +12,14 @@ firmware/                   PlatformIO + ESP-IDF 5.5 (no Arduino core), LVGL 8.4
   src/screens/              one file per screen; room/ = Clawd's Studio (the home screen's pixel-art room and its
                               behaviour director, portable C++: tools/room_sim.py renders it on the host)
   src/fx/                   alerts overlay, auto-dim / screensaver / night clock
+  assets/sprites/           the room's sprite sheets (indexed PNGs + atlas.json), the masters of its pixel art
 host/companion/             Python daemon, data providers, tray app (app.py, tray/), flasher, hooks client/installer
 host/hooks/                 Claude Code hook + statusLine wrapper scripts (thin shims over companion/)
 host/launchd/, host/systemd/  background service templates (macOS LaunchAgent, Linux systemd user unit)
 packaging/, .github/        PyInstaller spec, installers, CI and release workflows (packaging/README.md)
-tools/                      dev.py (build/flash/screenshot/perf), fw_bundle.py, install/uninstall, bench, udev rule
+tools/                      dev.py (build/flash/screenshot/perf), fw_bundle.py, install/uninstall, bench, udev rule,
+                              room_sim.py (the room on the host), sprites.py + sprites/ (sheet converter and docs),
+                              sprites_prebuild.py (the firmware's pre-build hook)
 docs/                       DESKTOP.md (desktop app architecture), PERF.md (measurements), STATUS.md, TEAM.md
 ```
 
@@ -193,6 +196,12 @@ first build downloads the IDF, ~500 MB). Where things live:
 - `firmware/src/core/sys.h`: `millis()`, `micros()`, `delay()`, `min`/`max`, the only Arduino-isms the screens use.
 - Experiment switches (`-DHAL_STREAM_MODE=1`, `-DHAL_ROT180=0`, `-DLAYOUT_PAD=n`, see [SCANOUT.md](SCANOUT.md)) go in
   `build_flags` as before.
+- `firmware/assets/sprites/`: the room's sprite sheets. A pre-build hook (`extra_scripts`,
+  `tools/sprites_prebuild.py`) runs `tools/sprites.py build` before every build. It writes
+  `src/screens/room/sprites_gen.h/.cpp`, which are gitignored. Nothing is rewritten when the sheets did not change,
+  and an invalid sheet fails the build. The hook needs Pillow: it uses PlatformIO's Python, else `host/.venv`, else
+  it pip-installs Pillow into PlatformIO's Python. Editing the sheets:
+  [tools/sprites/README.md](../tools/sprites/README.md).
 
 `tools/dev.py` drives the device during development (set `DEV_NAME` for a private build directory):
 
@@ -206,6 +215,8 @@ host/.venv/bin/python tools/dev.py show mock.png --seconds 30                   
 python3 tools/room_sim.py states                                                               # home room: one frame per state (host, no device)
 python3 tools/room_sim.py task code --seconds 40 --gif                                         # ... animated GIF + activity log
 python3 tools/room_sim.py day --seconds 1800                                                   # ... scripted session: fidget variety stats
+host/.venv/bin/python tools/sprites.py check                                                   # validate the sprite sheets after an edit
+host/.venv/bin/python tools/room_view.py                                                       # live preview of the room in a browser (rebuilds when a sheet is saved)
 ```
 
 The README screenshots are `shot --calm --settle 4` (`--settle 9` on Agents, whose demo queues several toasts) of

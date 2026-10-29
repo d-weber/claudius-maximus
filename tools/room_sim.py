@@ -6,7 +6,8 @@
   python3 tools/room_sim.py day [--seconds 1800] [--todspeed 24]  scripted session: activity log + variety stats + sheet
   python3 tools/room_sim.py clock [--seconds 86400]               24 h of lighting at one frame per 20 min
 
-Builds tools/room_sim/sim.cpp with g++ (same sources as the firmware). Needs pillow."""
+Builds tools/room_sim/sim.cpp with g++ (same sources as the firmware), after regenerating sprites_gen.h/.cpp from
+firmware/assets/sprites the way the firmware's pre-build hook does. Needs pillow."""
 from __future__ import annotations
 
 import argparse
@@ -16,10 +17,18 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PIL import Image
-
 ROOT = Path(__file__).resolve().parent.parent
+try:
+    from PIL import Image
+except ImportError:   # run with the system python: switch to the repo venv, which has pillow
+    _venv_py = ROOT / "host" / ".venv" / "bin" / "python"
+    # sys.prefix, not the executable's path: the venv's python is a symlink to the same binary as the system one
+    if __name__ == "__main__" and _venv_py.is_file() and Path(sys.prefix).resolve() != (ROOT / "host" / ".venv").resolve():
+        os.execv(str(_venv_py), [str(_venv_py), *sys.argv])
+    raise SystemExit("error: pillow is not installed: run host/.venv/bin/pip install -e host, "
+                     "then host/.venv/bin/python tools/room_sim.py")
 SRC = ROOT / "firmware" / "src" / "screens" / "room"
+SHEETS = ROOT / "firmware" / "assets" / "sprites"
 W, H = 120, 106
 TASKS = ["code", "web", "review", "read", "run", "search", "think", "delegate", "plan", "idle", "wait", "sleep", "offline"]
 
@@ -27,8 +36,12 @@ TASKS = ["code", "web", "review", "read", "run", "search", "think", "delegate", 
 def build(build_dir: Path) -> Path:
     build_dir.mkdir(parents=True, exist_ok=True)
     exe = build_dir / "room_sim"
-    srcs = [ROOT / "tools" / "room_sim" / "sim.cpp", SRC / "room.cpp", SRC / "director.cpp"]
-    newest = max(p.stat().st_mtime for p in srcs + [SRC / "room.h", SRC / "director.h"])
+    # Same output dir as tools/sprites_prebuild.py: room.cpp includes "sprites_gen.h" from its own directory, so a
+    # copy elsewhere would lose to a stale one there. `build` only rewrites on change, which keeps the cache valid.
+    subprocess.run([sys.executable, str(ROOT / "tools" / "sprites.py"), "build", "--out", str(SRC)], check=True)
+    srcs = [ROOT / "tools" / "room_sim" / "sim.cpp", SRC / "room.cpp", SRC / "director.cpp", SRC / "sprites_gen.cpp"]
+    deps = srcs + [SRC / "room.h", SRC / "director.h", SRC / "sprites_gen.h", *SHEETS.iterdir()]
+    newest = max(p.stat().st_mtime for p in deps)
     if exe.exists() and exe.stat().st_mtime > newest:
         return exe
     cmd = ["g++", "-O2", "-std=c++17", "-Wall", "-Wno-misleading-indentation", f"-I{SRC}", *map(str, srcs), "-o", str(exe)]

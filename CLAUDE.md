@@ -11,7 +11,8 @@ lives in the docs it points to. Read the relevant doc before changing a subsyste
 | `firmware/` | ESP-IDF 5.5 via PlatformIO (pioarduino), LVGL 8.4, ArduinoJson 7. `src/core` HAL/link/settings/perf, `src/ui` theme, `src/screens` one file per screen, `src/screens/room` Clawd's Studio (portable C++, also builds on the host), `src/fx` alerts/screensaver | `docs/DEVELOPMENT.md`, `docs/TEAM.md` "Firmware guidelines", `firmware/src/screens/room/README.md` |
 | `host/companion/` | the daemon, tray app, flasher, updater, hooks client; `host/hooks/` the hook shims; `host/tests/` unittest suite | `docs/DESKTOP.md` (architecture + "Rules for changes") |
 | `PROTOCOL.md` | host ⇄ device JSON lines, the source of truth for data | before touching either side of the link |
-| `tools/` | `dev.py` (build/flash/shot/perf/send), `fw_bundle.py`, `sprites.py` + `sprites/` (sprite sheets), `room_sim.py`, install/uninstall | `docs/DEVELOPMENT.md` "Building the firmware" |
+| `tools/` | `dev.py` (build/flash/shot/perf/send), `fw_bundle.py`, `sprites.py` + `sprites/` (sheet converter), `sprites_prebuild.py` (PlatformIO hook), `room_sim.py`, install/uninstall | `docs/DEVELOPMENT.md` "Building the firmware" |
+| `firmware/assets/sprites/` | the room's sprite sheets (indexed PNGs + `atlas.json`): the masters of its pixel art, edited by hand | `tools/sprites/README.md` |
 | `packaging/`, `.github/` | PyInstaller spec, installers, CI (`ci.yml`) and release (`release.yml`) | `packaging/README.md` |
 | `docs/PERF.md` | every measurement so far, the probe method, and what was tried and rejected | before any performance work |
 | `docs/SCANOUT.md`, `docs/STATUS.md` | the LCD scan-out investigation; status snapshots | when frames jump or underruns appear |
@@ -31,8 +32,9 @@ DEV_NAME=<you> host/.venv/bin/python tools/dev.py flash          # build + flash
 DEV_NAME=<you> host/.venv/bin/python tools/dev.py shot out.png --screen home --calm --settle 4
 DEV_NAME=<you> host/.venv/bin/python tools/dev.py perf --screen home --seconds 30 [--nodemo] [--cycle]
 python3 tools/room_sim.py states                                 # the room on the host, no device
-host/.venv/bin/python tools/sprites/make_sheets.py               # regenerate the sprite sheets from room.cpp
-host/.venv/bin/python tools/sprites.py build && host/.venv/bin/python tools/sprites.py check
+host/.venv/bin/python tools/sprites.py check                    # validate the sheets after editing one
+host/.venv/bin/python tools/room_view.py                        # live browser preview of the room while editing sheets
+host/.venv/bin/python tools/sprites.py preview --out /tmp/spr     # 4x views of the sheets, outside the repo
 ```
 
 - Run the test suite with `HOME` pointing at an empty directory: three flasher tests read the real
@@ -44,7 +46,8 @@ host/.venv/bin/python tools/sprites.py build && host/.venv/bin/python tools/spri
 - The board's host link is the **USB-OTG** port (native USB-JTAG, VID 303a). The "USB TO UART" port (CH343) can
   flash but the link does not work there. Scope is LCD + touch only: no buzzer, speaker, mic, SD, RTC or IMU.
 - `firmware/src/CMakeLists.txt` globs every `.cpp` under `src/`: a generated or scratch file left there is compiled
-  into the firmware. `sprites_gen.h/.cpp` are generated on demand and must not be committed.
+  into the firmware. `src/screens/room/sprites_gen.h/.cpp` are generated from the sheets by the PlatformIO
+  pre-build hook (`tools/sprites_prebuild.py`, needs Pillow) and by `room_sim.py`; they are gitignored.
 
 ## How things are done here
 
@@ -63,7 +66,7 @@ host/.venv/bin/python tools/sprites.py build && host/.venv/bin/python tools/spri
   (`heap_caps_malloc(n, MALLOC_CAP_SPIRAM)`; plain `malloc` ≥ 4 KB also lands there); keep hot per-tick state out of
   internal `.bss` (it collided with the LCD scan-out DMA, see `docs/SCANOUT.md`); the `Director` is calloc'd in PSRAM.
 - **Generated images stay in the repo** (`firmware/assets/`, `docs/img/`); no copies elsewhere, no `@4x` previews
-  next to the assets (`make_sheets.py --preview DIR` writes them somewhere else on request).
+  next to the assets (`sprites.py preview --out DIR` writes them somewhere else on request).
 - **Release**: bump `host/companion/version.py` (app) and, if the firmware changed, `firmware/src/core/version.h`
   (`FW_VERSION`, what installed apps compare); commit `Release X.Y.Z`; `git tag vX.Y.Z && git push origin main
   vX.Y.Z`; `release.yml` builds the four installers and the firmware zip (~10 min). macOS CI runners are sometimes
@@ -73,17 +76,15 @@ host/.venv/bin/python tools/sprites.py build && host/.venv/bin/python tools/spri
 
 A 120x106 canvas of palette indices (`room::Idx`, 61 entries in `room::BASE`, index 0 transparent), drawn by
 `Director::draw` at 12 fps and upscaled 4x into LVGL by `home_face.cpp`. Lighting is a palette rebuild, not a
-redraw, so art must use palette indices. Furniture is procedural, sprites are ASCII rows stamped through
-`ROOM_MAP`, Clawd is parametric (`ClawdPose`). The same two files build on the host (`tools/room_sim.py`), which
-is how the room is previewed and how `tools/sprites/` captures every draw call into sheets. The sprite path
-(`ROOM_SPRITES`, off by default) is measured in `docs/PERF.md`: compact tables draw at the procedural speed for
-+75 KB of flash; the room draw is ~2 % of the CPU either way.
+redraw, so art must use palette indices. All the art is sprites blitted from the sheets in
+`firmware/assets/sprites/` (indexed PNGs, edited by hand: `tools/sprites/README.md`), which the pre-build hook
+converts into compact RLE tables (`sprites_gen.h/.cpp`, in flash); only lighting effects are still code. The same
+sources build on the host (`tools/room_sim.py`), which is how the room is previewed. `docs/PERF.md` measures the
+sprite tables: the room draw is ~2 % of the CPU.
 
 ## Known gaps and open threads
 
-- The sprite path is an experiment: the desk screensaver beyond its first 24 phases and the active rack LEDs fall
-  back to procedural drawing; no PlatformIO pre-build hook runs `sprites.py build` yet.
-- `tools/sprites/README.md` lists small oddities in the existing drawing code (rain never drifts, a bird frame
-  crosses the curtain, `ARMS_HOLD` equals `ARMS_DOWN`); none fixed.
+- Small oddities carried over from the procedural art into the sheets (rain never drifts, a bird frame crosses
+  the curtain, the `ARMS_HOLD` frames equal `ARMS_DOWN`); none fixed.
 - An on-screen hint when the cable is in the USB-TO-UART port is possible (`usb_serial_jtag_is_connected()`),
   not built.

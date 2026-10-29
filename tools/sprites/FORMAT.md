@@ -4,7 +4,8 @@ The home-screen room (`firmware/src/screens/room/`) draws into a 120 x 106 canva
 (`room::Idx`, one byte per pixel, `room::BASE[N_COL]` entries, index 0 = `T` = transparent). `N_COL` is
 whatever room.h says (61 at the time of writing; tools read it from the source, never hard-code it). Lighting
 is a palette transform, so art must use palette indices, never free colours. Sprite sheets keep that model: a
-sheet is a PNG whose pixels are palette indices, and the build converts it into C arrays the firmware blits.
+sheet is a PNG whose pixels are palette indices, and the build converts it into C arrays the firmware blits. The
+sheets are the hand-edited masters of all the room's art (how to edit them: [README.md](README.md)).
 
 ## Files (committed under `firmware/assets/sprites/`)
 
@@ -21,8 +22,8 @@ sheet is a PNG whose pixels are palette indices, and the build converts it into 
   < 128 or `#ff00ff` means transparent; opaque `#000000` is SHD (T is only ever reached through
   transparency).
 - `atlas.json`: where every sprite is on which sheet, and its anchor.
-- No previews live here: `make_sheets.py --preview DIR` and `sprites.py preview` write labelled 4x views
-  elsewhere on request. The indexed sheets are the only art.
+- No previews live here: `sprites.py preview --out DIR` writes 4x views elsewhere on request. The indexed
+  sheets are the only art.
 
 Sheets are laid out like a DOS-era sprite sheet (Tyrian, Jazz): a uniform grid of cells per sheet, one row per
 animation or state group, frames left to right in play order, 1 px gutter between cells. Cell size is the
@@ -62,7 +63,8 @@ largest sprite on that sheet. Unused cells are transparent.
 ## Generated code (`tools/sprites.py build`)
 
 `firmware/src/screens/room/sprites_gen.h` + `sprites_gen.cpp` (portable C++, no Arduino/LVGL includes, so
-`tools/room_sim.py` builds them too):
+`tools/room_sim.py` builds them too). The PlatformIO pre-build hook (`tools/sprites_prebuild.py`) and
+`room_sim.py` regenerate them before every build; they are gitignored, never committed:
 
 ```cpp
 namespace room { namespace spr {
@@ -90,7 +92,8 @@ decode `rle` over the rect, skipping index 0, clipped to the canvas; `flip` mirr
 to `w - ox - ow`). `const` arrays stay in flash (`.rodata`). On the current art this is ~49 KB instead of
 218 KB plain (`tools/sprites.py build` prints the numbers).
 
-## Round trip
+## Validation
 
-`tools/sprites.py check` converts every sheet back through the atlas and compares each sprite with the
-original canvas pixels, so a sheet edited by hand is validated the same way as a generated one.
+`tools/sprites.py check` validates every sheet against the atlas and the palette, and checks that an indexed
+sheet survives an RGB export (what an editor that saves RGB would produce). The build runs the same validation,
+so an invalid sheet fails the firmware build.

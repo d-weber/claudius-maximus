@@ -4,6 +4,7 @@ Run: host/.venv/bin/python -m unittest discover -s host/tests -v
 """
 from __future__ import annotations
 
+import collections
 import contextlib
 import importlib.util
 import io
@@ -310,6 +311,29 @@ class Check(unittest.TestCase):
         rc, out, err = run("preview", "--atlas", str(self.atlas), "--out", str(self.d / "pv"))
         self.assertEqual(rc, 0, err)
         self.assertEqual(load(self.d / "pv" / "fx@4x.png").size, (32, 32))
+
+
+class RealAtlas(unittest.TestCase):
+    """The committed sheets are hand-edited masters that the firmware build converts: they must stay valid."""
+    ATLAS = ROOT / "firmware" / "assets" / "sprites" / "atlas.json"
+
+    def test_check_passes(self):
+        rc, out, err = run("check", "--atlas", str(self.ATLAS))
+        self.assertEqual(rc, 0, err)
+        self.assertIn("check: OK", out)
+
+    def test_build_declares_every_group(self):
+        a = json.loads(self.ATLAS.read_text())
+        groups = collections.Counter(sp["group"] for sh in a["sheets"].values() for sp in sh["sprites"]
+                                     if "group" in sp)
+        with tempfile.TemporaryDirectory() as d:
+            rc, _, err = run("build", "--atlas", str(self.ATLAS), "--out", d)
+            self.assertEqual(rc, 0, err)
+            h = (Path(d) / "sprites_gen.h").read_text()
+        declared = {g: int(n) for g, n in re.findall(r"extern const Sprite \*const (\w+)\[(\d+)\];", h)}
+        self.assertEqual(declared, dict(groups))
+        for g, n in groups.items():
+            self.assertIn(f"constexpr int {g}_n = {n};", h)
 
 
 if __name__ == "__main__":

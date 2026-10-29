@@ -88,11 +88,7 @@ static void render() {
   Canvas c = {canvas};
   uint32_t t0 = perf_now_us();
   dir.draw(c);
-#if ROOM_SPRITES
-  perf_room_draw(perf_now_us() - t0, dir.sprFallbacks, dir.sprFallbackFrames);
-#else
-  perf_room_draw(perf_now_us() - t0, 0, 0);
-#endif
+  perf_room_draw(perf_now_us() - t0);
   bool pdirty = false;
   dir.palette(&pdirty);
   bool mir = want_mirror();

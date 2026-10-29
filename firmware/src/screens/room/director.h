@@ -117,18 +117,11 @@ struct Director {
   uint16_t pal[N_COL];
   bool palDirty = true;
   int alarmPhase = 0;
-#if ROOM_SPRITES
-  // Experiment (docs/PERF.md "sprite-room"): draw() blits pre-rendered sprites (sprites_gen.h) instead of drawing
-  // procedurally. Zero-initialised on purpose (the Director is calloc'd in PSRAM): procPath = false = sprites.
-  bool procPath = false;                // true: the procedural renderer (host comparison)
-  uint32_t sprFallbacks = 0;            // elements drawn procedurally because no sprite matches (cumulative)
-  uint32_t sprFallbackFrames = 0;       // frames with at least one fallback (cumulative)
   // The background sprite decoded once (RLE from flash is the biggest decode of a tick: 12.7 KB); every tick
   // then starts from a memcpy of this. Heap, not a member array: home_face.cpp also keeps a static Director in
   // internal RAM (the dirloc probe), and a 12.7 KB malloc lands in PSRAM on the device (sdkconfig: internal
-  // malloc only below 4 KB).
+  // malloc only below 4 KB). Null until the first draw (the Director is calloc'd).
   Idx *bgCache = nullptr;
-#endif
 
  private:
   void chooseTask();
@@ -148,13 +141,7 @@ struct Director {
   void drawSprites(Canvas &c);
   void drawClawdNow(Canvas &c);
   void drawFx(Canvas &c);
-#if ROOM_SPRITES
-  void drawSpr(Canvas &c);
-  void drawSpritesSpr(Canvas &c);
-  void drawClawdSpr(Canvas &c);
-  void drawFxSpr(Canvas &c);
-#endif
-  void composePose(ClawdPose &p, int &emote, Idx &emoteCol, int &jump, int &shake) const;
+  void composePose(ClawdPose &p, int &emote, int &jump, int &shake) const;
   bool atDesk() const { return station == ST_DESK && !walking; }
   bool busyTask() const { return task <= TASK_PLAN; }
 };
