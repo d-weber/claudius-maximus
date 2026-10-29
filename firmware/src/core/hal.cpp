@@ -529,11 +529,13 @@ void hal_init() {
   }
   if (touch_ok) {
     gt_read(0x8056, &gt_rate, 1);
-    xTaskCreatePinnedToCore(touch_task, "touch", 3072, nullptr, 5, nullptr, 0);
   }
   xTaskCreatePinnedToCore(probe_task, "probe", 3072, nullptr, 4, nullptr, 0);   // PROBE
 
   panel_init();
+  // The touch poll starts after the panel init: that init is ~600 I2C transactions to the expander in a row, and
+  // a poll queued behind them would hit the 50 ms transaction timeout (counted as touch_errors; 8 seen at boot).
+  if (touch_ok) xTaskCreatePinnedToCore(touch_task, "touch", 3072, nullptr, 5, nullptr, 0);
   lv_init();
   size_t n = 480 * 60;
   auto *b1 = (lv_color_t *)heap_caps_malloc(n * sizeof(lv_color_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);

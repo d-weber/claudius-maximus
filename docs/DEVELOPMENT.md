@@ -177,6 +177,21 @@ cd host && .venv/bin/python -m companion app --no-setup -v    # the tray app fro
 pystray / dbus-fast for the tray), so either install works. Building the installers is described in
 [packaging/README.md](../packaging/README.md).
 
+The firmware is a plain ESP-IDF 5.5 project that PlatformIO drives (`framework = espidf`, pioarduino platform; the
+first build downloads the IDF, ~500 MB). Where things live:
+
+- `firmware/sdkconfig.defaults`: the IDF configuration (CPU, PSRAM, caches, console, watchdogs, LVGL's `LV_CONF_SKIP`
+  off). PlatformIO expands it into `firmware/sdkconfig.companion` (not committed); the IDF only applies the defaults
+  to a file it creates, so `tools/dev.py` deletes a `sdkconfig.<env>` that is older than the defaults. Edit the
+  defaults, not the generated file.
+- `firmware/partitions.csv`: the flash layout (the Arduino core's `default_16MB.csv`, so the flasher offsets never
+  changed). `firmware/CMakeLists.txt` / `firmware/src/CMakeLists.txt`: project-wide compile options and the app
+  component (every file under `src/`). `firmware/src/idf_component.yml`: LVGL 8.4 and ArduinoJson 7 from the IDF
+  component registry (`firmware/managed_components/`, not committed; `dependencies.lock` is).
+- `firmware/src/core/sys.h`: `millis()`, `micros()`, `delay()`, `min`/`max`, the only Arduino-isms the screens use.
+- Experiment switches (`-DHAL_STREAM_MODE=1`, `-DHAL_ROT180=0`, `-DLAYOUT_PAD=n`, see [SCANOUT.md](SCANOUT.md)) go in
+  `build_flags` as before.
+
 `tools/dev.py` drives the device during development (set `DEV_NAME` for a private build directory):
 
 ```bash
