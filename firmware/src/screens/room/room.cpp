@@ -1,5 +1,8 @@
 // Clawd's Studio: palette, canvas primitives, the furniture, Clawd, helpers and FX. See room.h.
 #include "room.h"
+#if ROOM_SPRITES
+#include "sprites_gen.h"
+#endif
 #include <string.h>
 #include <math.h>
 
@@ -186,6 +189,66 @@ Idx darker(Idx c) {
 void Canvas::darken(int x0, int x1, int y) {
   for (int x = x0; x <= x1; x++) p(x, y, darker(get(x, y)));
 }
+
+#if ROOM_SPRITES
+#include "sprites_gen.h"
+// Decode one RLE stream (tools/sprites.py: c < 0x80 repeats the next byte c times; 0xC0|n is followed by n
+// opaque literals, 0x80|n by n literals that may hold transparent pixels) of ow x oh pixels with its top-left
+// at canvas (tx, ty), writing non-zero indices inside the clip rect (cx0..cx1, cy0..cy1). flip mirrors each
+// row (the caller has already moved tx for it). Opaque literals and runs are block copies; only mixed
+// literals and flipped rows go pixel by pixel.
+static void rle_draw(Idx *buf, const uint8_t *p, int n, int ow, int oh, int tx, int ty, bool flip,
+                     int cx0, int cy0, int cx1, int cy1) {
+  const uint8_t *end = p + n;
+  int x = 0, y = 0;
+  while (p < end && y < oh) {
+    uint8_t c = *p++;
+    bool lit = c & 0x80, opaque = (c & 0xC0) == 0xC0;
+    int len = lit ? c & 0x3F : c;
+    Idx run = lit ? 0 : *p++;
+    while (len > 0) {
+      int seg = ow - x;
+      if (seg > len) seg = len;
+      int yy = ty + y;
+      if (yy >= cy0 && yy <= cy1 && (lit || run)) {
+        Idx *row = buf + yy * W;
+        if (!flip) {
+          int xx = tx + x, i0 = xx < cx0 ? cx0 - xx : 0, i1 = xx + seg > cx1 + 1 ? cx1 + 1 - xx : seg;
+          if (i0 < i1) {
+            if (opaque) memcpy(row + xx + i0, p + i0, i1 - i0);
+            else if (lit) { for (int i = i0; i < i1; i++) { Idx v = p[i]; if (v) row[xx + i] = v; } }
+            else memset(row + xx + i0, run, i1 - i0);
+          }
+        } else {
+          for (int i = 0; i < seg; i++) {
+            Idx v = lit ? p[i] : run;
+            int xx = tx + ow - 1 - (x + i);
+            if (v && xx >= cx0 && xx <= cx1) row[xx] = v;
+          }
+        }
+      }
+      if (lit) p += seg;
+      len -= seg;
+      x += seg;
+      if (x == ow) { x = 0; y++; }
+    }
+  }
+}
+
+void Canvas::blitRect(int x, int y, const spr::Sprite &s, bool flip, int cx0, int cy0, int cx1, int cy1) {
+  int x0 = x - s.ax, y0 = y - s.ay;
+  if (cx0 < 0) cx0 = 0;
+  if (cy0 < 0) cy0 = 0;
+  if (cx1 > W - 1) cx1 = W - 1;
+  if (cy1 > H - 1) cy1 = H - 1;
+  if (x0 > cx1 || y0 > cy1 || x0 + s.w <= cx0 || y0 + s.h <= cy0) return;
+  const spr::Sprite *b = s.base;
+  if (b) rle_draw(buf, b->rle, b->n, b->ow, b->oh, x0 + (flip ? s.w - b->ox - b->ow : b->ox), y0 + b->oy, flip, cx0, cy0, cx1, cy1);
+  rle_draw(buf, s.rle, s.n, s.ow, s.oh, x0 + (flip ? s.w - s.ox - s.ow : s.ox), y0 + s.oy, flip, cx0, cy0, cx1, cy1);
+}
+
+void Canvas::blit(int x, int y, const spr::Sprite &s, bool flip) { blitRect(x, y, s, flip, 0, 0, W - 1, H - 1); }
+#endif
 
 // ---------------------------------------------------------------- the room
 void drawWalls(Canvas &c) {

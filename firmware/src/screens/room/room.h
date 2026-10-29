@@ -10,6 +10,10 @@
 
 namespace room {
 
+#if ROOM_SPRITES
+namespace spr { struct Sprite; }     // sprites_gen.h (tools/sprites.py build); experiment, off by default
+#endif
+
 constexpr int W = 120, H = 106;      // the room; the 14-row HUD band below it is LVGL widgets
 constexpr int FPS = 12;              // director tick rate (sprite animation rate)
 
@@ -68,6 +72,13 @@ struct Canvas {
   }
   void ellipse(int cx, int cy, int rx, int ry, Idx c);              // filled
   void darken(int x0, int x1, int y);                               // 1-row shadow: floor colours -> darker kin
+#if ROOM_SPRITES
+  // Pre-rendered sprite (RLE, maybe a delta over its group's frame 0: tools/sprites/FORMAT.md): its anchor
+  // lands on (x, y); index 0 is transparent; clipped to the canvas. flip mirrors each row within the sprite
+  // width. blitRect draws only what falls inside the canvas rect (cx0..cx1, cy0..cy1).
+  void blit(int x, int y, const spr::Sprite &s, bool flip = false);
+  void blitRect(int x, int y, const spr::Sprite &s, bool flip, int cx0, int cy0, int cx1, int cy1);
+#endif
 };
 Idx darker(Idx c);
 

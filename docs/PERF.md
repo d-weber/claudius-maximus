@@ -302,3 +302,63 @@ JSON parse of a state ≈ 5.6 ms (≈ 6/s). Flush (copy to PSRAM framebuffer) �
   IRAM (+29 KB), `vsync_front_porch` 10 -> 40, canvases in PSRAM (worse while the state was internal). Measured with
   raw-serial perf windows: port held open, nothing sent, no demo stream (`tools/dev.py perf` with the daemon's demo
   stream is 3x busier than real life).
+- **sprite-room** (2026-10-29, measurement only, not adopted) — what the home-screen room would cost if
+  `Director::draw` blitted the pre-rendered sprite tables (`tools/sprites/`, 484 sprites, 218 KB of palette indices in
+  flash `.rodata`) instead of drawing procedurally. Behind `-DROOM_SPRITES=1` (off by default; needs
+  `tools/sprites.py build` for `sprites_gen.h/.cpp`): `Canvas::blit` (clip once, row pointers, index 0 skipped), and
+  `Director::drawSpr`: the `background` sprite memcpy'd (12.7 KB), the floor copied back under the plant (it belongs to
+  the painter pass), the procedural lighting (sun / moon patch, lamp pool, door spot, under-desk beam, shadows), then
+  window / whiteboard / shelf / desk (base + overlays) / rack / bed / nightstand variants, Clawd, minis, props and FX
+  from their tables. Where no sprite matches (screensaver t > 23, active rack LEDs for seeds other than 1, Clawd poses
+  outside the tables, the delegation dash, bird over other window states) that element is drawn procedurally and
+  counted. Probe in both builds: `room_draw_us_avg/min/max/first`, `room_draw_n`, and in the sprite build
+  `room_fallbacks`, `room_fallback_frames`, `room_draw_us_avg_clean/max_clean` (frames with no fallback).
+  - **Same frame**: host harness, both paths drawn every tick and compared, 15 states (13 forced tasks + 2 free) x
+    20 000 ticks: **0 differing pixels**. Two overlaps had to be handled for that: the desk's right edge covers the
+    rack's foot pixel (101,45), and the day window at cloudX 0 leaves one cloud pixel on the wall at (25,15) left of
+    the curtain (a 1-px leak in `drawWindow`, also in the procedural room).
+  - Device, A/B/A/B back to back (each build flashed, then demo 30 s, quiet `--nodemo` 30 s, `--cycle` 60 s), room
+    draw µs avg / min / max, then fps / frame avg / max ms / cpu % / loop_max ms; `lcd_underruns` 0 in every window:
+    demo base 1559 / 1161 / 2035 and 1564 / 1178 / 2026, 22.7-23.9 / 12.0-12.4 / 62-64 / 33.8-36.3 / 67-70 →
+    sprites 1344 / 620 / 2722 and 1334 / 576 / 2589 (fallback in 222-260 of 363 frames: the screensaver while Clawd
+    waits at the door), 23.9 / 12.4 / 62-66 / 35.7-35.9 / 69-73;
+    quiet base 1215 / 1082 / 1475 and 1233 / 1082 / 1608, 7.0-8.2 fps / 7.9-8.6 / 33 / 8.9-9.3 / 35 → sprites 657 / 224 /
+    1255 and 688 / 237 / 1143 (frames without fallback 434-436 avg), 7.5-8.3 / 7.5-8.4 / 32-33 / 8.4 / 34-35;
+    cycle base 1575 / 1286 / 2037 and 1583 / 1342 / 1991, 34.6-35.1 fps / 9.5-9.8 ms / 100-101 / 39.8-40.3 / 135-136 →
+    sprites 1442 / 766 / 2630 and 1370 / 853 / 2554, 32.7-34.6 / 9.9-10.2 / 100 / 39.5-40.8 / 136-137.
+  - Device, forced tasks (`anim`, no demo, 15 s after 12 s to get there), room draw µs avg (min-max) base → sprites:
+    code 1229 (1082-1424) → 496 (169-1073); sleep 1115 (1071-1319) → 358 (189-962); think 1204 → 569 and idle
+    1262 → 677 (every frame a desk fallback: screensaver); wait 1476 (1316-1678) → 1364 (828-1818; door spot drawn
+    procedurally, the alarm ring is a 120 x 106 sprite scanned pixel by pixel for its 1 744 opaque border pixels).
+  - Host cross-check (g++ -O2, arm64, best of 5 x 1000 draws of the same frame): procedural 7.5 / 8.5 / 6.9 / 7.8 µs
+    (code / wait / offline / delegate) vs sprites 1.6 / 3.6 / 1.5 / 1.5 µs. Indicative only.
+  - Cost: image 1 174 208 → 1 398 752 B (+219 KB: the tables + 3.9 KB of descriptors + ~2.5 KB of code); internal heap
+    160.3 KB in both (±32 B); no RAM (the tables stay in flash; the Director stays in PSRAM).
+  - Flash cache: the first draw after boot is 1.47-1.54 ms in the sprite build (base 1.52-1.57); steady-state frames
+    without fallback spread from 0.17 to ~1.0 ms where the procedural room stays within ±15 %. Between two room ticks
+    LVGL renders and flushes through the same cache, so the 12.7 KB background and the sprites touched are mostly
+    re-fetched from flash on every tick; the spread is those misses, not code.
+  - **Conclusion: faster where it applies, invisible in the frame budget.** The room draw is a small part of a home
+    frame (1.1-1.6 ms per 83 ms tick, 1.5-2 % of the CPU at 12 fps; LVGL's upscale and flush dominate), so halving it
+    moves fps / frame time / cpu by less than run-to-run noise in every window above. The procedural renderer is not
+    instruction-fetch-bound here the way LVGL is (a few tight loops, `drawFloor`'s 8 064 `p()` calls being the
+    largest): the sprite path wins by replacing per-pixel calls with a memcpy and short row loops, and loses part of
+    that to flash-data misses and to fallbacks. Not worth 219 KB of flash and a second renderer on performance alone;
+    if the room moves to sprites for authoring reasons, it costs nothing at run time, provided the screensaver and
+    the active rack get full tables (or stay procedural overlays) and sparse full-canvas sprites (alarm ring) are
+    stored as their strips instead.
+- **sprite-room, compact tables** (2026-10-29, follow-up, same harness and method; `ROOM_SPRITES` still off) —
+  the plain tables above cost 218 KB; `tools/sprites.py build` now emits RLE (runs of ≥ 8, opaque literal blocks
+  the decoder memcpy's, mixed literals checked per pixel) and stores later frames of a group as a delta over
+  frame 0 where no pixel has to be erased (FORMAT.md): 484 sprites → 59 KB of data + 7.7 KB of descriptors,
+  image 1 174 384 → 1 248 912 B (+74.5 KB, was +224.5 KB). The background (12.7 KB) is decoded once into a PSRAM
+  buffer (`malloc` ≥ 4 KB goes to PSRAM) and memcpy'd per tick; internal heap unchanged (160 288 B). Pixel
+  equality with the procedural path: 0 differing pixels over 15 states x 1 000-3 000 ticks (host harness).
+  - Device, forced tasks, room draw µs avg (min-max), procedural → plain sprites → compact: code 1229 → 496 →
+    1092 (782-1516); sleep 1115 → 358 → 1004 (811-1464); idle 1262 → 677 → 1170; wait 1476 → 1364 → 1497. Steps
+    on the way: RLE with runs ≥ 3 and no opaque blocks 1880-2244 µs (more segments than pixels per row: ~50
+    cycles per control byte, flash reads included); + opaque literal blocks and runs ≥ 8: 1452-1805; + the cached
+    background: the numbers above. 0 lcd_underruns in every window.
+  - So the compact tables draw at the procedural speed (± 0.1 ms) for a quarter of the plain tables' flash; the
+    plain tables' 2x draw-time win is spent on decoding. The remaining decode cost is the delta bases (a window
+    or desk frame decodes its frame 0 and then the overlay) and the fallbacks already listed above.
