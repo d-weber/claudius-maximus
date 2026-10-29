@@ -14,6 +14,7 @@
 #include "../core/model.h"
 #include <esp_heap_caps.h>
 #include "../core/hal.h"
+#include "../core/perf.h"
 #include <esp_random.h>
 #include <math.h>
 #include <string.h>
@@ -85,7 +86,13 @@ static void publish(int lx0, int ly0, int lx1, int ly1) {
 
 static void render() {
   Canvas c = {canvas};
+  uint32_t t0 = perf_now_us();
   dir.draw(c);
+#if ROOM_SPRITES
+  perf_room_draw(perf_now_us() - t0, dir.sprFallbacks, dir.sprFallbackFrames);
+#else
+  perf_room_draw(perf_now_us() - t0, 0, 0);
+#endif
   bool pdirty = false;
   dir.palette(&pdirty);
   bool mir = want_mirror();
