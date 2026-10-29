@@ -11,7 +11,7 @@ struct LinkSerial {
   size_t write(const void *buf, size_t n, uint32_t timeout_ms = 20);   // partial on timeout (host not reading)
   size_t print(const char *s) { return write(s, strlen(s)); }
   size_t print(char c) { return write(&c, 1); }
-  size_t println(const String &s) { size_t n = write(s.c_str(), s.length()); return n + print('\n'); }
+  size_t println(const char *s) { size_t n = print(s); return n + print('\n'); }
   size_t printf(const char *fmt, ...) __attribute__((format(printf, 2, 3)));
   size_t read(uint8_t *buf, size_t n);                                 // non-blocking
   void flush(uint32_t timeout_ms = 1000);

@@ -248,6 +248,14 @@ JSON parse of a state ≈ 5.6 ms (≈ 6/s). Flush (copy to PSRAM framebuffer) �
   (9.4 ms per 60-line band, 64-byte bursts, vs 0.9 ms for the cached CPU blit). perf `--cycle` changes page every
   1.2 s. `HAL_BLIT_ROWS` (4) chunks the blit's cache write-back; `HAL_BLIT_PAUSE_US`, `HAL_PCLK_HZ`, `HAL_BOUNCE_PX`
   remain as experiment knobs.
+- **native-idf** (2026-10-29) — the firmware is a plain ESP-IDF 5.5 project now (no Arduino core; same LVGL 8.4 /
+  ArduinoJson 7 from the IDF component registry, `sdkconfig.defaults` = the Arduino core's configuration plus -O2 for
+  the IDF libraries). Same board, released Arduino 0.4.1 image vs the native build, home --cycle 60 s (fps / frame
+  avg ms / cpu %): 30.7 / 12.9 / 47 and 29.3 / 13.5 / 47 → 29.1 / 14.7 / 50 and 25.9 / 15.8 / 47 (eight native runs
+  average 14.5 ms; single runs scatter ±1.5 ms); quiet room identical (2.7 fps, 3.7 % cpu, 0 lost frames in every
+  120 s window); heap_int 150 → 178 KB; image 1.4 → 1.17 MB. Also measured, not adopted: 64 KB D-cache / 64 B lines
+  (no frame-time change, −32 KB RAM) and stream-mode scan-out with the driver's restart-in-vsync off (0 lost frames,
+  0 stalls: a data point for SCANOUT.md's mechanism). Details and tables in [SCANOUT.md](SCANOUT.md) "Native build".
 - **scan-out-on-demand** (2026-10-28, later) — the stalls below came back with unrelated code changes; root cause and fix in
   [SCANOUT.md](SCANOUT.md): the driver's restart-in-vsync of a running DMA channel; scan-out now runs in
   refresh-on-demand mode (0 lost frames under loads that lost 45-140/min before).

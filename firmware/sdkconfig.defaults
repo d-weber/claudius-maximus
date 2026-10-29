@@ -1,0 +1,55 @@
+# ESP-IDF configuration for the Waveshare ESP32-S3-Touch-LCD-4B build. Baseline = what the Arduino-ESP32 3.3
+# core (IDF 5.5, qio_opi variant) was compiled with, so measurements before and after the port compare; the
+# lines marked "port:" are the ones Arduino could not offer. docs/SCANOUT.md and docs/PERF.md.
+CONFIG_IDF_TARGET="esp32s3"
+
+# CPU, flash, PSRAM (ESP32-S3R8: 8 MB octal PSRAM, 16 MB QIO flash, both at 80 MHz)
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+# Allocations above 4 KB go to PSRAM unless asked otherwise (Arduino's threshold; IDF's default is 16 KB):
+# ArduinoJson documents and the line buffers end up where they always did.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=0
+
+# Flash layout: partitions.csv (same as Arduino's default_16MB.csv)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+
+# port: -O2 for the whole tree (the Arduino core's libraries were -Os; only our code and LVGL were -O2)
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_BOOTLOADER_COMPILER_OPTIMIZATION_PERF=y
+
+# FreeRTOS: 1 ms tick (delay(1) in the main loop), task watchdog as in the Arduino core (idle task of core 0
+# only: the LVGL loop on core 1 renders frames of up to ~200 ms)
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+CONFIG_ESP_TASK_WDT_PANIC=y
+
+# Console on UART0 (the board's "USB TO UART" port). port: nothing on the USB-Serial-JTAG port, which is the
+# host link (core/link.cpp installs the driver itself); the Arduino core had a secondary console there.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+CONFIG_BOOTLOADER_LOG_LEVEL_ERROR=y
+
+# Caches: the Arduino core's values. The data cache (PSRAM framebuffer traffic) can go to 64 KB / 64-byte lines
+# once the port measures equal to the Arduino build; see docs/SCANOUT.md "Native build".
+CONFIG_ESP32S3_INSTRUCTION_CACHE_16KB=y
+CONFIG_ESP32S3_INSTRUCTION_CACHE_LINE_32B=y
+CONFIG_ESP32S3_DATA_CACHE_32KB=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_32B=y
+
+# LVGL takes its configuration from include/lv_conf.h (the registry component defaults to its Kconfig menu instead)
+CONFIG_LV_CONF_SKIP=n
+
+# RGB LCD driver: the restart-in-vsync behaviour the Arduino core had (irrelevant in the default
+# refresh-on-demand scan-out, it only acts in stream mode); switchable here now.
+CONFIG_LCD_RGB_RESTART_IN_VSYNC=y

@@ -1,6 +1,6 @@
 # Scan-out underruns (the "flicker" on the home screen)
 
-Status as of 2026-10-28, late evening: fixed by switching the scan-out to refresh-on-demand mode (0 lost frames under every load that lost frames before). The record below is in the order the work happened; the conclusion is in "Where this stands". This page is
+Status as of 2026-10-28, late evening: fixed by switching the scan-out to refresh-on-demand mode (0 lost frames under every load that lost frames before); re-measured at 0 on the native ESP-IDF build on 2026-10-29 ("Native build" below). The record below is in the order the work happened; the conclusion is in "Where this stands". This page is
 the record of what the glitch is, how to measure it, what was tried, and what is known. Short version in
 [PERF.md](PERF.md) under "scan-out-stalls"; the measurement notes of the first round are in [STATUS.md](STATUS.md).
 
@@ -281,10 +281,53 @@ this board: the I2C poll stays, and the question becomes why a poll disturbs the
 - **To verify with eyes on the panel**: the restart re-emits a vsync pulse at the frame boundary. The panel runs in
   DE mode and should ignore it; look for any artefact at the top edge or a brightness beat.
 - **Not needed after all**: bounce buffers, XIP from PSRAM, a slower poll, moving state between RAMs.
+- **2026-10-29, native ESP-IDF build**: no change in lost frames (0 throughout); see "Native build" below for the
+  stream-mode-without-restart and 64 KB D-cache data points.
 - **Probe tooling kept**: `dev_touch` / `dev_probe` events (poll, synthetic loads, Director placement, animation
   pause, pixel clock, I2C speed, poll period), `LAYOUT_PAD`, the extra perf fields including `temp_c`. In
   on-demand mode only `lcd_underruns` (and `lcd_frames`) are meaningful; the stall and vsync-lateness columns
   read the restart jitter.
+
+## Native build (plain ESP-IDF 5.5, 2026-10-29)
+
+The firmware moved off the Arduino core (same sources, LVGL 8.4 and ArduinoJson from the IDF component registry,
+pioarduino 55.03.312-1 / IDF 5.5.5). `sdkconfig.defaults` reproduces the Arduino core's configuration (240 MHz,
+octal PSRAM 80 MHz, 16 KB/32 B I-cache, 32 KB/32 B D-cache, 1 ms tick, 4 KB internal-malloc threshold,
+`CONFIG_LCD_RGB_RESTART_IN_VSYNC` on) so the two builds compare; the port only adds -O2 for the IDF libraries and
+removes the secondary console from the USB-Serial-JTAG port. Measured on the same board, same evening, the released
+Arduino 0.4.1 image against the native builds: quiet room = port held, nothing sent, home screen, 120 s windows (as
+above); demo = `tools/dev.py perf --screen home --cycle --seconds 60`. The quiet-room render rate depends on what
+the room decided to do after boot (2.7 frames/s offline-asleep, up to 10 with a random behaviour running), so the
+later rows set the device clock to 14:00 first, which puts every build in the same offline state; the lost-frame
+counts do not depend on it.
+
+| Build | Scan-out | Quiet room: lost frames / 120 s | Demo, two 60 s runs: LVGL fps / frame ms / CPU % | heap_int free |
+|---|---|---|---|---|
+| Arduino 0.4.1 (released image) | on demand | 0, 0 (offline-asleep) and 0, 0 (clock set) | 30.7 / 12.9 / 47, 29.3 / 13.5 / 47 | 150.5 KB |
+| native, Arduino's configuration | on demand | 0, 0 | 28.5 / 15.0 / 49, 29.3 / 14.3 / 48 | 178.5 KB |
+| native, 64 KB D-cache, 64 B lines | on demand | 0, 0 | 30.5 / 14.1 / 50, 31.1 / 13.3 / 48 | 146.5 KB |
+| native, stream mode, `RESTART_IN_VSYNC` off | stream | 0, 0 (stall and lateness counters 0 as well) | 29.5 / 14.4 / 49, 29.8 / 14.0 / 48 | 178.5 KB |
+| native as committed (touch poll starts after the panel init) | on demand | 0, 0, 0, 0 (two with the clock set) | 29.1 / 14.7 / 50, 25.9 / 15.8 / 47 | 178.5 KB |
+
+What it says:
+
+- **Lost frames: no change.** Refresh-on-demand was already at 0 and stays there on every native build, 5,070 frames
+  per window, including the page-cycling demo.
+- **Stream mode with the driver's restart switched off** (the setting the Arduino core did not expose) measured 0
+  lost frames and, for the first time in stream mode, 0 in the stall and vsync-lateness columns too. That is what
+  the mechanism above predicts; it is one binary and two windows, and stream mode drops were layout dependent, so
+  it stays an experiment (`-DHAL_STREAM_MODE=1` plus `CONFIG_LCD_RGB_RESTART_IN_VSYNC=n`) and on-demand stays the
+  default.
+- **The 64 KB data cache** did not change the render time beyond the run-to-run scatter and costs 32 KB of internal
+  RAM: not adopted (two lines in `sdkconfig.defaults` if wanted).
+- **Render time** on the demo stream reads about 1 ms per frame higher on the native builds (14.5 ms over eight
+  runs against 12.9 and 13.5), and 2.6 against 2.2 ms per 10k-pixel frame in the quiet room; single runs scatter by
+  ±1.5 ms, so this is at the edge of what two runs resolve and was not chased. Same compiler (GCC 14.2), same -O2
+  for LVGL and our code in both builds.
+- **Internal RAM**: 28 KB more free (no Arduino core objects, no BT/Wi-Fi stacks linked, no secondary console).
+- Touch: the GT911 was polled at 100 Hz with 0 errors in every window once the poll starts after the panel init
+  (started before it, the first polls hit the 50 ms I2C timeout behind the ~600 expander transactions of the init:
+  8 errors at boot, none after).
 
 ## What Espressif says
 
@@ -313,5 +356,5 @@ library. The schematic is at
 ## Knobs that exist in the firmware
 
 `firmware/src/core/hal.cpp`: `HAL_PCLK_HZ` (12 MHz), `HAL_BLIT_ROWS` (4), `HAL_BLIT_PAUSE_US` (0),
-`HAL_BOUNCE_PX` (0, bounce buffers off), porches (hsync 8/50/10, vsync 8/20/10), `psram_trans_align` 64.
+`HAL_BOUNCE_PX` (0, bounce buffers off), porches (hsync 8/50/10, vsync 8/20/10), `dma_burst_size` 64 (IDF 5.5 name of `psram_trans_align`).
 `LAYOUT_PAD=<n>` (probe only) inserts n NOPs in flash to shift the code layout.

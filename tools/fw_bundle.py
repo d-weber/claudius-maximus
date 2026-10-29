@@ -4,15 +4,16 @@
   host/.venv/bin/python tools/fw_bundle.py [--board 4b|all] [--no-build] [--out DIR]
 
 For each board: `pio run -e <env>` in its own build dir (firmware/.pio/build-bundle/<env>, so it never collides
-with tools/dev.py builds), then copy bootloader.bin, partitions.bin, boot_app0.bin (from the Arduino framework
-package, exactly the file PlatformIO's upload writes at 0xe000) and firmware.bin into
-<out>/<board>/ (default host/companion/firmware/<board>/) and write manifest.json (docs/DESKTOP.md "Flasher").
+with tools/dev.py builds), then copy bootloader.bin, partitions.bin, the initial otadata image (ESP-IDF's
+ota_data_initial.bin, kept under its historical name boot_app0.bin: same content, same 0xe000 slot the Arduino
+builds used) and firmware.bin into <out>/<board>/ (default host/companion/firmware/<board>/) and write
+manifest.json (docs/DESKTOP.md "Flasher").
 
 Offsets and flash parameters are the ones `pio run -t upload -v` passes to esptool for these envs
-(pioarduino 55.03.31, verified 2026-10-27):
+(pioarduino 55.03.31, ESP-IDF 5.5.1; the layout is firmware/partitions.csv):
   --flash-mode dio --flash-freq 80m --flash-size detect
   0x0 bootloader.bin 0x8000 partitions.bin 0xe000 boot_app0.bin 0x10000 firmware.bin
-(PlatformIO turns board_build.flash_mode = qio into "dio" for the image header; the QIO bootloader switches
+(ESP-IDF writes "dio" into the image header for CONFIG_ESPTOOLPY_FLASHMODE_QIO; the QIO bootloader switches
 modes itself.) We write flash_size 16MB instead of "detect": the board carries 16 MB and it skips a probe.
 """
 from __future__ import annotations
@@ -50,7 +51,7 @@ def tree_hash(fw: Path = FW) -> str:
     a Windows/macOS CI runner bundling firmware should not need."""
     import hashlib
     h = hashlib.sha1()
-    files = [fw / "platformio.ini"]
+    files = [fw / n for n in ("platformio.ini", "CMakeLists.txt", "sdkconfig.defaults", "partitions.csv")]
     for d in ("src", "include", "lib"):
         files += sorted(p for p in (fw / d).rglob("*") if p.is_file())
     for p in files:
@@ -66,20 +67,10 @@ def pio_bin() -> str:
     return str(cand) if cand.exists() else (shutil.which("pio") or "pio")
 
 
-def boot_app0() -> Path:
-    """boot_app0.bin from the Arduino framework package (PlatformIO's FLASH_EXTRA_IMAGES at 0xe000)."""
-    core = Path(os.environ.get("PLATFORMIO_CORE_DIR") or Path.home() / ".platformio")
-    for pkg in ("framework-arduinoespressif32", "framework-arduinoespressif32-libs"):
-        p = core / "packages" / pkg / "tools" / "partitions" / "boot_app0.bin"
-        if p.is_file():
-            return p
-    hits = sorted((core / "packages").glob("framework-arduinoespressif32*/**/boot_app0.bin"))
-    if hits:
-        return hits[0]
-    sys.exit("boot_app0.bin not found under ~/.platformio/packages (build once with pio to install the framework)")
-
-
 def build(env: str) -> int:
+    for p in FW.glob("sdkconfig.*"):   # same as tools/dev.py drop_stale_sdkconfig: defaults only apply to a fresh file
+        if p.name != "sdkconfig.defaults" and p.is_file() and p.stat().st_mtime < (FW / "sdkconfig.defaults").stat().st_mtime:
+            p.unlink()
     e = dict(os.environ, PLATFORMIO_BUILD_DIR=str(BUILD_ROOT))
     return subprocess.call([pio_bin(), "run", "-e", env], cwd=FW, env=e)
 
@@ -87,7 +78,7 @@ def build(env: str) -> int:
 def bundle(board: str, out_root: Path, tree: str, version: str) -> Path:
     src = BUILD_ROOT / ENVS[board]
     files = {"bootloader.bin": src / "bootloader.bin", "partitions.bin": src / "partitions.bin",
-             "boot_app0.bin": boot_app0(), "firmware.bin": src / "firmware.bin"}
+             "boot_app0.bin": src / "ota_data_initial.bin", "firmware.bin": src / "firmware.bin"}
     for name, p in files.items():
         if not p.is_file():
             sys.exit(f"{board}: {p} missing (build first, or drop --no-build)")

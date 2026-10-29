@@ -1,6 +1,6 @@
 #pragma once
 // Lightweight performance counters. Query from host: {"t":"cmd","perf":1} -> {"t":"perf",...} (resets window).
-#include <Arduino.h>
+#include "sys.h"
 #include <lvgl.h>
 
 enum PerfSlot { PERF_LINK, PERF_UI_TICK, PERF_LVGL, PERF_FLUSH, PERF_PARSE, PERF__N };

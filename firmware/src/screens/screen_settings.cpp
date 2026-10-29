@@ -1,6 +1,7 @@
 // Settings tile: display (brightness, dim, timeouts), alerts, night mode, about.
 // Vertical scroll inside the tile; every control is >= 48 px tall. Changes apply live and are
 // persisted with a debounced settings_save_later().
+#pragma GCC diagnostic ignored "-Wdeprecated-enum-enum-conversion"   // LVGL flag enums or-ed together (gnu++2b note)
 #include "../core/link.h"
 #include "screens.h"
 #include "../ui/theme.h"
@@ -10,7 +11,6 @@
 #include "../fx/alerts.h"
 #include <esp_heap_caps.h>
 #include <stdarg.h>
-#include <Wire.h>
 
 #include "../core/version.h"
 

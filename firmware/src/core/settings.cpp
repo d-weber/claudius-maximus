@@ -1,12 +1,14 @@
 #include "settings.h"
-#include <Preferences.h>
+#include <nvs.h>
 #include <lvgl.h>
 #include "hal.h"
 
 static Settings s;
-static Preferences prefs;
 static lv_timer_t *save_timer;
 static const uint16_t SETTINGS_MAGIC = 0xC1A2;   // bump when the struct layout changes incompatibly
+// NVS namespace and keys are the ones the Arduino Preferences library wrote for firmware <= 0.4.1 (same
+// partition, same format), so settings survive the update.
+static const char *NS = "companion";
 
 Settings &settings() { return s; }
 
@@ -18,23 +20,28 @@ static void sanitize() {
 }
 
 void settings_load() {
-  prefs.begin("companion", true);
-  if (prefs.getUShort("magic", 0) == SETTINGS_MAGIC) {
-    size_t n = prefs.getBytesLength("s");
-    // Accept older, shorter blobs: fields appended later keep their defaults.
-    if (n > 0 && n <= sizeof(Settings)) prefs.getBytes("s", &s, n);
+  nvs_handle_t h;
+  if (nvs_open(NS, NVS_READONLY, &h) == ESP_OK) {
+    uint16_t magic = 0;
+    if (nvs_get_u16(h, "magic", &magic) == ESP_OK && magic == SETTINGS_MAGIC) {
+      size_t n = 0;
+      // Accept older, shorter blobs: fields appended later keep their defaults.
+      if (nvs_get_blob(h, "s", nullptr, &n) == ESP_OK && n > 0 && n <= sizeof(Settings)) nvs_get_blob(h, "s", &s, &n);
+    }
+    nvs_close(h);
   }
-  prefs.end();
   sanitize();
   hal_set_brightness(s.brightness);
 }
 
 void settings_save() {
   if (save_timer) lv_timer_pause(save_timer);
-  prefs.begin("companion", false);
-  prefs.putUShort("magic", SETTINGS_MAGIC);
-  prefs.putBytes("s", &s, sizeof(Settings));
-  prefs.end();
+  nvs_handle_t h;
+  if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return;
+  nvs_set_u16(h, "magic", SETTINGS_MAGIC);
+  nvs_set_blob(h, "s", &s, sizeof(Settings));
+  nvs_commit(h);
+  nvs_close(h);
 }
 
 static void save_cb(lv_timer_t *) { settings_save(); }

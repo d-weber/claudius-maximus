@@ -1,31 +1,89 @@
+#pragma GCC diagnostic ignored "-Wvolatile"   // counter++ on the volatile probe counters is intentional (gnu++2b note)
 #include "link.h"
 #include "hal.h"
-#include <Wire.h>
 #include <lvgl.h>
-#include <Arduino_GFX_Library.h>
 #include <esp_lcd_panel_rgb.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_cache.h>
-#include <esp_timer.h>
+#include <esp_heap_caps.h>
+#include <driver/i2c_master.h>
+#include <driver/ledc.h>
 #include <rom/ets_sys.h>
 #include <soc/gpio_reg.h>
-#include <TouchDrvGT911.hpp>
 #include "board.h"
 #include "perf.h"
+#include "st7701_init.h"
 
-// ST7701 is configured over a bit-banged 3-wire SPI (Arduino_GFX bus + init table); pixels go through the
-// ESP32-S3 RGB LCD peripheral, driven directly with esp_lcd so the panel config (bounce buffers) is ours.
-// CS/SCL/SDA and the panel reset are pins of the TCA9554 expander, bit-banged over I2C (init only)
-static Arduino_XCA9554SWSPI *expander = new Arduino_XCA9554SWSPI(BOARD_EXIO_LCD_RST, BOARD_EXIO_LCD_CS, BOARD_EXIO_LCD_SCL,
-                                                                 BOARD_EXIO_LCD_SDA, &Wire, BOARD_EXPANDER_ADDR);
-static Arduino_DataBus *bus = expander;
+// ST7701 is configured over a 3-wire SPI bit-banged on pins of the TCA9554 expander (over I2C, init only);
+// pixels go through the ESP32-S3 RGB LCD peripheral, driven with esp_lcd. The GT911 touch controller sits on
+// the same I2C bus. IDF i2c_master driver: one bus, one device handle per chip (the clock speed is a property
+// of the device handle, see hal_probe_i2c_hz).
+static i2c_master_bus_handle_t i2c_bus;
+static i2c_master_dev_handle_t i2c_exp, i2c_gt;   // TCA9554 @0x20, GT911 @0x5D or 0x14
+static volatile uint32_t i2c_hz = 400000, i2c_hz_pending = 0;   // PROBE: a speed change is applied by the touch task
 static esp_lcd_panel_handle_t panel;
 static uint16_t *fb;  // 480x480 RGB565 in PSRAM, panel orientation (= the UI rotated by 180 degrees if HAL_ROT180)
 
+static i2c_master_dev_handle_t i2c_add(uint8_t addr) {
+  i2c_device_config_t dc = {};
+  dc.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+  dc.device_address = addr;
+  dc.scl_speed_hz = i2c_hz;
+  i2c_master_dev_handle_t h = nullptr;
+  return i2c_master_bus_add_device(i2c_bus, &dc, &h) == ESP_OK ? h : nullptr;
+}
+static bool i2c_wr(i2c_master_dev_handle_t d, const uint8_t *b, size_t n) {
+  return d && i2c_master_transmit(d, b, n, 50) == ESP_OK;
+}
+static bool i2c_wr_rd(i2c_master_dev_handle_t d, const uint8_t *w, size_t wn, uint8_t *r, size_t rn) {
+  return d && i2c_master_transmit_receive(d, w, wn, r, rn, 50) == ESP_OK;   // write, repeated start, read
+}
+
+// TCA9554: registers 0x01 output, 0x02 polarity, 0x03 direction (1 = input); shadow copies, as Arduino_GFX kept.
+static uint8_t exp_out = 0, exp_dir = 0xFF;
+static bool exp_reg(uint8_t reg, uint8_t v) { uint8_t b[2] = {reg, v}; return i2c_wr(i2c_exp, b, 2); }
+static void exp_mode(uint8_t pin, bool output) {
+  if (output) exp_dir &= (uint8_t)~(1u << pin); else exp_dir |= (uint8_t)(1u << pin);
+  exp_reg(0x03, exp_dir);
+}
+static void exp_write(uint8_t pin, bool hi) {
+  if (hi) exp_out |= (uint8_t)(1u << pin); else exp_out &= (uint8_t)~(1u << pin);
+  exp_reg(0x01, exp_out);
+}
+
+// 3-wire SPI to the ST7701 over the expander pins: 9-bit words, the D/C bit first then the byte MSB first,
+// sampled on the rising clock edge; SDA is only rewritten when the bit changes (each pin write is one I2C
+// transaction, about 0.1 ms at 400 kHz; the whole init table takes ~0.6 s, as it did with Arduino_GFX).
+static void spi9(bool dc, uint8_t v) {
+  bool last = dc;
+  exp_write(BOARD_EXIO_LCD_SDA, dc);
+  exp_write(BOARD_EXIO_LCD_SCL, 0);
+  exp_write(BOARD_EXIO_LCD_SCL, 1);
+  for (uint8_t bit = 0x80; bit; bit >>= 1) {
+    bool b = (v & bit) != 0;
+    if (b != last) { last = b; exp_write(BOARD_EXIO_LCD_SDA, b); }
+    exp_write(BOARD_EXIO_LCD_SCL, 0);
+    exp_write(BOARD_EXIO_LCD_SCL, 1);
+  }
+}
+static void st7701_run_init(const uint8_t *ops, size_t len) {   // runs a st7701_init.h byte code sequence
+  for (size_t i = 0; i < len; i++) {
+    switch (ops[i]) {
+      case BEGIN_WRITE: exp_write(BOARD_EXIO_LCD_CS, 0); break;
+      case END_WRITE: exp_write(BOARD_EXIO_LCD_CS, 1); break;
+      case WRITE_COMMAND_8: spi9(0, ops[++i]); break;
+      case WRITE_C8_D8: spi9(0, ops[i + 1]); spi9(1, ops[i + 2]); i += 2; break;
+      case WRITE_C8_D16: spi9(0, ops[i + 1]); spi9(1, ops[i + 2]); spi9(1, ops[i + 3]); i += 3; break;
+      case WRITE_BYTES: { uint8_t n = ops[++i]; while (n--) spi9(1, ops[++i]); break; }
+      case DELAY: delay(ops[++i]); break;
+    }
+  }
+}
+
 // Scan-out: the GDMA reads the PSRAM framebuffer directly (no bounce buffer), in refresh-on-demand mode: the
 // DMA stops after each frame and the vsync callback starts the next one from an idle channel. In the driver's
-// default stream mode the descriptor ring runs continuously and CONFIG_LCD_RGB_RESTART_IN_VSYNC (on in the
-// Arduino core) resets and restarts the running channel at every vsync; when that reset lands on a channel with
+// default stream mode the descriptor ring runs continuously and CONFIG_LCD_RGB_RESTART_IN_VSYNC (on, as in the
+// Arduino core: sdkconfig.defaults) resets and restarts the running channel at every vsync; when that reset lands on a channel with
 // a PSRAM burst in flight the channel stays stuck until the next vsync and the frame is lost (one frame jumped
 // sideways). How often depends on CPU traffic to PSRAM, the idle timing and even the code layout at 32-byte
 // granularity, which is why earlier "fixes" came and went. Refresh on demand measured 0 lost frames under every
@@ -81,7 +139,7 @@ static volatile int probe_mode = 0;
 static volatile int probe_poll_ms = 10;   // PROBE: touch poll period
 void hal_probe_set(int m) { probe_mode = m; }
 void hal_probe_poll_ms(int ms) { probe_poll_ms = ms < 1 ? 1 : ms; }
-void hal_probe_i2c_hz(int hz) { Wire.setClock(hz); }
+void hal_probe_i2c_hz(int hz) { if (hz > 0) i2c_hz_pending = (uint32_t)hz; }   // applied by the touch task between polls
 int hal_probe_mode() { return probe_mode; }
 static const uint8_t probe_table[65536] = {1, 2, 3};   // 64 KB of rodata in flash to stream through the cache
 static volatile uint32_t probe_sink;
@@ -180,10 +238,11 @@ static bool IRAM_ATTR lcd_on_vsync(esp_lcd_panel_handle_t p, const esp_lcd_rgb_p
 }
 
 static void panel_init() {
-  // bus->begin() ran in board_init (the expander also resets the touch controller)
-  bus->sendCommand(0x01);  // software reset
+  // the expander was set up and the panel reset pulsed in board_init
+  static const uint8_t swreset[] = {BEGIN_WRITE, WRITE_COMMAND_8, 0x01, END_WRITE};   // software reset
+  st7701_run_init(swreset, sizeof swreset);
   delay(120);
-  bus->batchOperation(st7701_type1_init_operations, sizeof(st7701_type1_init_operations));
+  st7701_run_init(st7701_type1_init_operations, sizeof(st7701_type1_init_operations));
 
   esp_lcd_rgb_panel_config_t cfg = {};
   cfg.clk_src = LCD_CLK_SRC_DEFAULT;
@@ -200,8 +259,7 @@ static void panel_init() {
   cfg.bits_per_pixel = 16;
   cfg.num_fbs = 1;
   cfg.bounce_buffer_size_px = HAL_BOUNCE_PX;
-  cfg.sram_trans_align = 8;
-  cfg.psram_trans_align = 64;
+  cfg.dma_burst_size = 64;   // IDF 5.5 name of psram_trans_align (same union member): 64-byte PSRAM bursts
   cfg.hsync_gpio_num = BOARD_LCD_HSYNC;
   cfg.vsync_gpio_num = BOARD_LCD_VSYNC;
   cfg.de_gpio_num = BOARD_LCD_DE;
@@ -258,7 +316,6 @@ static void fb_blit(const lv_area_t *a, const uint16_t *src) {
   }
 }
 
-static TouchDrvGT911 touch;
 static bool touch_ok = false;
 static uint8_t brightness = 100;
 static uint32_t last_touch = 0;
@@ -313,21 +370,13 @@ static char gt_id[5] = "?";   // product id register 0x8140 ("911")
 static uint8_t gt_rate = 0;    // refresh-rate register 0x8056: scan period = 5 + N ms
 
 static bool gt_read(uint16_t reg, uint8_t *buf, uint8_t n) {
-  Wire.beginTransmission(gt_addr);
-  Wire.write((uint8_t)(reg >> 8));
-  Wire.write((uint8_t)reg);
-  if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom(gt_addr, n) != n) return false;
-  for (uint8_t i = 0; i < n; i++) buf[i] = (uint8_t)Wire.read();
-  return true;
+  uint8_t a[2] = {(uint8_t)(reg >> 8), (uint8_t)reg};
+  return i2c_wr_rd(i2c_gt, a, 2, buf, n);
 }
 
 static bool gt_write8(uint16_t reg, uint8_t v) {
-  Wire.beginTransmission(gt_addr);
-  Wire.write((uint8_t)(reg >> 8));
-  Wire.write((uint8_t)reg);
-  Wire.write(v);
-  return Wire.endTransmission(true) == 0;
+  uint8_t b[3] = {(uint8_t)(reg >> 8), (uint8_t)reg, v};
+  return i2c_wr(i2c_gt, b, 3);
 }
 
 static void touch_task(void *) {
@@ -338,6 +387,12 @@ static void touch_task(void *) {
   const uint32_t hold_ms = 4u * (5u + gt_rate);
   for (;;) {
     vTaskDelayUntil(&wake, pdMS_TO_TICKS(probe_poll_ms));
+    if (i2c_hz_pending) {   // PROBE: re-register both devices at the new bus speed (the speed is per device)
+      i2c_hz = i2c_hz_pending;
+      i2c_hz_pending = 0;
+      if (i2c_gt) { i2c_master_bus_rm_device(i2c_gt); i2c_gt = i2c_add(gt_addr); }
+      if (i2c_exp) { i2c_master_bus_rm_device(i2c_exp); i2c_exp = i2c_add(BOARD_EXPANDER_ADDR); }
+    }
     if (!touch_poll_on) continue;   // PROBE
     touch_polls++;
     uint8_t st = 0;
@@ -400,40 +455,87 @@ static void touch_cb(lv_indev_drv_t *, lv_indev_data_t *data) {
 
 // Bring up the I2C bus, the IO expander and whatever the board needs before the panel and touch init.
 static void board_init() {
-  Wire.begin(BOARD_I2C_SDA, BOARD_I2C_SCL);
-  Wire.setClock(400000);
-  bus->begin();   // finds the TCA9554, pulses the panel reset (EXIO7), drives CS/SCL/SDA high
+  i2c_master_bus_config_t bc = {};
+  bc.i2c_port = I2C_NUM_0;
+  bc.sda_io_num = (gpio_num_t)BOARD_I2C_SDA;
+  bc.scl_io_num = (gpio_num_t)BOARD_I2C_SCL;
+  bc.clk_source = I2C_CLK_SRC_DEFAULT;
+  bc.glitch_ignore_cnt = 7;
+  bc.flags.enable_internal_pullup = true;
+  ESP_ERROR_CHECK(i2c_new_master_bus(&bc, &i2c_bus));
+  // TCA9554, set up as Arduino_GFX did: no polarity inversion, all pins input, outputs low; the panel reset
+  // (EXIO7) pulsed low for 10 ms then 100 ms to settle; CS/SCL/SDA driven high
+  if (i2c_master_probe(i2c_bus, BOARD_EXPANDER_ADDR, 50) == ESP_OK) i2c_exp = i2c_add(BOARD_EXPANDER_ADDR);
+  exp_reg(0x02, 0x00);
+  exp_reg(0x03, exp_dir = 0xFF);
+  exp_reg(0x01, exp_out = 0x00);
+  exp_mode(BOARD_EXIO_LCD_RST, true);
+  exp_write(BOARD_EXIO_LCD_RST, 0);
+  delay(10);
+  exp_write(BOARD_EXIO_LCD_RST, 1);
+  delay(100);
+  exp_mode(BOARD_EXIO_LCD_CS, true);
+  exp_write(BOARD_EXIO_LCD_CS, 1);
+  exp_mode(BOARD_EXIO_LCD_SCL, true);
+  exp_write(BOARD_EXIO_LCD_SCL, 1);
+  exp_mode(BOARD_EXIO_LCD_SDA, true);
+  exp_write(BOARD_EXIO_LCD_SDA, 1);
   // GT911 reset with INT held low: the controller boots at 0x5D (Waveshare BSP sequence); INT is then
   // released as an input (it is not routed to the ESP32: the touch task polls)
-  expander->pinMode(BOARD_EXIO_TP_INT, OUTPUT);
-  expander->digitalWrite(BOARD_EXIO_TP_INT, LOW);
-  expander->pinMode(BOARD_EXIO_TP_RST, OUTPUT);
-  expander->digitalWrite(BOARD_EXIO_TP_RST, LOW);
+  exp_mode(BOARD_EXIO_TP_INT, true);
+  exp_write(BOARD_EXIO_TP_INT, 0);
+  exp_mode(BOARD_EXIO_TP_RST, true);
+  exp_write(BOARD_EXIO_TP_RST, 0);
   delay(20);
-  expander->digitalWrite(BOARD_EXIO_TP_RST, HIGH);
+  exp_write(BOARD_EXIO_TP_RST, 1);
   delay(120);
-  expander->pinMode(BOARD_EXIO_TP_INT, INPUT);
+  exp_mode(BOARD_EXIO_TP_INT, false);
   // backlight: AP3032 boost driver, PWM fed into its feedback node (duty 0 = full brightness, max = off),
-  // same 5 kHz / 10 bit as the Waveshare BSP. Left floating at boot the panel is at full brightness.
-  ledcAttach(BOARD_BL_PIN, 5000, 10);
+  // same 5 kHz / 10 bit as the Waveshare BSP (LEDC timer 0 / channel 0). Left floating at boot the panel is at
+  // full brightness.
+  ledc_timer_config_t tc = {};
+  tc.speed_mode = LEDC_LOW_SPEED_MODE;
+  tc.duty_resolution = LEDC_TIMER_10_BIT;
+  tc.timer_num = LEDC_TIMER_0;
+  tc.freq_hz = 5000;
+  tc.clk_cfg = LEDC_AUTO_CLK;
+  ledc_timer_config(&tc);
+  ledc_channel_config_t cc = {};
+  cc.gpio_num = BOARD_BL_PIN;
+  cc.speed_mode = LEDC_LOW_SPEED_MODE;
+  cc.channel = LEDC_CHANNEL_0;
+  cc.timer_sel = LEDC_TIMER_0;
+  cc.duty = 0;
+  cc.hpoint = 0;
+  ledc_channel_config(&cc);
 }
 
 void hal_init() {
   board_init();
-  for (uint8_t addr : {0x5D, 0x14}) {
-    touch.setPins(-1, -1);
-    if (touch.begin(Wire, addr, BOARD_I2C_SDA, BOARD_I2C_SCL)) { touch_ok = true; gt_addr = addr; break; }
+  // GT911 at 0x5D after the reset sequence above (0x14 if INT was high at reset). Firmware <= 0.4.1 also rewrote
+  // the controller's configuration block at every boot to report one point (SensorLib's setMaxTouchPoint);
+  // only point 1 is ever read, so the controller's own configuration is left alone now.
+  for (uint8_t addr : {0x5D, 0x14}) {   // accepted only if the product id register reads "911" (as SensorLib did)
+    if (i2c_master_probe(i2c_bus, addr, 50) != ESP_OK || (i2c_gt = i2c_add(addr)) == nullptr) continue;
+    uint8_t b[4];
+    if (gt_read(0x8140, b, 4) && b[0] == '9' && b[1] == '1' && b[2] == '1') {
+      memcpy(gt_id, b, 4); gt_id[4] = 0; for (char &c : gt_id) if (c && (c < 32 || c > 126)) c = '.';
+      touch_ok = true;
+      gt_addr = addr;
+      break;
+    }
+    i2c_master_bus_rm_device(i2c_gt);
+    i2c_gt = nullptr;
   }
   if (touch_ok) {
-    touch.setMaxTouchPoint(1);
-    uint8_t b[4];
-    if (gt_read(0x8140, b, 4)) { memcpy(gt_id, b, 4); gt_id[4] = 0; for (char &c : gt_id) if (c && (c < 32 || c > 126)) c = '.'; }
     gt_read(0x8056, &gt_rate, 1);
-    xTaskCreatePinnedToCore(touch_task, "touch", 3072, nullptr, 5, nullptr, 0);
   }
   xTaskCreatePinnedToCore(probe_task, "probe", 3072, nullptr, 4, nullptr, 0);   // PROBE
 
   panel_init();
+  // The touch poll starts after the panel init: that init is ~600 I2C transactions to the expander in a row, and
+  // a poll queued behind them would hit the 50 ms transaction timeout (counted as touch_errors; 8 seen at boot).
+  if (touch_ok) xTaskCreatePinnedToCore(touch_task, "touch", 3072, nullptr, 5, nullptr, 0);
   lv_init();
   size_t n = 480 * 60;
   auto *b1 = (lv_color_t *)heap_caps_malloc(n * sizeof(lv_color_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
@@ -460,7 +562,10 @@ void hal_init() {
 void hal_set_brightness(uint8_t pct) {
   if (pct > 100) pct = 100;
   brightness = pct;
-  ledcWrite(BOARD_BL_PIN, (uint32_t)(100 - pct) * 1023 / 100);   // inverted, see board_init
+  uint32_t duty = (uint32_t)(100 - pct) * 1023 / 100;   // inverted, see board_init
+  if (duty == 1023) duty = 1024;                         // all ones = fully on (backlight off), as Arduino's ledcWrite did
+  ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
+  ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }
 
 uint8_t hal_get_brightness() { return brightness; }

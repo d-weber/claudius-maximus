@@ -2,7 +2,7 @@
 // See ambient.h for the state machine. Everything runs from ambient_tick() (throttled to 10 Hz) + event hooks.
 #include "../core/link.h"
 #include "ambient.h"
-#include <Arduino.h>
+#include "../core/sys.h"
 #include <lvgl.h>
 #include <time.h>
 #include "../ui/theme.h"

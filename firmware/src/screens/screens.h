@@ -1,4 +1,5 @@
 #pragma once
+#include "../core/sys.h"
 #include "../ui/ui.h"
 
 // Main tiles (owner in parentheses — only edit your own files)

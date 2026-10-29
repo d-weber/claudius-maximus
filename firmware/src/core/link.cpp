@@ -2,7 +2,7 @@
 #include "settings.h"
 #include "../screens/home_face.h"
 #include <lvgl.h>
-#include <Arduino.h>
+#include "sys.h"
 #include "model.h"
 #include "hal.h"
 #include "board.h"

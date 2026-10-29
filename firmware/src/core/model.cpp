@@ -1,5 +1,5 @@
 #include "model.h"
-#include <Arduino.h>
+#include "sys.h"
 #include <esp_heap_caps.h>
 
 struct SpiRamAllocator : ArduinoJson::Allocator {
