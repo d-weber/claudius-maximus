@@ -248,6 +248,42 @@ JSON parse of a state ≈ 5.6 ms (≈ 6/s). Flush (copy to PSRAM framebuffer) �
   (9.4 ms per 60-line band, 64-byte bursts, vs 0.9 ms for the cached CPU blit). perf `--cycle` changes page every
   1.2 s. `HAL_BLIT_ROWS` (4) chunks the blit's cache write-back; `HAL_BLIT_PAUSE_US`, `HAL_PCLK_HZ`, `HAL_BOUNCE_PX`
   remain as experiment knobs.
+- **render-perf-levers** (2026-10-29, on the native build) — "what would improve fps or lower CPU": 26 builds
+  measured on the board through one flash-and-measure queue (quiet room 60 s with the clock set to 14:00; home
+  --cycle 60 s twice; per-screen demo 12 s; screenshots), each experiment on its own branch (`exp/*`, not merged).
+  Baseline = native-idf as committed: 15.6 ms/frame, 46 % cpu, loop_max 189 ms in the page-cycling demo (two runs
+  two hours apart agree to 1 ms), heap_int 174 KB.
+  - **Why the renderer is slow**: a draw-op profiler (`exp/profiler`, `core/drawprof.cpp`, per-op timing in the
+    perf JSON) splits a demo frame into ≈49 % gaps between draw ops (LVGL's object-tree walk, style lookups, draw
+    descriptors: ≈170 µs per object), 44 % draw ops (translucent rects 12 %, rounded rects 10 %, text 15 % with
+    layout, the one shadow 6.5 % at ≈2.9 ms each, gradients 1.5 %), pixel pushing (blend) 21 %, flush wait 1 %, no
+    layer blends (LVGL 8 `opa` does not create layers). The work is code-bound, so instruction fetch is the lever
+    and faster pixel code is not.
+  - **KEPT — 32 KB instruction cache** (`CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB`, −16 KB internal RAM): 11.3 ms /
+    39 % / loop_max 127 ms (−28 % frame time), orbit 20.5 → 13.1 ms per frame; no pixel change.
+  - **KEPT — LVGL shadow cache 40 + circle cache 16** (1.6 KB .bss): with the cache above (= C1) 10.1 / 37 / 121
+    (two runs 10.4 and 9.7 ms); alone 14.4 ms. The alert card's shadow was recomputed on every frame it was in.
+  - Measured, available, not taken (RAM): `LV_ATTRIBUTE_FAST_MEM IRAM_ATTR` another ≈1 ms for 16 KB (C1 + IRAM +
+    96-line draw buffers = C2: 9.2 / 35 / 112, heap_int 75 KB, too close to the 60 KB floor); 96-line draw buffers
+    alone 13.4 ms for 69 KB.
+  - Measured, not taken (UX): refresh period 24 ms + indev 20 ms (cpu −4…−11 pts but fps halves: feed 59 → 30,
+    agents 37 → 22, animations alias); removing the alert/toast/chip/bubble fade animations (`exp/pixels` 225b23e:
+    13.3 ms / 40 %, i.e. −3 ms for 0 RAM, but hides are abrupt); invalidating fewer pixels in the agents pulse strip
+    and feed glow (`exp/pxframe`: agents cpu 36 → 25 %, feed 57 → 40 %, demo cpu −5…−7 pts; pulses step in 16
+    levels and new feed rows show up to 0.25 s later; kept on the branch for later).
+  - Measured, nothing: -O3 for LVGL + our code (15.7 ms, +131 KB flash, −16 KB RAM); 64 KB data cache; opaque tints,
+    flat corners, no gradients (same as the fades alone); 30-line draw buffers (worse: 17.0 ms, home +6 ms);
+    `LV_ATTRIBUTE_FAST_MEM` was ≤ 5 % on the Arduino build with the 16 KB cache — it is the I-cache that was short.
+  - **LVGL 9.6 is out** (`exp/lvgl9`: full migration, 27 files, private API + -fpermissive): 26.1 ms / 62 % alone,
+    25.1 with the ESP32-S3 SIMD assembly from esp_lvgl_port, 36.4 / 69 % with two draw units; +55 % frame time on
+    this UI, one visual regression (feed row title wraps). Not a direction.
+  - Idle: the quiet-room floor (3.7 % cpu at 2.7 fps) is the room tick (`home_face_tick`, 36 ms timer), not polling;
+    an event-driven loop (`exp/idle`: block on USB RX / touch notification) gets 3.1 %, kept on the branch.
+  - As merged (`perf-c1`, re-measured from the committed tree): page-cycling demo 31.9 / 10.3 / 39 and 28.4 / 10.1 / 35
+    (fps / frame ms / cpu %) against the baseline's 25.5 / 16.4 / 49 and 22.2 / 16.2 / 42; loop_max 138 / 107 ms
+    (211 / 175); per screen (frame ms, cpu %): home 17.7 / 55 (21.9 / 58), agents 6.0 / 29 (8.0 / 36), orbit 12.0 / 27
+    (20.5 / 40), feed 6.1 / 48 (8.5 / 57); quiet room 1.8 ms, 3.0 % (2.5 ms, 3.7 %); 0 lost frames in every window;
+    heap_int 178.5 → 160.3 KB; screenshots of home, agents, feed and detail identical to the baseline's.
 - **native-idf** (2026-10-29) — the firmware is a plain ESP-IDF 5.5 project now (no Arduino core; same LVGL 8.4 /
   ArduinoJson 7 from the IDF component registry, `sdkconfig.defaults` = the Arduino core's configuration plus -O2 for
   the IDF libraries). Same board, released Arduino 0.4.1 image vs the native build, home --cycle 60 s (fps / frame
