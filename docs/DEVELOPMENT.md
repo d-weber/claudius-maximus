@@ -60,6 +60,10 @@ docs/                       DESKTOP.md (desktop app architecture), PERF.md (meas
 - **statusLine wrapper** (`"<app>" statusline`, or `host/hooks/cm_statusline.py`): saves the plan-limit data
   Claude Code gives the status line (`rate_limits.five_hour/seven_day`, Pro/Max only) to
   `~/.claudius-maximus/statusline.json`, then runs your previous statusLine command.
+- **Usage endpoint poll** (`providers/usage.py`, `UsageEndpoint`): the per-model weekly windows (Fable) are not in
+  the status line, so the daemon GETs the claude.ai usage endpoint Claude Code's `/usage` calls, with the OAuth
+  token from Claude Code's credential store, every 15 minutes and never more often (also after errors). Off with
+  settings.json `usage_endpoint: false`; then the device gets Claude Code's cached snapshot from `~/.claude.json`.
 - **Focus action**: tapping Focus on the device raises that session's terminal. On macOS, Terminal.app and iTerm2
   get the exact tab (matched by tty); VS Code, Cursor and similar get the window whose title has the project name
   (needs Accessibility permission); tmux panes are selected; other terminals are just activated. On Linux, tmux

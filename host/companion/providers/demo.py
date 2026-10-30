@@ -156,6 +156,7 @@ class DemoProvider(Provider):
         state["usage"] = {
             "five_hour": {"pct": 42, "resets_at": now + 2 * 3600 + 900},
             "seven_day": {"pct": 18, "resets_at": now + 4 * 86400},
+            "seven_day_models": [{"name": "Fable", "pct": 61, "resets_at": now + 4 * 86400, "at": int(now)}],
             "tpm": self.tpm, "hourly": self.hourly, "daily": self.daily,
             "by_model": {"opus": int(tok * 0.8), "sonnet": int(tok * 0.15), "haiku": int(tok * 0.05)},
             "streak_days": 6,
