@@ -60,6 +60,8 @@ Firmware screens must read every field **defensively** (missing key ⇒ sensible
   "usage": {                   // see host/companion/providers/usage.py
     "five_hour":  { "pct": 34, "resets_at": 1792080000 },  // omitted when unknown
     "seven_day":  { "pct": 12, "resets_at": 1792500000 },
+    "seven_day_models": [ { "name": "Fable", "pct": 61, "resets_at": 1792500000, "at": 1792080000 } ],
+                               // per-model weekly windows, preferred model first; omitted when unknown
     "tpm": [0, 1200, 5400],    // output+input tokens per minute, last 60 minutes, oldest first
     "hourly": [0, 0, ..., 0],  // 24 values: tokens per hour today (local time)
     "daily": [ ... ],          // 14 values: tokens per day, oldest first, today last
@@ -159,7 +161,11 @@ subagents also carry `cost`, `model`, `ctx_pct`. Event `tool_error` carries `err
 `tpm_now`; `burn` (USD last 60 min); `peak_hour`; `best_day {tokens,cost}`;
 `window {start,resets_at,tokens,cost,pct,est:1}` = ESTIMATED current 5-hour block (not a plan limit).
 `five_hour`/`seven_day` come from Claude Code's statusLine `rate_limits` (tee'd to ~/.claudius-maximus/statusline.json)
-and carry `at` (when observed). usage "tokens" = input + cache_write + output (cache reads excluded).
+and carry `at` (when observed). `seven_day_models` (per-model weekly windows, e.g. Fable) is not in the statusLine JSON:
+the daemon polls the claude.ai usage endpoint every 15 minutes with Claude Code's own OAuth token (off with
+`{"usage_endpoint": false}` in ~/.claudius-maximus/settings.json), falling back to Claude Code's cached /usage snapshot
+in ~/.claude.json — the home HUD dims that row when `at` is older than 12 h. usage "tokens" = input + cache_write +
+output (cache reads excluded).
 
 ### `state.system` — host machine metrics
 Schema at the top of host/companion/providers/system.py (cpu, cores, kinds, hist, load, mem, procs, claude, net, disk,
