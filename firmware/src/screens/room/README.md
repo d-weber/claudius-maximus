@@ -16,7 +16,7 @@ so every behaviour can be previewed on the host as PNG sheets / GIFs before flas
   its own clock: sky and light keyframes over 24 h, sun / moon patch sliding across the floor, lamp after sunset,
   clouds, rain episodes, a bird on the sill, stars and shooting stars, rack LEDs, the monitor's screensaver.
 - `home_face.cpp` (one level up) is the LVGL glue: fixed 12 fps stepping, dirty-rect 4x upscale through the palette,
-  speech bubble, taps. `screen_home.cpp` maps the agent state to `Input` and draws the HUD band.
+  speech bubble, taps. `screen_home.cpp` maps the agent state to `Input`; `home_hud.cpp` draws the HUD band (pixel art at 2x).
 
 ## What is art and what is code
 

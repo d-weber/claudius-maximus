@@ -371,3 +371,13 @@ JSON parse of a state ≈ 5.6 ms (≈ 6/s). Flush (copy to PSRAM framebuffer) �
   8.1-8.4 / 8.6-9.0; room draw 1483-1726 µs avg demo, 1171-1272 quiet (procedural was 1559-1564 / 1215-1233);
   first draw after boot 2.9 ms (the background decode into its PSRAM cache); 0 underruns; heap_int 160.1-160.3 KB
   (unchanged); image 1 232 464 B (+58 KB over the procedural 1 174 384). room.cpp 859 → 268 lines.
+- **pixel-art HUD** (2026-10-30, PR "pixel-hud") — the home band's clock, date and plan-limit gauges move from LVGL
+  labels/bars to `home_hud.cpp`: a 240 x 28 index canvas in PSRAM, upscaled 2x by a draw callback like the room's,
+  rebuilt only when a value changes (minute tick, limits). Same probe, home demo 30 s, two runs each, before (the
+  LVGL HUD with three rows) → after (fps / frame avg/max ms / px per frame / cpu % / loop max ms): 22.2 / 12.4/61 /
+  48.6k / 34.2 / 65 and 22.1 / 12.8/62 / 48.3k / 34.9 / 66 → 22.7 / 12.2/61 / 46.6k / 34.2 / 69 and 22.6 / 12.1/61 /
+  47.2k / 34.0 / 64 (a third run after moving the canvas to PSRAM: 23.0 / 11.7/59 / 44.9k / 33.6 / 63). Within run
+  scatter; 0 lcd_underruns in every window. heap_int 160.1 → 153.3 KB with the canvas in internal RAM, 160.2 KB once
+  in PSRAM (kept there: it is cold apart from repaints). --nodemo 60 s on the new build: 11.4 fps / 7.5 ms / 22k px /
+  11.8 % (the room's own sleep animation plus the offline transition; no baseline of the same window was taken).
+
