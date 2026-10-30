@@ -20,7 +20,8 @@ Swipe between screens. Tap a session to open its detail view.
 
 - **Home** is Clawd's Studio, a pixel-art room. Clawd walks to the station of whatever your agents are doing:
   desk to write code, bookshelf to read, server rack to run commands, whiteboard to plan, bed when nothing runs.
-  Subagents show up as little helpers. When a session needs you, he stands at the door with a big "!".
+  Subagents show up as little helpers. When a session needs you, he stands at the door with a big "!". The band
+  below is pixel art too: clock, date and the 5-hour / weekly plan gauges, plus the per-model week (FA for Fable).
 - **Agents** is one card per session: status, current tool, todo progress, context use, subagents.
 - **Detail** shows the selected session's current action, tokens, cost, context, model and todos, with a
   **Focus** button that brings its terminal to the front.

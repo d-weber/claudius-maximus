@@ -1,19 +1,17 @@
 // HOME — Clawd's Studio (home_face.cpp: the top-down pixel-art room, 480 x 424) plus a HUD band:
 //   room:  Clawd at the station of whatever the agents are doing, the room living on the real clock
-//   HUD:   clock + date | the 5-hour and weekly plan limits, plus the per-model weekly window (e.g. Fable)
-//          when the host knows it (tap -> usage)
+//   HUD:   pixel-art band (home_hud.cpp): clock + date | the 5-hour and weekly plan limits, plus the per-model
+//          weekly window (e.g. Fable) when the host knows it (tap -> usage)
 #include "screens.h"
 #include "../ui/theme.h"
 #include "../core/model.h"
 #include "home_face.h"
+#include "home_hud.h"
 #include <time.h>
-#include <ctype.h>
 
 static const int ROOM_H = 424, HUD_Y = 424, HUD_H = 56;
 
-static lv_obj_t *hud, *lbl_clock, *lbl_date, *limits_box;
-static lv_obj_t *lim_bar[3], *lim_cap[3];   // 0 = 5h, 1 = weekly, 2 = per-model weekly (shown when known)
-static int lim_rows = 0;                     // rows currently laid out (2 or 3)
+static lv_obj_t *hud, *limits_box;   // limits_box: transparent tap target over the bars (-> usage)
 static lv_timer_t *tmr;
 static bool visible = false, host_prev = false, greeted = false;
 static uint32_t last_glance = 0, last_slow = 0;
@@ -116,26 +114,6 @@ static void set_hidden(lv_obj_t *o, bool h) {
   else lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
 }
 
-// Plan-limit rows. Two rows (5H, 7D) sit in a 132 px box at the right of the band; with a per-model weekly
-// row (caption = the model name, e.g. FABLE) the box widens to the left for the caption column and the three
-// rows tighten up so they still fit the 56 px band. Captions are right-aligned against the bars.
-static void layout_limits(int rows) {
-  if (rows == lim_rows) return;
-  lim_rows = rows;
-  const int col = rows == 3 ? 62 : 30, pitch = rows == 3 ? 17 : 22, y0 = rows == 3 ? 2 : 8;
-  const int w = col + 102;
-  lv_obj_set_size(limits_box, w, HUD_H);
-  lv_obj_set_pos(limits_box, 472 - w, 0);
-  for (int i = 0; i < 3; i++) {
-    int y = y0 + i * pitch;
-    lv_obj_set_width(lim_cap[i], col - 6);
-    lv_obj_set_pos(lim_cap[i], 0, y);
-    lv_obj_set_pos(lim_bar[i], col, y + 5);
-    set_hidden(lim_cap[i], i >= rows);
-    set_hidden(lim_bar[i], i >= rows);
-  }
-}
-
 // ------------------------------------------------------------------ data -> UI
 static void refresh(JsonObjectConst s) {
   bool host = model_host_connected();
@@ -174,49 +152,38 @@ static void refresh(JsonObjectConst s) {
   home_face_set_mood(m, energy, host ? minis : 0, cat);
 
   // plan limits: 5H, 7D and, when the host reports one, the first per-model weekly window (usage.seven_day_models,
-  // e.g. Fable). That row reads as stale (dim) when its observation is older than 12 h: the host may only have
+  // e.g. Fable). That row reads as stale (grey) when its observation is older than 12 h: the host may only have
   // Claude Code's cached snapshot of it.
-  static const char *const KEYS[2] = {"five_hour", "seven_day"};
   JsonObjectConst mw = s["usage"]["seven_day_models"][0];
   int mw_pct = mw["pct"] | -1;
+  static char mw_cap[8];
+  HudBar bars[3] = {{"5H", s["usage"]["five_hour"]["pct"] | -1, false},
+                    {"7D", s["usage"]["seven_day"]["pct"] | -1, false},
+                    {mw_cap, mw_pct, false}};
   int rows = host && mw_pct >= 0 ? 3 : 2;
-  layout_limits(rows);
-  bool mw_stale = false;
   if (rows == 3) {
-    char cap[8];
-    const char *name = mw["name"] | "MODEL";
-    int n = 0;
-    for (; name[n] && n < 6; n++) cap[n] = (char)toupper((unsigned char)name[n]);
-    cap[n] = 0;
-    set_txt(lim_cap[2], cap);
+    snprintf(mw_cap, sizeof mw_cap, "%.2s", mw["name"] | "MO");   // two letters like 5H / 7D: FA, OP, SO
     uint32_t now = model_now(), at = mw["at"] | 0u;
-    mw_stale = now && at && now > at + 12 * 3600;
+    bars[2].stale = now && at && now > at + 12 * 3600;
   }
   bool any = false;
-  for (int i = 0; i < rows; i++) {
-    int pct = i < 2 ? (s["usage"][KEYS[i]]["pct"] | -1) : mw_pct;
-    bool known = host && pct >= 0;
-    if (known) {
-      any = true;
-      int v = pct > 100 ? 100 : pct;
-      if (lv_bar_get_value(lim_bar[i]) != v) lv_bar_set_value(lim_bar[i], v, LV_ANIM_OFF);
-      bool stale = i == 2 && mw_stale;
-      lv_color_t bc = stale ? C_DIM : pct >= 85 ? C_ERROR : (pct >= 60 ? C_WAITING : C_IDLE);
-      set_bg_col(lim_bar[i], bc, LV_PART_INDICATOR);
-      set_text_col(lim_cap[i], stale ? C_DIM : C_MUTED);
-    } else {
-      if (lv_bar_get_value(lim_bar[i]) != 0) lv_bar_set_value(lim_bar[i], 0, LV_ANIM_OFF);
-      set_text_col(lim_cap[i], C_DIM);
-    }
+  for (int i = 0; i < rows; i++) any = any || bars[i].pct >= 0;
+  bool show = host && any;
+  home_hud_set_limits(bars, show ? rows : 0);
+  if (show) {
+    lv_area_t a;
+    home_hud_limits_area(&a);
+    lv_obj_set_pos(limits_box, a.x1, 0);
+    lv_obj_set_width(limits_box, a.x2 - a.x1 + 1);
   }
-  set_hidden(limits_box, !host || !any);
+  set_hidden(limits_box, !show);
 }
 
 static void update_clock() {
   uint32_t now = model_now();
   static uint32_t shown = 1;
   if (!now) {
-    if (shown) { lv_label_set_text(lbl_clock, "--:--"); lv_label_set_text(lbl_date, ""); shown = 0; }
+    if (shown) { home_hud_set_clock("--:--", ""); shown = 0; }
     return;
   }
   time_t lt = (time_t)now + model_tz();
@@ -226,8 +193,10 @@ static void update_clock() {
   gmtime_r(&lt, &tm);
   static const char *DAYS[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
   static const char *MONS[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-  lv_label_set_text_fmt(lbl_clock, "%02d:%02d", tm.tm_hour, tm.tm_min);
-  lv_label_set_text_fmt(lbl_date, "%s %d %s", DAYS[tm.tm_wday], tm.tm_mday, MONS[tm.tm_mon]);
+  char hm[8], d[20];
+  snprintf(hm, sizeof hm, "%02d:%02d", tm.tm_hour, tm.tm_min);
+  snprintf(d, sizeof d, "%s %d %s", DAYS[tm.tm_wday], tm.tm_mday, MONS[tm.tm_mon]);
+  home_hud_set_clock(hm, d);
 }
 
 static int local_hour() {
@@ -308,45 +277,15 @@ static void create(lv_obj_t *p) {
   home_face_create(p, 0);
   home_face_on_tap(face_tapped);
 
-  // HUD band
-  hud = lv_obj_create(p);
-  style_plain(hud);
-  lv_obj_set_size(hud, 480, HUD_H);
-  lv_obj_set_pos(hud, 0, HUD_Y);
-  lv_obj_set_style_bg_color(hud, lv_color_hex(0x1D1A24), 0);
-  lv_obj_set_style_bg_opa(hud, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_color(hud, lv_color_hex(0x2B1E2A), 0);
-  lv_obj_set_style_border_width(hud, 1, 0);
-  lv_obj_set_style_border_side(hud, LV_BORDER_SIDE_TOP, 0);
-  lv_obj_clear_flag(hud, LV_OBJ_FLAG_CLICKABLE);
-
-  lbl_clock = mk_label(hud, F_TITLE, C_TEXT);
-  lv_label_set_text(lbl_clock, "--:--");
-  lv_obj_set_pos(lbl_clock, 12, 3);
-  lbl_date = mk_label(hud, F_SMALL, C_MUTED);
-  lv_obj_set_pos(lbl_date, 13, 29);
-
-  // plan limits: rows (5H, 7D [, per-model weekly]) at the bottom right, tap -> usage; geometry in layout_limits().
+  // HUD band (pixel art, drawn by home_hud.cpp) with a transparent tap target over the limit bars -> usage.
   // The tileview's page dots sit bottom-centre.
+  hud = home_hud_create(p, HUD_Y, HUD_H);
   limits_box = lv_obj_create(hud);
   style_plain(limits_box);
+  lv_obj_set_size(limits_box, 160, HUD_H);
+  lv_obj_set_pos(limits_box, 320, 0);
   lv_obj_add_flag(limits_box, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(limits_box, limits_clicked, LV_EVENT_CLICKED, nullptr);
-  static const char *const CAP[3] = {"5H", "7D", ""};
-  for (int i = 0; i < 3; i++) {
-    lim_cap[i] = mk_label(limits_box, F_SMALL, C_MUTED);
-    lv_label_set_text(lim_cap[i], CAP[i]);
-    lv_obj_set_style_text_align(lim_cap[i], LV_TEXT_ALIGN_RIGHT, 0);
-    lim_bar[i] = lv_bar_create(limits_box);
-    lv_obj_set_size(lim_bar[i], 102, 6);
-    lv_bar_set_range(lim_bar[i], 0, 100);
-    lv_obj_set_style_bg_color(lim_bar[i], lv_color_hex(0x3A3546), 0);
-    lv_obj_set_style_bg_opa(lim_bar[i], LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(lim_bar[i], 4, 0);
-    lv_obj_set_style_radius(lim_bar[i], 4, LV_PART_INDICATOR);
-    lv_obj_clear_flag(lim_bar[i], LV_OBJ_FLAG_CLICKABLE);
-  }
-  layout_limits(2);
   lv_obj_add_flag(limits_box, LV_OBJ_FLAG_HIDDEN);
 
   tmr = lv_timer_create(on_timer, 36, nullptr);   // keeps running while hidden: the room lives on, drawing is skipped
