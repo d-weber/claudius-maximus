@@ -8,6 +8,16 @@ Sources (read-only):
   ~/.claude/stats-cache.json         older daily activity (transcripts get cleaned up) -> streak only.
   ~/.claudius-maximus/statusline.json  plan limits teed from Claude Code's statusLine JSON by
                                      host/hooks/cm_statusline.py (see providers/hooks.py). Absent -> omitted.
+  https://api.anthropic.com/api/oauth/usage   the claude.ai usage endpoint Claude Code's /usage dialog calls, GET
+                                     with the OAuth bearer Claude Code stores (~/.claude/.credentials.json, or the
+                                     "Claude Code-credentials" Keychain item on macOS). Polled every 15 minutes,
+                                     never more often (also after errors), in a background thread. The only source
+                                     of a *live* per-model weekly window (`limits[]` rows of kind "weekly_scoped",
+                                     e.g. Fable); also fills five_hour/seven_day when there is no statusLine tee.
+                                     Opt-out: {"usage_endpoint": false} in ~/.claudius-maximus/settings.json.
+  ~/.claude.json                     Claude Code's global config; `cachedUsageUtilization` is the last answer of
+                                     that endpoint Claude Code itself saw (refreshed when the /usage dialog runs).
+                                     Fallback for seven_day_models when the endpoint is off or unreachable.
 
 Incremental: files are read from a remembered byte offset; work is time-budgeted per poll() (startup scan of
 hundreds of MB takes a few polls, tailing afterwards costs ~nothing). Only complete lines are consumed.
@@ -20,6 +30,11 @@ Cost = estimate from public API list prices (PRICES), incl. 5m/1h cache-write mu
   five_hour / seven_day   {pct, resets_at, at}  real plan limits from the statusLine tee (claude.ai Pro/Max only);
                  `at` = when Claude Code last reported them; pct=0 & no resets_at once the window rolled over
   spend        {pct, resets_at, used_usd, limit_usd, period}  optional spend limit (same source)
+  seven_day_models  [{name, pct, resets_at, at}]  per-model weekly windows (e.g. name "Fable"), preferred model
+                 first (fable, opus, sonnet, then by name). Freshest source wins: the usage endpoint (<= 15 min
+                 old), the statusLine tee should Claude Code forward them (`model_scoped` / `limits`), else Claude
+                 Code's cached snapshot in ~/.claude.json. `at` says when the value was observed; the device dims
+                 the row when that is old. Omitted when unknown.
   tpm          [60]  tokens per minute, last 60 min, oldest first
   hourly       [24]  tokens per local hour today
   daily        [14]  tokens per local day, oldest first, today last
@@ -45,7 +60,12 @@ import glob
 import json
 import logging
 import os
+import subprocess
+import sys
+import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta
 
 from .base import Provider
@@ -65,6 +85,18 @@ RATE_LIMIT_FILES = [
     os.path.join(CLAUDIUS_HOME, "statusline.json"),
 ]
 RATE_LIMIT_MAX_AGE = 8 * 86400   # ignore a tee whose rate_limits were last seen longer ago than this
+# Claude Code's global config (holds `cachedUsageUtilization`): $CLAUDE_CONFIG_DIR/.claude.json or ~/.claude.json
+CLAUDE_CONFIG_JSON = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], ".claude.json") \
+    if os.environ.get("CLAUDE_CONFIG_DIR") else os.path.join(HOME, ".claude.json")
+CACHE_RECHECK_S = 30             # ~/.claude.json is rewritten often and is large: re-read it at most this often
+# claude.ai usage endpoint (see the module doc). The bearer is read from Claude Code's own credential store and
+# used for nothing else; it is never written, refreshed or logged.
+USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage"
+USAGE_POLL_S = 15 * 60           # hard floor between two requests, also after an error (user's requirement)
+USAGE_TIMEOUT_S = 15
+CREDENTIALS_FILE = os.path.join(CLAUDE_DIR, ".credentials.json")
+KEYCHAIN_SERVICE = "Claude Code-credentials"   # macOS: Claude Code keeps the same JSON in the login Keychain
+MODEL_WEEK_PREFERRED = ("fable", "opus", "sonnet")
 
 # USD per million tokens: (input, output, cache_read). Cache write = 1.25x input (5m) / 2x input (1h).
 PRICES = [
@@ -146,6 +178,11 @@ class UsageProvider(Provider):
         self.initial_done = False
         self._rl_mtime: dict = {}
         self._rl_doc: dict = {}
+        self._mw_checked = 0.0
+        self._mw_mtime = None
+        self._mw_rows: list = []
+        self._mw_at = 0
+        self.endpoint = UsageEndpoint(enabled=usage_endpoint_enabled())
 
     # ------------------------------------------------------------------ ingest
     def _load_stats_cache(self):
@@ -274,6 +311,7 @@ class UsageProvider(Provider):
 
     # ------------------------------------------------------------------ provider API
     def poll(self, now: float) -> None:
+        self.endpoint.poll(now)
         if now - self.last_scan > RESCAN_S or not self.files:
             self._scan_files(now)
         if self.queue:
@@ -303,6 +341,16 @@ class UsageProvider(Provider):
             self.computed_at = now
         usage = dict(self.cached)
         usage.update(self._rate_limits(now))
+        # the endpoint's windows fill what the tee lacks; for the per-model rows the fresher observation wins
+        for k, v in self.endpoint.windows(now).items():
+            cur = usage.get(k)
+            cur_at = (cur[0] if isinstance(cur, list) and cur else cur or {}).get("at", 0) if cur else 0
+            if cur is None or (k == "seven_day_models" and v[0]["at"] >= cur_at):
+                usage[k] = v
+        if "seven_day_models" not in usage:
+            mw = self._cached_model_week(now)
+            if mw:
+                usage["seven_day_models"] = mw
         state["usage"] = usage
 
     # ------------------------------------------------------------------ derived stats
@@ -424,9 +472,190 @@ class UsageProvider(Provider):
                             o[k] = round(v[k], 2) if isinstance(v[k], float) else v[k]
                     key = "spend"
                 out[key] = o
+            # per-model weekly windows, should Claude Code forward them to the status line one day: either the
+            # /usage shape (`model_scoped`: [{display_name, utilization, resets_at}]) or the raw server `limits[]`
+            mw = model_week_rows(rl.get("model_scoped"), rl.get("limits"), now, seen - seen % 60)
+            if mw:
+                out["seven_day_models"] = mw
             if out:
                 return out
         return {}
+
+    def _cached_model_week(self, now: int) -> list:
+        """Per-model weekly windows from Claude Code's cached usage snapshot (~/.claude.json), see model_week_rows()."""
+        if now - self._mw_checked >= CACHE_RECHECK_S:
+            self._mw_checked = now
+            try:
+                st = os.stat(CLAUDE_CONFIG_JSON)
+                if st.st_mtime != self._mw_mtime:
+                    with open(CLAUDE_CONFIG_JSON, encoding="utf-8") as f:
+                        cu = (json.load(f).get("cachedUsageUtilization") or {})
+                    self._mw_mtime = st.st_mtime
+                    self._mw_at = int((cu.get("fetchedAtMs") or 0) / 1000)
+                    u = cu.get("utilization") if isinstance(cu.get("utilization"), dict) else {}
+                    rows = list(u.get("limits") or [])
+                    # older snapshots name the buckets instead of listing them
+                    for key, name in (("seven_day_opus", "Opus"), ("seven_day_sonnet", "Sonnet")):
+                        v = u.get(key)
+                        if isinstance(v, dict) and v.get("utilization") is not None:
+                            rows.append({"kind": "weekly_scoped", "percent": v["utilization"],
+                                         "resets_at": v.get("resets_at"), "scope": {"model": {"display_name": name}}})
+                    self._mw_rows = rows
+            except Exception:
+                self._mw_mtime, self._mw_rows, self._mw_at = None, [], 0
+        if not self._mw_rows or not self._mw_at or now - self._mw_at > RATE_LIMIT_MAX_AGE:
+            return []
+        return model_week_rows(None, self._mw_rows, now, self._mw_at - self._mw_at % 60)
+
+
+def usage_endpoint_enabled() -> bool:
+    """settings.json {"usage_endpoint": false} turns the endpoint off (default on; it is what /usage itself does)."""
+    try:
+        from ..hostos import settings_get
+        return bool(settings_get("usage_endpoint", True))
+    except Exception:
+        return True
+
+
+def read_oauth_token(now: float) -> str | None:
+    """Claude Code's claude.ai OAuth access token, or None when there is none / it has expired (Claude Code
+    refreshes it on its own use; we never touch the refresh token)."""
+    doc = None
+    try:
+        with open(CREDENTIALS_FILE, encoding="utf-8") as f:
+            doc = json.load(f)
+    except Exception:
+        doc = None
+    if doc is None and sys.platform == "darwin":
+        try:
+            r = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+                               capture_output=True, text=True, timeout=5)
+            if r.returncode == 0 and r.stdout.strip():
+                doc = json.loads(r.stdout.strip())
+        except Exception:
+            doc = None
+    o = (doc or {}).get("claudeAiOauth") if isinstance(doc, dict) else None
+    if not isinstance(o, dict):
+        return None
+    tok = o.get("accessToken")
+    exp = o.get("expiresAt") or 0
+    if not isinstance(tok, str) or not tok:
+        return None
+    if exp and float(exp) / 1000 < now + 60:     # ms epoch; leave a minute of slack
+        return None
+    return tok
+
+
+class UsageEndpoint:
+    """Polls the claude.ai usage endpoint in a background thread, at most once per USAGE_POLL_S."""
+
+    def __init__(self, enabled: bool = True):
+        self.enabled = enabled
+        self.next_at = 0.0
+        self.thread: threading.Thread | None = None
+        self.lock = threading.Lock()
+        self.at = 0                 # epoch s of the last successful answer
+        self.data: dict = {}        # that answer (five_hour, seven_day, limits, ...)
+        self.error = ""             # last failure, for the log / status
+        self._warned_token = False
+
+    def poll(self, now: float) -> None:
+        if not self.enabled or now < self.next_at or (self.thread and self.thread.is_alive()):
+            return
+        self.next_at = now + USAGE_POLL_S       # fixed cadence whatever happens below
+        tok = read_oauth_token(now)
+        if not tok:
+            if not self._warned_token:
+                log.info("usage endpoint: no valid claude.ai OAuth token (not a claude.ai login?); will look again")
+                self._warned_token = True
+            return
+        self._warned_token = False
+        self.thread = threading.Thread(target=self._fetch, args=(tok,), name="usage-endpoint", daemon=True)
+        self.thread.start()
+
+    def _fetch(self, tok: str) -> None:
+        req = urllib.request.Request(USAGE_ENDPOINT, headers={
+            "Authorization": "Bearer " + tok, "anthropic-beta": "oauth-2025-04-20",
+            "Accept": "application/json", "User-Agent": "claudius-maximus"})
+        try:
+            with urllib.request.urlopen(req, timeout=USAGE_TIMEOUT_S) as r:
+                doc = json.loads(r.read().decode("utf-8", "replace"))
+            if not isinstance(doc, dict):
+                raise ValueError("not a JSON object")
+            with self.lock:
+                self.data, self.at, self.error = doc, int(time.time()), ""
+            log.info("usage endpoint: ok (5h %s%%, 7d %s%%, %d per-model rows)",
+                     (doc.get("five_hour") or {}).get("utilization"), (doc.get("seven_day") or {}).get("utilization"),
+                     sum(1 for r in doc.get("limits") or [] if isinstance(r, dict) and r.get("kind") == "weekly_scoped"))
+        except urllib.error.HTTPError as e:
+            self._fail(f"HTTP {e.code}")
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            self._fail(str(e)[:120])
+
+    def _fail(self, why: str) -> None:
+        with self.lock:
+            first = self.error != why
+            self.error = why
+        (log.warning if first else log.debug)("usage endpoint: %s (next try in %d min)", why, USAGE_POLL_S // 60)
+
+    def windows(self, now: int) -> dict:
+        """five_hour / seven_day {pct, resets_at, at} and seven_day_models from the last answer (<= RATE_LIMIT_MAX_AGE)."""
+        with self.lock:
+            data, at = self.data, self.at
+        if not data or not at or now - at > RATE_LIMIT_MAX_AGE:
+            return {}
+        out = {}
+        for key in ("five_hour", "seven_day"):
+            v = data.get(key)
+            if not isinstance(v, dict) or v.get("utilization") is None:
+                continue
+            ra = parse_ts(v.get("resets_at") or 0)
+            o = {"pct": 0 if (ra and ra < now) else int(round(float(v["utilization"]))), "at": at}
+            if ra and ra >= now:
+                o["resets_at"] = ra
+            out[key] = o
+        mw = model_week_rows(None, data.get("limits"), now, at)
+        if mw:
+            out["seven_day_models"] = mw
+        return out
+
+
+def model_week_rows(scoped, limits, now: int, at: int) -> list:
+    """Normalise per-model weekly windows to [{name, pct, resets_at?, at}], preferred model first.
+    `scoped`: Claude Code's /usage shape [{display_name, utilization, resets_at}]; `limits`: the usage endpoint's
+    raw rows [{kind: "weekly_scoped", percent, resets_at, scope: {model: {display_name}}}]. A window whose
+    resets_at has passed is dropped (the value belongs to the previous week; the current one is unknown)."""
+    out: dict[str, dict] = {}
+    rows = []
+    for r in scoped or []:
+        if isinstance(r, dict):
+            rows.append((r.get("display_name"), r.get("utilization"), r.get("resets_at")))
+    for r in limits or []:
+        if isinstance(r, dict) and r.get("kind") == "weekly_scoped":
+            model = ((r.get("scope") or {}).get("model") or {}) if isinstance(r.get("scope"), dict) else {}
+            rows.append((model.get("display_name"), r.get("percent", r.get("utilization")), r.get("resets_at")))
+    for name, pct, ra in rows:
+        if not isinstance(name, str) or not name.strip() or pct is None:
+            continue
+        try:
+            pct = int(round(float(pct)))
+        except (TypeError, ValueError):
+            continue
+        ra = parse_ts(ra) if ra else 0
+        if ra and ra < now:
+            continue
+        name = name.strip()
+        o = {"name": name, "pct": max(0, pct), "at": at}
+        if ra:
+            o["resets_at"] = ra
+        out.setdefault(name.lower(), o)
+
+    def rank(k: str):
+        for i, pref in enumerate(MODEL_WEEK_PREFERRED):
+            if pref in k:
+                return (i, k)
+        return (len(MODEL_WEEK_PREFERRED), k)
+    return [out[k] for k in sorted(out, key=rank)]
 
 if __name__ == "__main__":      # quick check: python -m companion.providers.usage
     t0 = time.time()

@@ -112,6 +112,13 @@ The 5-hour and weekly plan gauges need a claude.ai Pro or Max login. Claude Code
 line, so the app installs a tiny statusLine wrapper that records them and then runs your own statusLine command,
 if you had one. They appear after the first reply in a session.
 
+Per-model weekly limits (the "Fable" week, for instance) never reach the status line, so the daemon also asks the
+claude.ai usage endpoint that Claude Code's own `/usage` dialog calls, once every 15 minutes, with the login token
+Claude Code keeps in `~/.claude/.credentials.json` (the Keychain on macOS). That row shows up under 5H and 7D on
+the home screen. The token is read, never stored or refreshed; to turn this off, put `{"usage_endpoint": false}`
+in `~/.claudius-maximus/settings.json` and the row falls back to the snapshot Claude Code caches when you open
+`/usage` (shown dimmed once it is more than 12 hours old).
+
 ## Uninstall
 
 | OS | |
@@ -139,7 +146,9 @@ are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). The wire protocol is in [PROT
 ## Privacy
 
 Your `~/.claude` data is only read, never modified, except for the hook and statusLine entries merged into
-`settings.json` at install time. The only destination for that data is the device at the end of your USB cable.
+`settings.json` at install time. The only destinations for that data are the device at the end of your USB cable
+and, for the plan-limit poll described above, Anthropic's own usage endpoint (your login token goes nowhere else;
+see "Plan limits" to turn that poll off).
 
 ---
 
