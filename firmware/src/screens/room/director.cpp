@@ -51,27 +51,27 @@ struct FidDef { const char *name; int len; uint16_t mask; int weight; };
 #define M(t) (1u << (t))
 static const uint16_t AWAKE = M(TASK_CODE) | M(TASK_WEB) | M(TASK_REVIEW) | M(TASK_READ) | M(TASK_RUN) | M(TASK_SEARCH) | M(TASK_THINK) |
                              M(TASK_DELEGATE) | M(TASK_PLAN) | M(TASK_IDLE);
-static const uint16_t DESKT = M(TASK_CODE) | M(TASK_WEB) | M(TASK_REVIEW);
-static const uint16_t FRONTT = M(TASK_READ) | M(TASK_THINK) | M(TASK_IDLE) | M(TASK_DELEGATE) | M(TASK_SEARCH) | M(TASK_WAIT);
+static const uint16_t DESKT = M(TASK_CODE) | M(TASK_WEB) | M(TASK_REVIEW) | M(TASK_DELEGATE);
+static const uint16_t FRONTT = M(TASK_READ) | M(TASK_THINK) | M(TASK_IDLE) | M(TASK_SEARCH) | M(TASK_WAIT);
 static const FidDef FID[FID_COUNT] = {
     {"glance", S(1.0f), AWAKE, 8},
     {"stretch", S(1.4f), AWAKE, 5},
     {"scratch", S(1.2f), AWAKE, 5},
     {"sip", S(1.8f), DESKT, 7},
     {"look", S(1.6f), FRONTT, 6},
-    {"pause", S(2.2f), M(TASK_CODE) | M(TASK_WEB) | M(TASK_RUN), 5},
+    {"pause", S(2.2f), M(TASK_CODE) | M(TASK_WEB) | M(TASK_DELEGATE) | M(TASK_RUN), 5},
     {"nod", S(0.9f), M(TASK_READ) | M(TASK_REVIEW) | M(TASK_PLAN) | M(TASK_RUN), 5},
-    {"hop", S(0.7f), M(TASK_IDLE) | M(TASK_THINK) | M(TASK_DELEGATE), 3},
+    {"hop", S(0.7f), M(TASK_IDLE) | M(TASK_THINK), 3},
     {"tapfoot", S(1.4f), M(TASK_WAIT) | M(TASK_IDLE) | M(TASK_RUN), 4},
     {"shrug", S(1.2f), M(TASK_THINK) | M(TASK_SEARCH), 4},
     {"spin", S(0.7f), M(TASK_IDLE) | M(TASK_THINK), 2},
-    {"wave", S(1.4f), M(TASK_IDLE) | M(TASK_WAIT) | M(TASK_DELEGATE), 3},
+    {"wave", S(1.4f), M(TASK_IDLE) | M(TASK_WAIT), 3},
     {"yawn", S(1.5f), M(TASK_IDLE), 2},
     {"doze", S(1.0f), 0, 0},
     {"water", S(3.0f), M(TASK_IDLE) | M(TASK_THINK), 3},
     {"window", S(5.0f), M(TASK_IDLE) | M(TASK_THINK) | M(TASK_READ), 3},
     {"coffee", S(2.0f), M(TASK_READ) | M(TASK_THINK) | M(TASK_IDLE) | M(TASK_RUN) | M(TASK_PLAN), 3},
-    {"book", S(3.2f), M(TASK_CODE) | M(TASK_WEB) | M(TASK_RUN) | M(TASK_PLAN) | M(TASK_REVIEW), 3},
+    {"book", S(3.2f), M(TASK_CODE) | M(TASK_WEB) | M(TASK_DELEGATE) | M(TASK_RUN) | M(TASK_PLAN) | M(TASK_REVIEW), 3},
     {"board", S(3.0f), M(TASK_CODE) | M(TASK_WEB) | M(TASK_RUN) | M(TASK_THINK) | M(TASK_READ) | M(TASK_IDLE), 3},
     {"relocate", S(0.5f), M(TASK_READ) | M(TASK_THINK), 3},
 };
@@ -157,11 +157,12 @@ void Director::chooseTask() {
 
 Station Director::stationFor(Task t) {
   switch (t) {
-    case TASK_CODE: case TASK_WEB: case TASK_REVIEW: return ST_DESK;
+    // delegating is coding at the desk while the helpers work (the dash from Clawd to each helper is gone)
+    case TASK_CODE: case TASK_WEB: case TASK_REVIEW: case TASK_DELEGATE: return ST_DESK;
     case TASK_READ: return ST_SHELF;
     case TASK_RUN: return ST_RACK;
     case TASK_SEARCH: return ST_UNDERDESK;
-    case TASK_THINK: case TASK_DELEGATE: return ST_RUG;
+    case TASK_THINK: return ST_RUG;
     case TASK_PLAN: return ST_BOARD;
     case TASK_WAIT: return ST_DOOR;
     case TASK_IDLE: { static const Station IDLE_SPOTS[] = {ST_RUG, ST_BED, ST_WINDOW, ST_BOARD, ST_DOOR}; return IDLE_SPOTS[rng.range(0, 4)]; }
@@ -354,7 +355,7 @@ void Director::stepTaskLoop() {
   if (walking) return;
   atT++;
   switch (task) {
-    case TASK_CODE: case TASK_WEB:
+    case TASK_CODE: case TASK_WEB: case TASK_DELEGATE:
       if (fid == FID_NONE && reactId < 0) {
         if (typeBurst > 0) { typeBurst--; desk.t++; if (typeBurst == 0) typePause = rng.range(S(0.5f), S(2.5f)); }
         else if (typePause > 0) { typePause--; if (typePause == 0) typeBurst = rng.range(S(1.5f), S(6.5f)); }
@@ -385,7 +386,7 @@ void Director::stepTaskLoop() {
         }
       }
       break;
-    case TASK_THINK: case TASK_DELEGATE:
+    case TASK_THINK:
       if (++dotsT >= 8) { dotsT = 0; thinkDots = (thinkDots + 1) % 4; }
       break;
     case TASK_IDLE:
@@ -506,7 +507,7 @@ void Director::stepAmbient() {
   // lamp & monitor
   bool awake = task != TASK_SLEEP && task != TASK_OFFLINE;
   lampOn = awake && (tod < 7.5f || tod >= 18.f || rain);
-  bool deskUse = atDesk() && (task == TASK_CODE || task == TASK_WEB || task == TASK_REVIEW || fid == ERR_COFFEE);
+  bool deskUse = atDesk() && (task == TASK_CODE || task == TASK_WEB || task == TASK_REVIEW || task == TASK_DELEGATE || fid == ERR_COFFEE);
   desk.lit = atDesk();
   if (deskUse) saverT = 0; else saverT++;
   if (task == TASK_OFFLINE) desk.screen = SCREEN_PLUG;
@@ -617,7 +618,7 @@ void Director::composePose(ClawdPose &p, int &emote, int &jump, int &shake) cons
   bool settled = !walking && atT > 4;
   if (!walking) {
     switch (task) {
-      case TASK_CODE: case TASK_WEB:
+      case TASK_CODE: case TASK_WEB: case TASK_DELEGATE:
         if (station == ST_DESK) { p.arms = typeBurst > 0 ? (((tick / 3) & 1) ? ARMS_TYPE_A : ARMS_TYPE_B) : ARMS_DOWN; }
         if (settled && station == ST_DESK) { emote = task == TASK_WEB ? ICO_WEB : ICO_CODE; }
         break;
@@ -633,7 +634,6 @@ void Director::composePose(ClawdPose &p, int &emote, int &jump, int &shake) cons
         else p.legPhase = ((tick / 4) & 1) ? 1 : 0;
         if (settled) { emote = ICO_LOOK; }
         break;
-      case TASK_DELEGATE: if (shownHelpers) p.arms = ((tick / 6) & 1) ? ARMS_WAVE_A : ARMS_WAVE_B; break;
       case TASK_PLAN:
         if (station == ST_BOARD) p.arms = ((tick / 2) & 1) ? ARMS_UP_R : ARMS_UP;
         if (settled && station == ST_BOARD) { emote = ICO_PEN; }
@@ -968,21 +968,6 @@ void Director::drawFx(Canvas &c) {
     int sh = imin(imax(sleepShift, -1), 1);
     c.blit(0, 0, *(task == TASK_OFFLINE ? spr::clawd_bed_grey : spr::clawd_bed)[(sh + 1) * 2 + (sleepEyes > 0 ? 1 : 0)]);
     if (sleepEyes == 0) c.blit(24 + sleepShift, 56, *spr::zzz[(tick / 6) % spr::zzz_n]);
-  }
-  if (task == TASK_DELEGATE && !walking && reactId < 0) {
-    // The dash runs from Clawd to each working helper, so its geometry is code; each dot is the first dot of the
-    // dash sprite (its top-left pixel: the line runs down-right from it), so its colour comes from the sheet.
-    const Sprite &dot = *spr::dash[0];
-    for (int i = 0; i < MAX_MINIS; i++) {
-      if (minis[i].state != 2) continue;
-      int x0 = cx + 9, y0 = cy + 2, x1 = (int)minis[i].x + 5, y1 = (int)minis[i].y - 4;
-      const int steps = 16;
-      for (int k = 2; k < steps - 1; k++) {
-        if ((k + (int)tick / 4) % 3 == 0) continue;
-        int x = x0 + (x1 - x0) * k / steps, y = y0 + (y1 - y0) * k / steps;
-        c.blitRect(x + dot.ax, y + dot.ay, dot, false, x, y, x, y);
-      }
-    }
   }
   if (task == TASK_WAIT) c.blit(0, 0, *spr::alarm_ring[alarmPhase & 1]);
 }
