@@ -301,6 +301,8 @@ def merge_hooks(state: dict, hooks) -> None:
                 if ra and ra < now:
                     continue
                 usage[key] = {"pct": int(round(float(w["used_percentage"]))), "resets_at": ra}
+            if "five_hour" not in usage and "seven_day" in usage and rl.get("five_hour") is None:
+                usage["five_hour"] = {"off": 1}      # the plan has no 5-hour window (see providers/usage.py)
 
 
 # ---------------------------------------------------------------------------------------------

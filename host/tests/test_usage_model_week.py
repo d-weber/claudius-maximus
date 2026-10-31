@@ -152,6 +152,10 @@ class DemoTests(unittest.TestCase):
         d.poll(time.time())
         d.contribute(st)
         self.assertEqual(st["usage"]["seven_day_models"][0]["name"], "Fable")
+        self.assertEqual(st["usage"]["five_hour"]["pct"], 42)
+        st = {}
+        DemoProvider(no_five_hour=True).contribute(st)
+        self.assertEqual(st["usage"]["five_hour"]["off"], 1)
 
 
 if __name__ == "__main__":

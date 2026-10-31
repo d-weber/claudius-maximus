@@ -159,6 +159,46 @@ class EndpointTests(unittest.TestCase):
             self.assertEqual(st["usage"]["five_hour"]["pct"], 3)
             self.assertEqual(st["usage"]["seven_day"]["pct"], 28)
 
+    def test_plan_without_five_hour_window(self):
+        # the endpoint answers five_hour: null and lists no "session" row; the status line omits the key.
+        # Both must come out as an explicit {off: 1}: to the device an absent key means "unknown".
+        self.body["five_hour"] = None
+        self.body["limits"] = [r for r in self.body["limits"] if r["kind"] != "session"]
+        ep = usage_mod.UsageEndpoint()
+        self.run_poll(ep, self.now)
+        w = ep.windows(self.now)
+        self.assertEqual(w["five_hour"], {"off": 1, "at": ep.at})
+        self.assertEqual(w["seven_day"]["pct"], 28)
+        self.assertEqual(w["seven_day_models"][0]["name"], "Fable")
+
+        tee = os.path.join(self.d, "statusline.json")
+        with open(tee, "w", encoding="utf-8") as f:
+            json.dump({"captured_at": self.now, "rate_limits_at": self.now, "rate_limits": {
+                "seven_day": {"used_percentage": 30, "resets_at": self.now + 86400}}}, f)
+        up = usage_mod.UsageProvider(projects_glob=os.path.join(self.d, "none", "*.jsonl"))
+        with mock.patch.object(usage_mod, "RATE_LIMIT_FILES", [tee]), \
+                mock.patch.object(usage_mod, "CLAUDE_CONFIG_JSON", os.path.join(self.d, "none.json")):
+            st: dict = {}
+            up.contribute(st)
+            self.assertEqual(st["usage"]["five_hour"], {"off": 1, "at": self.now - self.now % 60})
+            self.assertEqual(st["usage"]["seven_day"]["pct"], 30)
+
+    def test_five_hour_unknown_stays_absent(self):
+        # a session row without the five_hour object (or an answer with neither window) is not "off"
+        self.body["five_hour"] = None
+        ep = usage_mod.UsageEndpoint()
+        self.run_poll(ep, self.now)
+        self.assertNotIn("five_hour", ep.windows(self.now))
+        tee = os.path.join(self.d, "statusline.json")
+        with open(tee, "w", encoding="utf-8") as f:
+            json.dump({"captured_at": self.now, "rate_limits_at": self.now, "rate_limits": {}}, f)
+        up = usage_mod.UsageProvider(projects_glob=os.path.join(self.d, "none", "*.jsonl"))
+        with mock.patch.object(usage_mod, "RATE_LIMIT_FILES", [tee]), \
+                mock.patch.object(usage_mod, "CLAUDE_CONFIG_JSON", os.path.join(self.d, "none.json")):
+            st: dict = {}
+            up.contribute(st)
+            self.assertNotIn("five_hour", st["usage"])
+
     def test_token_never_logged(self):
         ep = usage_mod.UsageEndpoint()
         self.body = urllib.error.HTTPError(usage_mod.USAGE_ENDPOINT, 403, "forbidden", {}, None)

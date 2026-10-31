@@ -28,7 +28,10 @@ Cost = estimate from public API list prices (PRICES), incl. 5m/1h cache-write mu
 
 `usage` object produced (all keys optional on the device side):
   five_hour / seven_day   {pct, resets_at, at}  real plan limits from the statusLine tee (claude.ai Pro/Max only);
-                 `at` = when Claude Code last reported them; pct=0 & no resets_at once the window rolled over
+                 `at` = when Claude Code last reported them; pct=0 & no resets_at once the window rolled over.
+                 five_hour is {off: 1, at} on a plan without a 5-hour window (some subscriptions since late
+                 October 2026): the source then carries a weekly window but no five_hour (the status line omits
+                 the key, the endpoint answers null and lists no "session" row). Absent still means unknown.
   spend        {pct, resets_at, used_usd, limit_usd, period}  optional spend limit (same source)
   seven_day_models  [{name, pct, resets_at, at}]  per-model weekly windows (e.g. name "Fable"), preferred model
                  first (fable, opus, sonnet, then by name). Freshest source wins: the usage endpoint (<= 15 min
@@ -472,6 +475,10 @@ class UsageProvider(Provider):
                             o[k] = round(v[k], 2) if isinstance(v[k], float) else v[k]
                     key = "spend"
                 out[key] = o
+            # the status line carries seven_day alone on a plan without a 5-hour window: say so, the device
+            # otherwise cannot tell "no such limit" from "not known yet"
+            if "seven_day" in out and rl.get("five_hour") is None:
+                out["five_hour"] = {"off": 1, "at": seen - seen % 60}
             # per-model weekly windows, should Claude Code forward them to the status line one day: either the
             # /usage shape (`model_scoped`: [{display_name, utilization, resets_at}]) or the raw server `limits[]`
             mw = model_week_rows(rl.get("model_scoped"), rl.get("limits"), now, seen - seen % 60)
@@ -614,6 +621,10 @@ class UsageEndpoint:
             if ra and ra >= now:
                 o["resets_at"] = ra
             out[key] = o
+        # a plan without a 5-hour window: five_hour is null and limits[] has no "session" row
+        if "seven_day" in out and data.get("five_hour") is None and \
+                not any(isinstance(r, dict) and r.get("kind") == "session" for r in data.get("limits") or []):
+            out["five_hour"] = {"off": 1, "at": at}
         mw = model_week_rows(None, data.get("limits"), now, at)
         if mw:
             out["seven_day_models"] = mw
