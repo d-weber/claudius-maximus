@@ -33,8 +33,9 @@ colours are palette indices, so the art is lit like the rest of the room.
   the position (Clawd's x, y, the emote beside or above him) and the painter's order (by feet y);
 - light, not art: `drawSunPatch` (sun and moon patch), `drawLampPool`, `drawDoorSpot`, `drawUnderDeskBeam` and
   `Canvas::darken` (the shadows under Clawd and the minis) recolour the pixels already on the canvas;
-- the geometry of things that join two moving points: the delegation dash (dots along the line from Clawd to each
-  helper, each dot the first pixel of the `dash` sprite) and the happy-reaction ring of sparkles;
+- the geometry of things that join moving points: the happy-reaction ring of sparkles (the delegation dash that
+  once ran from Clawd to each helper is gone: delegating is coding at the desk while the helpers work; the `dash`
+  sprite stays in the sheet, unused);
 - the tint swap (`Canvas::blit` remap): a grey / violet Clawd in a pose `clawd_tint` does not have is the coral
   sprite with C / CS / CH swapped.
 
