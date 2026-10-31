@@ -58,7 +58,8 @@ docs/                       DESKTOP.md (desktop app architecture), PERF.md (meas
   nothing if the daemon is down. Most hooks run `async`; the end-of-turn ones (Stop, StopFailure, SessionEnd,
   SubagentStop) run synchronously, about 30 ms each.
 - **statusLine wrapper** (`"<app>" statusline`, or `host/hooks/cm_statusline.py`): saves the plan-limit data
-  Claude Code gives the status line (`rate_limits.five_hour/seven_day`, Pro/Max only) to
+  Claude Code gives the status line (`rate_limits.five_hour/seven_day`, Pro/Max only; `five_hour` is absent on
+  plans without a 5-hour window, which the daemon reports as `five_hour: {off: 1}`) to
   `~/.claudius-maximus/statusline.json`, then runs your previous statusLine command.
 - **Usage endpoint poll** (`providers/usage.py`, `UsageEndpoint`): the per-model weekly windows (Fable) are not in
   the status line, so the daemon GETs the claude.ai usage endpoint Claude Code's `/usage` calls, with the OAuth

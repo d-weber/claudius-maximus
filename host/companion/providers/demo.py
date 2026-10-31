@@ -34,10 +34,12 @@ TODOS = ["Read codebase", "Write tests", "Implement feature", "Fix lint", "Run t
 
 
 class DemoProvider(Provider):
-    def __init__(self, n_sessions: int = 4, seed: int = 7, speed: float = 1.0, calm: bool = False):
+    def __init__(self, n_sessions: int = 4, seed: int = 7, speed: float = 1.0, calm: bool = False,
+                 no_five_hour: bool = False):
         self.rng = random.Random(seed)
         self.speed = speed
         self.calm = calm  # never put a session in the waiting state (no "needs you" alerts / edge glow)
+        self.no_five_hour = no_five_hour  # a plan without a 5-hour window (five_hour {off: 1})
         self.events: list[dict] = []
         now = int(time.time())
         self.sessions = []
@@ -154,7 +156,7 @@ class DemoProvider(Provider):
             "tools_today": self.tools_today, "prompts_today": self.prompts_today,
         }
         state["usage"] = {
-            "five_hour": {"pct": 42, "resets_at": now + 2 * 3600 + 900},
+            "five_hour": {"off": 1, "at": now} if self.no_five_hour else {"pct": 42, "resets_at": now + 2 * 3600 + 900},
             "seven_day": {"pct": 18, "resets_at": now + 4 * 86400},
             "seven_day_models": [{"name": "Fable", "pct": 61, "resets_at": now + 4 * 86400, "at": int(now)}],
             "tpm": self.tpm, "hourly": self.hourly, "daily": self.daily,

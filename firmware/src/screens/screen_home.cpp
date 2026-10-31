@@ -1,7 +1,7 @@
 // HOME — Clawd's Studio (home_face.cpp: the top-down pixel-art room, 480 x 424) plus a HUD band:
 //   room:  Clawd at the station of whatever the agents are doing, the room living on the real clock
 //   HUD:   pixel-art band (home_hud.cpp): clock + date | the 5-hour and weekly plan limits, plus the per-model
-//          weekly window (e.g. Fable) when the host knows it (tap -> usage)
+//          weekly window (e.g. Fable) when the host knows it (tap -> usage); no 5H bar on a plan without that window
 #include "screens.h"
 #include "../ui/theme.h"
 #include "../core/model.h"
@@ -151,20 +151,20 @@ static void refresh(JsonObjectConst s) {
   home_face_set_plan(todo_done, todo_total);
   home_face_set_mood(m, energy, host ? minis : 0, cat);
 
-  // plan limits: 5H, 7D and, when the host reports one, the first per-model weekly window (usage.seven_day_models,
-  // e.g. Fable). That row reads as stale (grey) when its observation is older than 12 h: the host may only have
-  // Claude Code's cached snapshot of it.
-  JsonObjectConst mw = s["usage"]["seven_day_models"][0];
+  // plan limits: 5H (unless the plan has no 5-hour window: usage.five_hour.off), 7D and, when the host reports
+  // one, the first per-model weekly window (usage.seven_day_models, e.g. Fable). That row reads as stale (grey)
+  // when its observation is older than 12 h: the host may only have Claude Code's cached snapshot of it.
+  JsonObjectConst fh = s["usage"]["five_hour"], mw = s["usage"]["seven_day_models"][0];
   int mw_pct = mw["pct"] | -1;
   static char mw_cap[8];
-  HudBar bars[3] = {{"5H", s["usage"]["five_hour"]["pct"] | -1, false},
-                    {"7D", s["usage"]["seven_day"]["pct"] | -1, false},
-                    {mw_cap, mw_pct, false}};
-  int rows = host && mw_pct >= 0 ? 3 : 2;
-  if (rows == 3) {
+  HudBar bars[3];
+  int rows = 0;
+  if (!(fh["off"] | 0)) bars[rows++] = {"5H", fh["pct"] | -1, false};
+  bars[rows++] = {"7D", s["usage"]["seven_day"]["pct"] | -1, false};
+  if (host && mw_pct >= 0) {
     snprintf(mw_cap, sizeof mw_cap, "%.2s", mw["name"] | "MO");   // two letters like 5H / 7D: FA, OP, SO
     uint32_t now = model_now(), at = mw["at"] | 0u;
-    bars[2].stale = now && at && now > at + 12 * 3600;
+    bars[rows++] = {mw_cap, mw_pct, now && at && now > at + 12 * 3600};
   }
   bool any = false;
   for (int i = 0; i < rows; i++) any = any || bars[i].pct >= 0;
@@ -244,7 +244,9 @@ static void face_tapped() {
     int help = s["totals"]["subagents_active"] | 0;
     if (help) snprintf(lines[n++], 112, "%d little helper%s out exploring.", help, help > 1 ? "s" : "");
     int pct = s["usage"]["five_hour"]["pct"] | -1;
+    JsonObjectConst mw = s["usage"]["seven_day_models"][0];
     if (pct >= 0) snprintf(lines[n++], 112, "%d%% of your 5-hour budget used.", pct);
+    else if (!mw["pct"].isNull()) snprintf(lines[n++], 112, "%d%% of your %s week used.", mw["pct"] | 0, mw["name"] | "model");
     int tools = s["totals"]["tools_today"] | 0;
     if (tools) snprintf(lines[n++], 112, "%d tool calls today. Busy busy!", tools);
     int streak = s["usage"]["streak_days"] | 0;

@@ -13,6 +13,7 @@ it takes an exclusive lock (.devlock). Builds use a per-developer build dir so t
       --seconds N               seconds of demo data to stream before the shot (default 4)
       --nodemo                  don't stream demo data
       --calm                    demo sessions never wait on you (no "needs you" glow; for docs shots)
+      --no5h                    demo plan without a 5-hour window (the Fable week takes its place)
       --settle N                freeze the demo for N s before the shot so toasts fade (docs shots: 4)
   perf [--screen ID] [--seconds N] [--nodemo] [--detail] [--cycle]
                                 measure fps / frame time / cpu% / heap on a screen (locked)
@@ -171,10 +172,10 @@ def open_link() -> DeviceLink:
 
 
 def stream_demo(link: DeviceLink, seconds: float, demo: DemoProvider | None = None, calm: bool = False,
-                freeze: bool = False) -> DemoProvider:
+                freeze: bool = False, no5h: bool = False) -> DemoProvider:
     """Stream demo data for `seconds`. With freeze=True the demo stops evolving (no new events: toasts fade out)
     but the snapshot keeps going out so the device still sees the host."""
-    demo = demo or DemoProvider(speed=3.0, calm=calm)
+    demo = demo or DemoProvider(speed=3.0, calm=calm, no_five_hour=no5h)
     if not hasattr(demo, "_extras"):
         demo._extras = extra_providers()
     t_end = time.time() + seconds
@@ -217,7 +218,7 @@ def cmd_shot(a) -> int:
         link = open_link()
         demo = None
         if not a.nodemo:
-            demo = stream_demo(link, 0.5, calm=getattr(a, "calm", False))
+            demo = stream_demo(link, 0.5, calm=getattr(a, "calm", False), no5h=getattr(a, "no5h", False))
         if a.screen:
             link.send({"t": "cmd", "nav": a.screen})
         if a.detail and demo:
@@ -370,6 +371,7 @@ def main() -> int:
     s.add_argument("--seconds", type=float, default=4)
     s.add_argument("--nodemo", action="store_true")
     s.add_argument("--calm", action="store_true")
+    s.add_argument("--no5h", action="store_true")
     s.add_argument("--settle", type=float, default=0, help="seconds of frozen demo before the shot (toasts fade)")
     s.set_defaults(f=cmd_shot)
     pf = sub.add_parser("perf")

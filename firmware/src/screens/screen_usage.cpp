@@ -3,9 +3,9 @@
 //  +--------------------------------------------+
 //  | USAGE                         ^ 6-day streak|
 //  |   .-------.          .-------.              |
-//  |  / 5-HOUR  \        / WEEKLY  \             |   two big 270deg rings: plan limits when known,
-//  | |   42%     |      |   18%     |            |   otherwise "this 5h block" (estimate) and cache hit
-//  |  \ 2h 15m  /        \ 4d 2h   /             |
+//  |  / 5-HOUR  \        / WEEKLY  \             |   two big 270deg rings: plan limits when known (the Fable
+//  | |   42%     |      |   18%     |            |   week on a plan without a 5-hour window), otherwise "this
+//  |  \ 2h 15m  /        \ 4d 2h   /             |   5h block" (estimate) and cache hit
 //  |  $10.92      1.2M        $39                |   today cost / today tokens / 7-day cost
 //  |  [opus=========|fable==|h]  legend          |   model mix (14 days)
 //  | +----------------------------------------+  |
@@ -21,6 +21,7 @@
 #include <time.h>
 #include <stdarg.h>
 #include <string.h>
+#include <ctype.h>
 
 #define C_FABLE   lv_color_hex(0xC9A0DC)
 #define C_SONNET  lv_color_hex(0x6A9BCC)
@@ -428,8 +429,9 @@ static void update(JsonObjectConst s) {
   else if (streak == 1) set_txt(streak_lbl, LV_SYMBOL_CHARGE " active today");
   else set_txt(streak_lbl, "");
 
-  // ---- left ring: 5-hour plan limit, else estimated 5h block, else today's pace
-  JsonObjectConst fh = u["five_hour"], win = u["window"];
+  // ---- left ring: 5-hour plan limit; on a plan without one (five_hour.off) the per-model weekly window
+  // (Fable) the HUD also shows; else estimated 5h block, else today's pace
+  JsonObjectConst fh = u["five_hour"], win = u["window"], mw = u["seven_day_models"][0];
   if (!fh.isNull() && !fh["pct"].isNull()) {
     int pct = fh["pct"] | 0;
     uint32_t ra = fh["resets_at"] | 0;
@@ -437,6 +439,18 @@ static void update(JsonObjectConst s) {
     if (ra > now) { fmt_dur(c, sizeof c, ra - now); snprintf(b, sizeof b, LV_SYMBOL_REFRESH " %s", c); }
     else snprintf(b, sizeof b, "5h window");
     ring_set(rings[0], "5-HOUR LIMIT", a, b, pct * 10, limit_color(pct));
+  } else if ((fh["off"] | 0) && !mw["pct"].isNull()) {
+    int pct = mw["pct"] | 0;
+    uint32_t ra = mw["resets_at"] | 0, at = mw["at"] | 0u;
+    char title[24];
+    snprintf(title, sizeof title, "%.8s WEEKLY", mw["name"] | "MODEL");
+    for (char *p = title; *p; p++) *p = (char)toupper((unsigned char)*p);
+    snprintf(a, sizeof a, "%d%%", pct);
+    if (ra > now) { fmt_dur(c, sizeof c, ra - now); snprintf(b, sizeof b, LV_SYMBOL_REFRESH " %s", c); }
+    else snprintf(b, sizeof b, "7d window");
+    // grey when the host only has an old observation of it (same 12 h rule as the HUD)
+    bool stale = now && at && now > at + 12 * 3600;
+    ring_set(rings[0], title, a, b, pct * 10, stale ? C_DIM : limit_color(pct));
   } else if (!win.isNull()) {
     uint32_t ra = win["resets_at"] | 0;
     fmt_usd(a, sizeof a, win["cost"] | 0.0);

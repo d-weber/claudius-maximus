@@ -58,7 +58,8 @@ Firmware screens must read every field **defensively** (missing key ⇒ sensible
     "tokens_today": 4200000, "cost_today": 12.40, "tools_today": 312, "prompts_today": 14
   },
   "usage": {                   // see host/companion/providers/usage.py
-    "five_hour":  { "pct": 34, "resets_at": 1792080000 },  // omitted when unknown
+    "five_hour":  { "pct": 34, "resets_at": 1792080000 },  // omitted when unknown; {"off": 1} when the plan
+                               // has no 5-hour window (the device shows the per-model weekly window instead)
     "seven_day":  { "pct": 12, "resets_at": 1792500000 },
     "seven_day_models": [ { "name": "Fable", "pct": 61, "resets_at": 1792500000, "at": 1792080000 } ],
                                // per-model weekly windows, preferred model first; omitted when unknown
@@ -161,7 +162,9 @@ subagents also carry `cost`, `model`, `ctx_pct`. Event `tool_error` carries `err
 `tpm_now`; `burn` (USD last 60 min); `peak_hour`; `best_day {tokens,cost}`;
 `window {start,resets_at,tokens,cost,pct,est:1}` = ESTIMATED current 5-hour block (not a plan limit).
 `five_hour`/`seven_day` come from Claude Code's statusLine `rate_limits` (tee'd to ~/.claudius-maximus/statusline.json)
-and carry `at` (when observed). `seven_day_models` (per-model weekly windows, e.g. Fable) is not in the statusLine JSON:
+and carry `at` (when observed). Some plans have no 5-hour window (the status line omits `five_hour`, the usage endpoint
+answers `five_hour: null` with no `session` row in `limits[]`): the daemon then sends `five_hour: {off: 1, at}`, the usage
+screen puts the per-model weekly window in the 5-hour ring and the home HUD drops the 5H bar. `seven_day_models` (per-model weekly windows, e.g. Fable) is not in the statusLine JSON:
 the daemon polls the claude.ai usage endpoint every 15 minutes with Claude Code's own OAuth token (off with
 `{"usage_endpoint": false}` in ~/.claudius-maximus/settings.json), falling back to Claude Code's cached /usage snapshot
 in ~/.claude.json — the home HUD dims that row when `at` is older than 12 h. usage "tokens" = input + cache_write +
